@@ -1,0 +1,597 @@
+{
+ "formulae": [
+  {
+   "name": "cairo",
+   "full_name": "cairo",
+   "tap": "homebrew/core",
+   "homepage": "https://cairographics.org/",
+   "versions": {
+    "stable": "1.18.6",
+    "head": "HEAD",
+    "bottle": true
+   },
+   "urls": {
+    "stable": {
+     "url": "https://cairographics.org/releases/cairo-1.18.6.tar.xz"
+    }
+   },
+   "installed": [
+    {
+     "version": "1.18.4",
+     "installed_on_request": false
+    }
+   ],
+   "pinned": false,
+   "outdated": true,
+   "deprecated": false,
+   "deprecation_reason": null,
+   "disabled": false,
+   "disable_reason": null,
+   "versioned_formulae": []
+  },
+  {
+   "name": "ffmpeg",
+   "full_name": "ffmpeg",
+   "tap": "homebrew/core",
+   "homepage": "https://ffmpeg.org/",
+   "versions": {
+    "stable": "9.0.2",
+    "head": "HEAD",
+    "bottle": true
+   },
+   "urls": {
+    "stable": {
+     "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz"
+    }
+   },
+   "installed": [
+    {
+     "version": "9.0.2_1",
+     "installed_on_request": true
+    }
+   ],
+   "pinned": false,
+   "outdated": false,
+   "deprecated": false,
+   "deprecation_reason": null,
+   "disabled": false,
+   "disable_reason": null,
+   "versioned_formulae": [
+    "ffmpeg@8",
+    "ffmpeg@7",
+    "ffmpeg@6",
+    "ffmpeg@5",
+    "ffmpeg@4",
+    "ffmpeg@2.8"
+   ]
+  },
+  {
+   "name": "gh",
+   "full_name": "gh",
+   "tap": "homebrew/core",
+   "homepage": "https://cli.github.com/",
+   "versions": {
+    "stable": "2.103.1",
+    "head": "HEAD",
+    "bottle": true
+   },
+   "urls": {
+    "stable": {
+     "url": "https://github.com/cli/cli/archive/refs/tags/v2.103.1.tar.gz"
+    }
+   },
+   "installed": [
+    {
+     "version": "2.102.0",
+     "installed_on_request": true
+    }
+   ],
+   "pinned": false,
+   "outdated": true,
+   "deprecated": false,
+   "deprecation_reason": null,
+   "disabled": false,
+   "disable_reason": null,
+   "versioned_formulae": []
+  },
+  {
+   "name": "git",
+   "full_name": "git",
+   "tap": "homebrew/core",
+   "homepage": "https://git-scm.com",
+   "versions": {
+    "stable": "2.56.0",
+    "head": "HEAD",
+    "bottle": true
+   },
+   "urls": {
+    "stable": {
+     "url": "https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.56.0.tar.xz"
+    }
+   },
+   "installed": [
+    {
+     "version": "2.56.0_1",
+     "installed_on_request": true
+    }
+   ],
+   "pinned": false,
+   "outdated": false,
+   "deprecated": false,
+   "deprecation_reason": null,
+   "disabled": false,
+   "disable_reason": null,
+   "versioned_formulae": []
+  },
+  {
+   "name": "node",
+   "full_name": "node",
+   "tap": "homebrew/core",
+   "homepage": "https://nodejs.org/",
+   "versions": {
+    "stable": "26.12.1",
+    "head": "HEAD",
+    "bottle": true
+   },
+   "urls": {
+    "stable": {
+     "url": "https://nodejs.org/dist/v26.12.1/node-v26.12.1.tar.xz"
+    }
+   },
+   "installed": [
+    {
+     "version": "26.12.1",
+     "installed_on_request": true
+    }
+   ],
+   "pinned": false,
+   "outdated": false,
+   "deprecated": false,
+   "deprecation_reason": null,
+   "disabled": false,
+   "disable_reason": null,
+   "versioned_formulae": [
+    "node@24",
+    "node@22",
+    "node@20",
+    "node@18"
+   ]
+  },
+  {
+   "name": "nvm",
+   "full_name": "nvm",
+   "tap": "homebrew/core",
+   "homepage": "https://github.com/nvm-sh/nvm",
+   "versions": {
+    "stable": "0.40.8",
+    "head": "HEAD",
+    "bottle": true
+   },
+   "urls": {
+    "stable": {
+     "url": "https://github.com/nvm-sh/nvm/archive/refs/tags/v0.40.8.tar.gz"
+    }
+   },
+   "installed": [
+    {
+     "version": "0.40.3",
+     "installed_on_request": true
+    }
+   ],
+   "pinned": false,
+   "outdated": true,
+   "deprecated": false,
+   "deprecation_reason": null,
+   "disabled": false,
+   "disable_reason": null,
+   "versioned_formulae": []
+  },
+  {
+   "name": "openjdk@11",
+   "full_name": "openjdk@11",
+   "tap": "homebrew/core",
+   "homepage": "https://openjdk.org/",
+   "versions": {
+    "stable": "11.0.32.1",
+    "head": null,
+    "bottle": true
+   },
+   "urls": {
+    "stable": {
+     "url": "https://github.com/openjdk/jdk11u/archive/refs/tags/jdk-11.0.32.1-ga.tar.gz"
+    }
+   },
+   "installed": [
+    {
+     "version": "11.0.29",
+     "installed_on_request": true
+    }
+   ],
+   "pinned": false,
+   "outdated": true,
+   "deprecated": true,
+   "deprecation_reason": "unmaintained",
+   "disabled": false,
+   "disable_reason": null,
+   "versioned_formulae": [
+    "openjdk@25",
+    "openjdk@21",
+    "openjdk@17",
+    "openjdk@8"
+   ]
+  },
+  {
+   "name": "openssl@3",
+   "full_name": "openssl@3",
+   "tap": "homebrew/core",
+   "homepage": "https://openssl-library.org",
+   "versions": {
+    "stable": "3.5.9",
+    "head": null,
+    "bottle": true
+   },
+   "urls": {
+    "stable": {
+     "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz"
+    }
+   },
+   "installed": [
+    {
+     "version": "3.6.0",
+     "installed_on_request": false
+    }
+   ],
+   "pinned": false,
+   "outdated": true,
+   "deprecated": false,
+   "deprecation_reason": null,
+   "disabled": false,
+   "disable_reason": null,
+   "versioned_formulae": [
+    "openssl@4",
+    "openssl@3.6",
+    "openssl@3.0"
+   ]
+  },
+  {
+   "name": "python@3.15",
+   "full_name": "python@3.15",
+   "tap": "homebrew/core",
+   "homepage": "https://www.python.org/",
+   "versions": {
+    "stable": "3.15.0",
+    "head": null,
+    "bottle": true
+   },
+   "urls": {
+    "stable": {
+     "url": "https://www.python.org/ftp/python/3.15.0/Python-3.15.0.tgz"
+    }
+   },
+   "installed": [
+    {
+     "version": "3.15.0_1",
+     "installed_on_request": false
+    }
+   ],
+   "pinned": false,
+   "outdated": false,
+   "deprecated": false,
+   "deprecation_reason": null,
+   "disabled": false,
+   "disable_reason": null,
+   "versioned_formulae": [
+    "python@3.14",
+    "python@3.13",
+    "python@3.12",
+    "python@3.11",
+    "python@3.10",
+    "python@3.9"
+   ]
+  }
+ ],
+ "casks": [
+  {
+   "token": "claude",
+   "full_token": "claude",
+   "name": [
+    "Claude"
+   ],
+   "homepage": "https://claude.com/download",
+   "url": "https://downloads.claude.ai/releases/darwin/universal/3.6556.2/Claude-20c019a1e61fa5b687616af57d31f97bb3181723.zip",
+   "version": "3.6556.2,20c019a1e61fa5b687616af57d31f97bb3181723",
+   "installed": "0.12.129,185ab35880f18c8192fa55fd63e266d6058f3744",
+   "outdated": false,
+   "auto_updates": true,
+   "deprecated": false,
+   "disabled": false,
+   "artifacts": [
+    {
+     "uninstall": [
+      {
+       "quit": [
+        "com.anthropic.claudefordesktop",
+        "com.anthropic.claudefordesktop.helper"
+       ]
+      }
+     ]
+    },
+    {
+     "app": [
+      "Claude.app"
+     ],
+     "target": "/Applications/Claude.app"
+    }
+   ]
+  },
+  {
+   "token": "claude-code",
+   "full_token": "claude-code",
+   "name": [
+    "Claude Code"
+   ],
+   "homepage": "https://claude.com/product/claude-code",
+   "url": "https://downloads.claude.ai/claude-code-releases/2.1.308/darwin-arm64/claude",
+   "version": "2.1.308",
+   "installed": "2.1.71",
+   "outdated": true,
+   "auto_updates": null,
+   "deprecated": false,
+   "disabled": false,
+   "artifacts": [
+    {
+     "binary": [
+      "claude"
+     ],
+     "target": "/opt/homebrew/bin/claude"
+    }
+   ]
+  },
+  {
+   "token": "docker-desktop",
+   "full_token": "docker-desktop",
+   "name": [
+    "Docker Desktop",
+    "Docker Community Edition",
+    "Docker CE"
+   ],
+   "homepage": "https://www.docker.com/products/docker-desktop",
+   "url": "https://desktop.docker.com/mac/main/arm64/244472/Docker.dmg",
+   "version": "4.96.3,244472",
+   "installed": "4.96.3,244472",
+   "outdated": false,
+   "auto_updates": true,
+   "deprecated": false,
+   "disabled": false,
+   "artifacts": [
+    {
+     "uninstall": [
+      {
+       "launchctl": [
+        "com.docker.helper",
+        "com.docker.socket",
+        "com.docker.vmnetd"
+       ],
+       "quit": [
+        "com.docker.docker",
+        "com.electron.dockerdesktop"
+       ],
+       "delete": [
+        "/Library/PrivilegedHelperTools/com.docker.socket",
+        "/Library/PrivilegedHelperTools/com.docker.vmnetd"
+       ],
+       "rmdir": "~/.docker/bin"
+      }
+     ]
+    },
+    {
+     "app": [
+      "Docker.app"
+     ],
+     "target": "/Applications/Docker.app"
+    },
+    {
+     "binary": [
+      "/Applications/Docker.app/Contents/Resources/bin/docker-credential-desktop",
+      {
+       "target": "/usr/local/bin/docker-credential-desktop"
+      }
+     ],
+     "target": "/usr/local/bin/docker-credential-desktop"
+    },
+    {
+     "binary": [
+      "/Applications/Docker.app/Contents/Resources/bin/docker-credential-osxkeychain",
+      {
+       "target": "/usr/local/bin/docker-credential-osxkeychain"
+      }
+     ],
+     "target": "/usr/local/bin/docker-credential-osxkeychain"
+    },
+    {
+     "binary": [
+      "/Applications/Docker.app/Contents/Resources/bin/kubectl",
+      {
+       "target": "/usr/local/bin/kubectl.docker"
+      }
+     ],
+     "target": "/usr/local/bin/kubectl.docker"
+    },
+    {
+     "binary": [
+      "/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose",
+      {
+       "target": "/usr/local/cli-plugins/docker-compose"
+      }
+     ],
+     "target": "/usr/local/cli-plugins/docker-compose"
+    },
+    {
+     "binary": [
+      "/Applications/Docker.app/Contents/Resources/bin/docker",
+      {
+       "target": "/usr/local/bin/docker"
+      }
+     ],
+     "target": "/usr/local/bin/docker"
+    }
+   ]
+  },
+  {
+   "token": "gcloud-cli",
+   "full_token": "gcloud-cli",
+   "name": [
+    "Google Cloud CLI"
+   ],
+   "homepage": "https://cloud.google.com/cli/",
+   "url": "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-590.0.1-darwin-arm.tar.gz",
+   "version": "590.0.1",
+   "installed": "529.0.0",
+   "outdated": false,
+   "auto_updates": true,
+   "deprecated": false,
+   "disabled": false,
+   "artifacts": [
+    {
+     "uninstall": [
+      {
+       "trash": "/opt/homebrew/Caskroom/gcloud-cli/latest"
+      }
+     ]
+    },
+    {
+     "installer": [
+      {
+       "script": {
+        "executable": "google-cloud-sdk/install.sh",
+        "args": [
+         "--quiet",
+         "--usage-reporting",
+         "false",
+         "--bash-completion",
+         "false",
+         "--path-update",
+         "false",
+         "--rc-path",
+         "false",
+         "--update-installed-components",
+         "--install-python",
+         "false"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "binary": [
+      "google-cloud-sdk/bin/bq"
+     ],
+     "target": "/opt/homebrew/bin/bq"
+    },
+    {
+     "binary": [
+      "google-cloud-sdk/bin/gcloud"
+     ],
+     "target": "/opt/homebrew/bin/gcloud"
+    },
+    {
+     "binary": [
+      "google-cloud-sdk/bin/docker-credential-gcloud"
+     ],
+     "target": "/opt/homebrew/bin/docker-credential-gcloud"
+    },
+    {
+     "binary": [
+      "google-cloud-sdk/bin/git-credential-gcloud.sh",
+      {
+       "target": "git-credential-gcloud"
+      }
+     ],
+     "target": "/opt/homebrew/bin/git-credential-gcloud"
+    },
+    {
+     "binary": [
+      "google-cloud-sdk/bin/gsutil"
+     ],
+     "target": "/opt/homebrew/bin/gsutil"
+    }
+   ]
+  },
+  {
+   "token": "orcaslicer",
+   "full_token": "orcaslicer",
+   "name": [
+    "Orca Slicer"
+   ],
+   "homepage": "https://github.com/OrcaSlicer/OrcaSlicer",
+   "url": "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.4.2/OrcaSlicer_Mac_universal_V2.4.2.dmg",
+   "version": "2.4.2",
+   "installed": "2.3.1",
+   "outdated": true,
+   "auto_updates": null,
+   "deprecated": false,
+   "disabled": false,
+   "artifacts": [
+    {
+     "app": [
+      "OrcaSlicer.app"
+     ],
+     "target": "/Applications/OrcaSlicer.app"
+    }
+   ]
+  },
+  {
+   "token": "rustdesk",
+   "full_token": "rustdesk",
+   "name": [
+    "RustDesk"
+   ],
+   "homepage": "https://rustdesk.com/",
+   "url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-aarch64.dmg",
+   "version": "1.5.0",
+   "installed": "1.5.0",
+   "outdated": false,
+   "auto_updates": null,
+   "deprecated": false,
+   "disabled": false,
+   "artifacts": [
+    {
+     "uninstall": [
+      {
+       "quit": "com.carriez.rustdesk"
+      }
+     ]
+    },
+    {
+     "app": [
+      "RustDesk.app"
+     ],
+     "target": "/Applications/RustDesk.app"
+    }
+   ]
+  },
+  {
+   "token": "t3-code@nightly",
+   "full_token": "t3-code@nightly",
+   "name": [
+    "T3 Code Nightly"
+   ],
+   "homepage": "https://t3.codes/",
+   "url": "https://github.com/pingdotgg/t3code/releases/download/v0.1.3-nightly.20261023.3579/T3-Code-0.1.3-nightly.20261023.3579-arm64.dmg",
+   "version": "0.1.3-nightly.20261023.3579",
+   "installed": "0.1.3-nightly.20261023.3579",
+   "outdated": false,
+   "auto_updates": true,
+   "deprecated": false,
+   "disabled": false,
+   "artifacts": [
+    {
+     "app": [
+      "T3 Code (Nightly).app"
+     ],
+     "target": "/Applications/T3 Code (Nightly).app"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,620 @@
+[
+ {
+  "token": "antigravity",
+  "name": [
+   "Google Antigravity"
+  ],
+  "homepage": "https://antigravity.google/product/antigravity-2",
+  "version": "2.26.0,6546645232517120",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "quit": "com.google.antigravity"
+     }
+    ]
+   },
+   {
+    "app": [
+     "Antigravity.app"
+    ],
+    "target": "/Applications/Antigravity.app"
+   }
+  ]
+ },
+ {
+  "token": "audacity",
+  "name": [
+   "Audacity"
+  ],
+  "homepage": "https://www.audacityteam.org/",
+  "version": "4.0.1",
+  "auto_updates": null,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "quit": "org.audacityteam.audacity4"
+     }
+    ]
+   },
+   {
+    "app": [
+     "Audacity 4.app"
+    ],
+    "target": "/Applications/Audacity 4.app"
+   }
+  ]
+ },
+ {
+  "token": "chatgpt",
+  "name": [
+   "ChatGPT"
+  ],
+  "homepage": "https://chatgpt.com/",
+  "version": "26.1021.22027",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "quit": "com.openai.codex"
+     }
+    ]
+   },
+   {
+    "app": [
+     "ChatGPT.app"
+    ],
+    "target": "/Applications/ChatGPT.app"
+   }
+  ]
+ },
+ {
+  "token": "claude",
+  "name": [
+   "Claude"
+  ],
+  "homepage": "https://claude.com/download",
+  "version": "3.6556.2,20c019a1e61fa5b687616af57d31f97bb3181723",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "quit": [
+       "com.anthropic.claudefordesktop",
+       "com.anthropic.claudefordesktop.helper"
+      ]
+     }
+    ]
+   },
+   {
+    "app": [
+     "Claude.app"
+    ],
+    "target": "/Applications/Claude.app"
+   }
+  ]
+ },
+ {
+  "token": "cursor",
+  "name": [
+   "Cursor"
+  ],
+  "homepage": "https://www.cursor.com/",
+  "version": "3.27.12,df132ffba90dfc15a12e6b8f020ba4e5d026c4be",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "app": [
+     "Cursor.app"
+    ],
+    "target": "/Applications/Cursor.app"
+   }
+  ]
+ },
+ {
+  "token": "docker-desktop",
+  "name": [
+   "Docker Desktop",
+   "Docker Community Edition",
+   "Docker CE"
+  ],
+  "homepage": "https://www.docker.com/products/docker-desktop",
+  "version": "4.96.3,244472",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "launchctl": [
+       "com.docker.helper",
+       "com.docker.socket",
+       "com.docker.vmnetd"
+      ],
+      "quit": [
+       "com.docker.docker",
+       "com.electron.dockerdesktop"
+      ],
+      "delete": [
+       "/Library/PrivilegedHelperTools/com.docker.socket",
+       "/Library/PrivilegedHelperTools/com.docker.vmnetd"
+      ],
+      "rmdir": "~/.docker/bin"
+     }
+    ]
+   },
+   {
+    "app": [
+     "Docker.app"
+    ],
+    "target": "/Applications/Docker.app"
+   }
+  ]
+ },
+ {
+  "token": "google-chrome",
+  "name": [
+   "Google Chrome"
+  ],
+  "homepage": "https://www.google.com/chrome/",
+  "version": "156.0.8078.48",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "app": [
+     "Google Chrome.app"
+    ],
+    "target": "/Applications/Google Chrome.app"
+   }
+  ]
+ },
+ {
+  "token": "google-chrome@beta",
+  "name": [
+   "Google Chrome Beta"
+  ],
+  "homepage": "https://www.google.com/chrome/beta/",
+  "version": "157.0.8103.15",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "app": [
+     "Google Chrome Beta.app"
+    ],
+    "target": "/Applications/Google Chrome Beta.app"
+   }
+  ]
+ },
+ {
+  "token": "google-drive",
+  "name": [
+   "Google Drive"
+  ],
+  "homepage": "https://www.google.com/drive/",
+  "version": "133.0.2",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "quit": [
+       "com.google.drivefs",
+       "com.google.drivefs.finderhelper.findersync"
+      ],
+      "login_item": "Google Drive",
+      "pkgutil": [
+       "com.google.drivefs.arm64",
+       "com.google.drivefs.filesystems.dfsfuse.arm64",
+       "com.google.drivefs.filesystems.dfsfuse.x86_64",
+       "com.google.drivefs.shortcuts",
+       "com.google.drivefs.x86_64"
+      ]
+     }
+    ]
+   },
+   {
+    "pkg": [
+     "GoogleDrive.pkg"
+    ]
+   }
+  ]
+ },
+ {
+  "token": "logitune",
+  "name": [
+   "LogiTune"
+  ],
+  "homepage": "https://www.logitech.com/en-us/video-collaboration/software/logi-tune-software.html",
+  "version": "3.14.72",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "delete": [
+       "/Applications/LogiTune.app",
+       "/Library/LaunchAgents/com.logitech.logitune.launcher.plist",
+       "/Library/LaunchDaemons/com.logitech.LogiRightSight.plist"
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "token": "microsoft-excel",
+  "name": [
+   "Microsoft Excel"
+  ],
+  "homepage": "https://www.microsoft.com/en-US/microsoft-365/excel",
+  "version": "16.114.26102031",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "launchctl": "com.microsoft.office.licensingV2.helper",
+      "quit": "com.microsoft.autoupdate2",
+      "pkgutil": [
+       "com.microsoft.package.Microsoft_Excel.app",
+       "com.microsoft.pkg.licensing"
+      ]
+     }
+    ]
+   },
+   {
+    "pkg": [
+     "Microsoft_Excel_16.114.26102031_Installer.pkg",
+     {
+      "choices": [
+       {
+        "choiceIdentifier": "com.microsoft.autoupdate",
+        "choiceAttribute": "selected",
+        "attributeSetting": 0
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "token": "microsoft-teams",
+  "name": [
+   "Microsoft Teams"
+  ],
+  "homepage": "https://www.microsoft.com/en/microsoft-teams/group-chat-software/",
+  "version": "26276.505.5234.9924",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "launchctl": "com.microsoft.teams.TeamsUpdaterDaemon",
+      "quit": "com.microsoft.autoupdate2",
+      "pkgutil": [
+       "com.microsoft.MSTeamsAudioDevice",
+       "com.microsoft.teams2"
+      ],
+      "delete": [
+       "/Applications/Microsoft Teams.app",
+       "/Library/Application Support/Microsoft/TeamsUpdaterDaemon",
+       "/Library/Logs/Microsoft/MSTeams",
+       "/Library/Logs/Microsoft/Teams",
+       "/Library/Preferences/com.microsoft.teams.plist"
+      ]
+     }
+    ]
+   },
+   {
+    "pkg": [
+     "MicrosoftTeams.pkg",
+     {
+      "choices": [
+       {
+        "choiceIdentifier": "com.microsoft.autoupdate",
+        "choiceAttribute": "selected",
+        "attributeSetting": 0
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "token": "microsoft-word",
+  "name": [
+   "Microsoft Word"
+  ],
+  "homepage": "https://www.microsoft.com/en-US/microsoft-365/word",
+  "version": "16.114.26102031",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "launchctl": "com.microsoft.office.licensingV2.helper",
+      "quit": "com.microsoft.autoupdate2",
+      "pkgutil": [
+       "com.microsoft.package.Microsoft_Word.app",
+       "com.microsoft.pkg.licensing"
+      ]
+     }
+    ]
+   },
+   {
+    "pkg": [
+     "Microsoft_Word_16.114.26102031_Installer.pkg",
+     {
+      "choices": [
+       {
+        "choiceIdentifier": "com.microsoft.autoupdate",
+        "choiceAttribute": "selected",
+        "attributeSetting": 0
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "token": "obsidian",
+  "name": [
+   "Obsidian"
+  ],
+  "homepage": "https://obsidian.md/",
+  "version": "1.14.5",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "app": [
+     "Obsidian.app"
+    ],
+    "target": "/Applications/Obsidian.app"
+   }
+  ]
+ },
+ {
+  "token": "onedrive",
+  "name": [
+   "OneDrive"
+  ],
+  "homepage": "https://www.microsoft.com/en-us/microsoft-365/onedrive/online-cloud-storage",
+  "version": "26.173.0906.0008",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "launchctl": [
+       "com.microsoft.OneDriveStandaloneUpdater",
+       "com.microsoft.OneDriveStandaloneUpdaterDaemon",
+       "com.microsoft.OneDriveUpdaterDaemon",
+       "com.microsoft.SyncReporter"
+      ],
+      "quit": [
+       "com.microsoft.OneDrive",
+       "com.microsoft.OneDrive.FinderSync",
+       "com.microsoft.OneDriveUpdater"
+      ],
+      "pkgutil": "com.microsoft.OneDrive",
+      "delete": [
+       "/Applications/OneDrive.app",
+       "/Library/LaunchAgents/com.microsoft.OneDriveStandaloneUpdater.plist",
+       "/Library/LaunchDaemons/com.microsoft.OneDriveStandaloneUpdaterDaemon.plist",
+       "/Library/LaunchDaemons/com.microsoft.OneDriveUpdaterDaemon.plist",
+       "/Library/Logs/Microsoft/OneDrive"
+      ]
+     }
+    ]
+   },
+   {
+    "pkg": [
+     "OneDrive.pkg"
+    ]
+   }
+  ]
+ },
+ {
+  "token": "orcaslicer",
+  "name": [
+   "Orca Slicer"
+  ],
+  "homepage": "https://github.com/OrcaSlicer/OrcaSlicer",
+  "version": "2.4.2",
+  "auto_updates": null,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "app": [
+     "OrcaSlicer.app"
+    ],
+    "target": "/Applications/OrcaSlicer.app"
+   }
+  ]
+ },
+ {
+  "token": "roblox",
+  "name": [
+   "Roblox"
+  ],
+  "homepage": "https://www.roblox.com/",
+  "version": "0.744.0.7441080,546c6da637854de3",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "quit": [
+       "com.roblox.RobloxPlayer",
+       "com.roblox.RobloxPlayer.MenuBar"
+      ]
+     }
+    ]
+   },
+   {
+    "app": [
+     "RobloxPlayer.app",
+     {
+      "target": "Roblox.app"
+     }
+    ],
+    "target": "/Applications/Roblox.app"
+   }
+  ]
+ },
+ {
+  "token": "rustdesk",
+  "name": [
+   "RustDesk"
+  ],
+  "homepage": "https://rustdesk.com/",
+  "version": "1.5.0",
+  "auto_updates": null,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "quit": "com.carriez.rustdesk"
+     }
+    ]
+   },
+   {
+    "app": [
+     "RustDesk.app"
+    ],
+    "target": "/Applications/RustDesk.app"
+   }
+  ]
+ },
+ {
+  "token": "t3-code@nightly",
+  "name": [
+   "T3 Code Nightly"
+  ],
+  "homepage": "https://t3.codes/",
+  "version": "0.1.3-nightly.20261023.3592",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "app": [
+     "T3 Code (Nightly).app"
+    ],
+    "target": "/Applications/T3 Code (Nightly).app"
+   }
+  ]
+ },
+ {
+  "token": "tailscale-app",
+  "name": [
+   "Tailscale"
+  ],
+  "homepage": "https://tailscale.com/",
+  "version": "1.104.2",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "quit": "io.tailscale.ipn.macsys",
+      "login_item": "Tailscale",
+      "pkgutil": "com.tailscale.ipn.macsys",
+      "delete": [
+       "/usr/local/bin/tailscale",
+       "/usr/local/share/man/man8/tssentineld.8"
+      ]
+     }
+    ]
+   },
+   {
+    "pkg": [
+     "Tailscale-1.104.2-macos.pkg"
+    ]
+   }
+  ]
+ },
+ {
+  "token": "zoom",
+  "name": [
+   "Zoom"
+  ],
+  "homepage": "https://www.zoom.us/",
+  "version": "7.2.2.88465",
+  "auto_updates": true,
+  "deprecated": false,
+  "disabled": false,
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "launchctl": [
+       "us.zoom.updater",
+       "us.zoom.updater.login.check",
+       "us.zoom.ZoomDaemon"
+      ],
+      "signal": [
+       "KILL",
+       "us.zoom.xos"
+      ],
+      "pkgutil": "us.zoom.pkg.videomeeting",
+      "delete": [
+       "/Applications/zoom.us.app",
+       "/Library/Internet Plug-Ins/ZoomUsPlugIn.plugin",
+       "/Library/Logs/DiagnosticReports/zoom.us*",
+       "/Library/PrivilegedHelperTools/us.zoom.ZoomDaemon"
+      ]
+     }
+    ]
+   },
+   {
+    "pkg": [
+     "zoomusInstallerFull.pkg"
+    ]
+   }
+  ]
+ }
+]

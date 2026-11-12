@@ -1,0 +1,40 @@
+name: Bug report
+description: Something Bosun did, or did not do, that looks wrong
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Bosun is provided as is. Issues are welcome, and no reply is promised.
+        To report a security problem, do not use this form. Use the private reporting link on the issue chooser.
+        **Remove anything private from what you paste:** names, paths, hostnames, tokens and project names.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `bosun doctor`
+      description: Run `uv run bosun doctor` in your Bosun checkout and paste the result. It changes nothing.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: macOS is supported. Windows and Linux are experimental.
+      options:
+        - macOS
+        - Windows (experimental)
+        - Linux (experimental)
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true

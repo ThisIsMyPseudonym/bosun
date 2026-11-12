@@ -1,0 +1,34 @@
+{
+  "findings": [
+    {
+      "formula": "curl",
+      "version": "8.4.0",
+      "tag": "curl-8_4_0",
+      "repo_url": "https://github.com/curl/curl",
+      "vulnerabilities": [
+        {"id": "CVE-2023-46218", "severity": "MEDIUM", "summary": "cookie mixed case PSL bypass", "aliases": ["CURL-CVE-2023-46218"], "fixed_versions": ["8.5.0"]},
+        {"id": "CVE-2099-0001", "severity": "HIGH", "summary": "no release fixes this yet", "aliases": [], "fixed_versions": []},
+        {"id": "CVE-2099-0002", "severity": "CRITICAL", "summary": "fixed only in a release newer than Homebrew has", "aliases": [], "fixed_versions": ["9.0.0"]}
+      ],
+      "patched": [
+        {"id": "CVE-2023-00000", "severity": "LOW", "summary": "resolved by a formula patch", "aliases": [], "fixed_versions": []}
+      ]
+    },
+    {
+      "formula": "someone/tap/jq",
+      "version": "1.6",
+      "tag": "jq-1.6",
+      "repo_url": "https://github.com/jqlang/jq",
+      "vulnerabilities": [
+        {"id": "GHSA-aaaa-bbbb-cccc", "severity": "UNKNOWN", "summary": "tag-shaped fix version", "aliases": ["CVE-2023-50246"], "fixed_versions": ["jq-release"]},
+        {"id": "not an id; rm -rf", "severity": "HIGH", "summary": "hostile id", "aliases": [], "fixed_versions": ["1.7"]}
+      ],
+      "patched": []
+    }
+  ],
+  "skipped_formulae": ["ghostty-helper"],
+  "checked": 4,
+  "complete": false,
+  "outdated_without_sbom": ["oldtool"],
+  "unscanned_formulae": {"weird": "no source url"}
+}

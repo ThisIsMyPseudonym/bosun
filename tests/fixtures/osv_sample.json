@@ -1,0 +1,746 @@
+{
+ "results": [
+  {
+   "source": {
+    "path": "C:/Users/alex/acme/acme-app/package-lock.json",
+    "type": "lockfile"
+   },
+   "packages": [
+    {
+     "package": {
+      "name": "@babel/core",
+      "version": "7.28.0",
+      "ecosystem": "npm",
+      "purl": "pkg:npm/%40babel/core@7.28.0?source=PUBLIC_REGISTRY"
+     },
+     "groups": [
+      {
+       "ids": [
+        "GHSA-4x5r-pxfx-6jf8"
+       ],
+       "aliases": [
+        "CVE-2026-49356",
+        "GHSA-4x5r-pxfx-6jf8"
+       ],
+       "max_severity": "3.2"
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@babel/core",
+          "purl": "pkg:npm/%40babel/core"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "8.0.0-alpha.0"
+            },
+            {
+             "fixed": "8.0.0-rc.6"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@babel/core",
+          "purl": "pkg:npm/%40babel/core"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "7.29.6"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ],
+       "aliases": [
+        "CVE-2026-49356"
+       ],
+       "database_specific": {
+        "cwe_ids": [
+         "CWE-200",
+         "CWE-22"
+        ],
+        "github_reviewed": true,
+        "github_reviewed_at": "2026-06-15T17:14:14Z",
+        "nvd_published_at": "2026-06-22T18:16:41Z",
+        "severity": "LOW"
+       },
+       "id": "GHSA-4x5r-pxfx-6jf8",
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:L/I:N/A:N",
+         "type": "CVSS_V3"
+        }
+       ],
+       "summary": "@babel/core: Arbitrary File Read via sourceMappingURL Comment"
+      }
+     ]
+    },
+    {
+     "package": {
+      "name": "@fastify/busboy",
+      "version": "3.1.1",
+      "ecosystem": "npm",
+      "purl": "pkg:npm/%40fastify/busboy@3.1.1?source=PUBLIC_REGISTRY"
+     },
+     "groups": [
+      {
+       "ids": [
+        "GHSA-gxm5-99cw-xjw9"
+       ],
+       "aliases": [
+        "CVE-2026-74866",
+        "GHSA-gxm5-99cw-xjw9"
+       ],
+       "max_severity": "5.8"
+      },
+      {
+       "ids": [
+        "GHSA-x8mw-p69m-v3mx"
+       ],
+       "aliases": [
+        "CVE-2026-19481",
+        "GHSA-x8mw-p69m-v3mx"
+       ],
+       "max_severity": "7.5"
+      },
+      {
+       "ids": [
+        "GHSA-xjh9-v7x6-24jw"
+       ],
+       "aliases": [
+        "CVE-2026-19484",
+        "GHSA-xjh9-v7x6-24jw"
+       ],
+       "max_severity": "7.5"
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@fastify/busboy",
+          "purl": "pkg:npm/%40fastify/busboy"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "3.2.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ],
+       "aliases": [
+        "CVE-2026-74866"
+       ],
+       "database_specific": {
+        "cwe_ids": [
+         "CWE-93"
+        ],
+        "github_reviewed": true,
+        "github_reviewed_at": "2026-10-05T22:33:44Z",
+        "nvd_published_at": "2026-08-21T09:16:40Z",
+        "severity": "MODERATE"
+       },
+       "id": "GHSA-gxm5-99cw-xjw9",
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:N",
+         "type": "CVSS_V3"
+        }
+       ],
+       "summary": "@fastify/busboy vulnerable to CRLF injection via multipart Content-Disposition filename and name"
+      },
+      {
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@fastify/busboy",
+          "purl": "pkg:npm/%40fastify/busboy"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.0.0"
+            },
+            {
+             "fixed": "3.2.1"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ],
+       "aliases": [
+        "CVE-2026-19481"
+       ],
+       "database_specific": {
+        "cwe_ids": [
+         "CWE-754"
+        ],
+        "github_reviewed": true,
+        "github_reviewed_at": "2026-10-02T23:16:36Z",
+        "nvd_published_at": "2026-08-13T09:17:12Z",
+        "severity": "HIGH"
+       },
+       "id": "GHSA-x8mw-p69m-v3mx",
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+         "type": "CVSS_V3"
+        }
+       ],
+       "summary": "@fastify/busboy vulnerable to Denial of Service via prototype-named multipart part header"
+      },
+      {
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@fastify/busboy",
+          "purl": "pkg:npm/%40fastify/busboy"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "3.1.0"
+            },
+            {
+             "fixed": "3.2.1"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ],
+       "aliases": [
+        "CVE-2026-19484"
+       ],
+       "database_specific": {
+        "cwe_ids": [
+         "CWE-1322",
+         "CWE-835"
+        ],
+        "github_reviewed": true,
+        "github_reviewed_at": "2026-10-02T23:16:17Z",
+        "nvd_published_at": "2026-08-13T10:17:11Z",
+        "severity": "HIGH"
+       },
+       "id": "GHSA-xjh9-v7x6-24jw",
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+         "type": "CVSS_V3"
+        }
+       ],
+       "summary": "@fastify/busboy vulnerable to Denial of Service via oversized multipart boundary"
+      }
+     ]
+    },
+    {
+     "package": {
+      "name": "@grpc/grpc-js",
+      "version": "1.13.4",
+      "ecosystem": "npm",
+      "purl": "pkg:npm/%40grpc/grpc-js@1.13.4?source=PUBLIC_REGISTRY"
+     },
+     "dependency_groups": [
+      "optional"
+     ],
+     "groups": [
+      {
+       "ids": [
+        "GHSA-5375-pq7m-f5r2"
+       ],
+       "aliases": [
+        "CVE-2026-48068",
+        "GHSA-5375-pq7m-f5r2"
+       ],
+       "max_severity": "7.5"
+      },
+      {
+       "ids": [
+        "GHSA-99f4-grh7-6pcq"
+       ],
+       "aliases": [
+        "CVE-2026-48069",
+        "GHSA-99f4-grh7-6pcq"
+       ],
+       "max_severity": "7.5"
+      },
+      {
+       "ids": [
+        "GHSA-f596-whhp-79r4"
+       ],
+       "aliases": [
+        "CVE-2026-101915",
+        "GHSA-f596-whhp-79r4"
+       ],
+       "max_severity": "3.7"
+      },
+      {
+       "ids": [
+        "GHSA-m9gg-hp2v-232j"
+       ],
+       "aliases": [
+        "CVE-2026-101916",
+        "GHSA-m9gg-hp2v-232j"
+       ],
+       "max_severity": "7.4"
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "1.9.16"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.10.0"
+            },
+            {
+             "fixed": "1.10.12"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.11.0"
+            },
+            {
+             "fixed": "1.11.4"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.12.0"
+            },
+            {
+             "fixed": "1.12.7"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.13.0"
+            },
+            {
+             "fixed": "1.13.5"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.14.0"
+            },
+            {
+             "fixed": "1.14.4"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ],
+       "aliases": [
+        "CVE-2026-48068"
+       ],
+       "database_specific": {
+        "cwe_ids": [
+         "CWE-248"
+        ],
+        "github_reviewed": true,
+        "github_reviewed_at": "2026-06-11T13:27:54Z",
+        "nvd_published_at": null,
+        "severity": "HIGH"
+       },
+       "id": "GHSA-5375-pq7m-f5r2",
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+         "type": "CVSS_V3"
+        }
+       ],
+       "summary": "@grpc/grpc-js: A malformed request can cause a server crash"
+      },
+      {
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "1.9.16"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.10.0"
+            },
+            {
+             "fixed": "1.10.12"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.11.0"
+            },
+            {
+             "fixed": "1.11.4"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.12.0"
+            },
+            {
+             "fixed": "1.12.7"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.13.0"
+            },
+            {
+             "fixed": "1.13.5"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.14.0"
+            },
+            {
+             "fixed": "1.14.4"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ],
+       "aliases": [
+        "CVE-2026-48069"
+       ],
+       "database_specific": {
+        "cwe_ids": [
+         "CWE-248",
+         "CWE-400"
+        ],
+        "github_reviewed": true,
+        "github_reviewed_at": "2026-06-11T13:27:44Z",
+        "nvd_published_at": null,
+        "severity": "HIGH"
+       },
+       "id": "GHSA-99f4-grh7-6pcq",
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+         "type": "CVSS_V3"
+        }
+       ],
+       "summary": "@grpc/grpc-js: An incoming malformed compressed message can cause a client or server crash"
+      },
+      {
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "1.13.6"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.14.0"
+            },
+            {
+             "fixed": "1.14.5"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ],
+       "aliases": [
+        "CVE-2026-101915"
+       ],
+       "database_specific": {
+        "cwe_ids": [
+         "CWE-550"
+        ],
+        "github_reviewed": true,
+        "github_reviewed_at": "2026-09-30T15:35:41Z",
+        "nvd_published_at": "2026-09-28T20:17:09Z",
+        "severity": "LOW"
+       },
+       "id": "GHSA-f596-whhp-79r4",
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+         "type": "CVSS_V3"
+        }
+       ],
+       "summary": "@grpc/grpc-js: The server transmits some error messages thrown by method handlers to the client in status messages"
+      },
+      {
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "1.13.6"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@grpc/grpc-js",
+          "purl": "pkg:npm/%40grpc/grpc-js"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.14.0"
+            },
+            {
+             "fixed": "1.14.5"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ],
+       "aliases": [
+        "CVE-2026-101916"
+       ],
+       "database_specific": {
+        "cwe_ids": [
+         "CWE-295"
+        ],
+        "github_reviewed": true,
+        "github_reviewed_at": "2026-09-30T15:35:53Z",
+        "nvd_published_at": "2026-09-28T21:17:13Z",
+        "severity": "HIGH"
+       },
+       "id": "GHSA-m9gg-hp2v-232j",
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+         "type": "CVSS_V3"
+        }
+       ],
+       "summary": "@grpc/grpc-js: In certain configurations, getAuthContext can return unauthorized certificates as though they were authorized"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

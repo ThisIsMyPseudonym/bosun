@@ -1,0 +1,38 @@
+# The offline test suite on the three systems Bosun runs on. macOS is the supported one; Windows and Linux are
+# experimental, so a red cell there tells us what to fix, not that a release is blocked.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read  # nothing here writes to the repository or its issues
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false  # one system failing must not hide what the others say
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      # actions are pinned to a full commit, never a tag a maintainer (or an attacker) can move
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - run: uv run pytest -q -p no:cacheprovider
+
+  javascript:
+    name: the dashboard's scripts parse
+    runs-on: ubuntu-latest  # node is already on this image
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: for f in src/bosun/static/*.js; do node --check "$f"; done

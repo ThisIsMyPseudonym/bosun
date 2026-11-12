@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="bosun-token" content="__BOSUN_TOKEN__">
+  <title>Bosun</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="icon" href="/static/icon.png" type="image/png">
+  <!-- installed as an app (Edge/Chrome "Install Bosun"): the manifest's icons, not whatever favicon was cached -->
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <meta name="theme-color" content="#171b1d" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#edf2f1" media="(prefers-color-scheme: light)">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/today.css">
+  <link rel="stylesheet" href="/static/runs.css">
+  <link rel="stylesheet" href="/static/assistant.css">
+  <link rel="stylesheet" href="/static/terminal.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="side" aria-label="Scopes">
+      <div class="brand"><span class="mark"><svg width="20" height="20" viewBox="0 0 128 128" fill="#0f2622" aria-hidden="true"><g transform="translate(7 0) skewX(-9)"><path d="M40 18a4 4 0 0 1 8 0v74h-8z"/><path d="M53 29c19 1.2 29 7.4 29 15s-10 13.6-29 14.4z"/><path d="M53 64c27 .8 39 7.6 39 16.4S80 93.4 53 94z"/></g><path d="M14 99h90c5 0 9-1.6 12-5.5c-2.6 12.4-14 21.5-29 21.5H44c-13.6 0-24-6.6-30-16z"/></svg></span>Bosun<button class="menubtn" id="menubtn" aria-expanded="false" aria-controls="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>Menu</button></div>
+      <nav id="nav"></nav>
+    </aside>
+    <div class="content">
+      <header class="topbar">
+        <span class="scope" id="scope">Loading…</span>
+        <span class="spacer"></span>
+        <span class="pill devonly" id="claude"></span>
+        <button class="ghostbtn" id="ask" aria-expanded="false" aria-controls="assistant" title="Ask Bosun about this computer" aria-label="Ask Bosun"></button>
+        <button class="ghostbtn" id="notify" aria-pressed="true" title="Notifications" aria-label="Notifications"></button>
+        <button class="roundbtn" id="refresh" title="Check for updates now" aria-label="Check for updates now"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg></button>
+      </header>
+      <div id="banner" class="banner" hidden></div>
+      <main id="main"></main>
+    </div>
+  </div>
+  <aside id="drawer" class="drawer" role="dialog" aria-modal="false" hidden aria-label="Details"></aside>
+  <section class="tray" id="tray" hidden aria-label="Activity"></section>
+  <section id="terminal" class="termpanel" hidden aria-label="Terminal"></section>
+  <aside id="assistant" class="askpanel" hidden aria-label="Ask Bosun"></aside>
+  <dialog id="promptbox" class="promptbox" aria-labelledby="promptTitle"></dialog>
+  <script src="/static/ui.js"></script>
+  <script src="/static/rows.js"></script>
+  <script src="/static/nav.js"></script>
+  <script src="/static/charts.js"></script>
+  <script src="/static/machines.js"></script>
+  <script src="/static/today.js"></script>
+  <script src="/static/scope.js"></script>
+  <script src="/static/drawer.js"></script>
+  <script src="/static/runs.js"></script>
+  <script src="/static/usage.js"></script>
+  <script src="/static/app.js"></script>
+  <script src="/static/terminal.js"></script>
+  <script src="/static/assistant.js"></script>
+</body>
+</html>

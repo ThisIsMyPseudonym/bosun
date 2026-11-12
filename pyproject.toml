@@ -1,0 +1,43 @@
+[project]
+name = "bosun-watch"
+version = "1.0.0"
+description = "Bosun: a local dashboard of outdated software and dependencies, with security context and one-click upgrades"
+authors = [
+    { name = "ThisIsMyPseudonym", email = "35669751+ThisIsMyPseudonym@users.noreply.github.com" }
+]
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+dependencies = [
+    "claude-agent-sdk>=0.2.180",
+    "cvss>=3.6",
+    "fastapi>=0.161.1",
+    "httpx>=0.28.1",
+    "mcp>=2.3.0",
+    "packaging>=26.3",
+    "pydantic>=2.14.1",
+    "semantic-version>=2.10.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[project.scripts]
+bosun = "bosun.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bosun"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# the contract tests ask real services; the normal run stays offline: `pytest -m contract tests/contract` runs them
+addopts = "-m 'not contract'"
+markers = ["contract: asks a real outside service whether it still answers the way Bosun reads it (not run by default)"]

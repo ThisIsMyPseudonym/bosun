@@ -1,0 +1,60 @@
+"""Shared test setup."""
+
+import os
+
+import tempfile
+
+# Tests never touch the real data folder: several build Settings from the environment, and opening the real
+# database with newer code would migrate it under a running dashboard.
+os.environ["BOSUN_DATA_DIR"] = tempfile.mkdtemp(prefix="bosun-tests-")
+os.environ.setdefault("BOSUN_NO_PEERS", "1")  # the dashboard under test never dials other machines
+os.environ.setdefault("BOSUN_OSV_AUTO_UPDATE", "0")  # a test refresh never downloads into bin/
+os.environ.setdefault("BOSUN_SELF_UPDATE", "0")  # never git-pull the checkout under test
+os.environ.setdefault("BOSUN_NO_ICONS", "1")  # never read this machine's app bundles (tests/test_icons.py passes its own reader)
+
+# Test repos must not see this machine's git setup: a global excludesFile that ignores .env (common on
+# Macs) would hide the very files the secrets tests commit. Identity comes from env instead of ~/.gitconfig.
+os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+# git reads ~/.config/git/ignore even with no global config, so point excludesFile at nothing explicitly
+os.environ["GIT_CONFIG_COUNT"] = "1"
+os.environ["GIT_CONFIG_KEY_0"] = "core.excludesFile"
+os.environ["GIT_CONFIG_VALUE_0"] = os.devnull
+for _var, _val in (("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"),
+                   ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")):
+    os.environ.setdefault(_var, _val)
+
+
+import pytest  # noqa: E402
+
+SESSION_KEY = "k" * 48
+
+from bosun import auth as _auth  # noqa: E402
+
+REAL_LOAD_KEY = _auth.load_key  # for the tests of the key file itself
+
+
+@pytest.fixture(autouse=True)
+def _test_session_key(monkeypatch):
+    """The dashboard under test never reads or creates the real session key."""
+    monkeypatch.setattr("bosun.auth.load_key", lambda data_dir: SESSION_KEY)
+
+
+def signed_in(port: int = 8787) -> dict:
+    """Cookies for a TestClient that has opened Bosun from its icon."""
+    from bosun import auth
+
+    return {auth.cookie_name(port): auth.cookie_value(SESSION_KEY)}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_app_bundle(monkeypatch, tmp_path):
+    """Tests never open, rebuild or overwrite the Bosun app in ~/Applications."""
+    monkeypatch.setattr("bosun.launcher.MAC_APP", tmp_path / "Applications" / "Bosun.app")
+
+
+@pytest.fixture(autouse=True)
+def _no_waiting_period(monkeypatch):
+    """Autopilot's waiting period is off unless a test is about it (tests/test_autopilot.py turns it back on):
+    most tests build an item and ask what Autopilot does with it, without saying how long it has been on offer."""
+    monkeypatch.setattr("bosun.autopilot.WAIT_DAYS", 0)

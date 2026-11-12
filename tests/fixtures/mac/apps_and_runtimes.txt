@@ -1,0 +1,145 @@
+/Applications:
+Antigravity IDE.app
+Antigravity.app
+Audacity 4.app
+Bitdefender
+ChatGPT.app
+Claude.app
+Cursor.app
+Developer.app
+Docker.app
+Google Chrome.app
+Google Docs.app
+Google Drive.app
+Google Sheets.app
+Google Slides.app
+Keynote.app
+Logi Tune.app
+Microsoft Defender Shim.app
+Microsoft Excel.app
+Microsoft PowerPoint.app
+Microsoft Teams.app
+Microsoft Word.app
+Notepad - Text Editor.app
+Numbers.app
+Obsidian.app
+OneDrive.app
+OrcaSlicer.app
+Pages.app
+Python 3.12
+Roblox.app
+RustDesk.app
+Safari.app
+Steam Link.app
+T3 Code (Nightly).app
+Tailscale.app
+Utilities
+zoom.us.app
+
+/Users/alex/Applications:
+Chrome Apps.localized
+Claude Code URL Handler.app
+Comet Apps.localized
+Edge Apps.localized
+/Users/alex/.nvm/versions/node/v20.19.3
+/Users/alex/.nvm/versions/node/v22.23.2
+abseil
+ada-url
+brotli
+c-ares
+ca-certificates
+cairo
+dav1d
+ffmpeg
+fmt
+fontconfig
+freetype
+freetype2
+fribidi
+gettext
+gh
+giflib
+git
+glib
+gmp
+graphite2
+harfbuzz
+hdrhistogram_c
+highway
+icu4c
+icu4c@78
+imath
+java11
+jpeg-turbo
+jpeg-xl
+json-c
+lame
+lcms2
+leptonica
+libarchive
+libb2
+libdeflate
+libffi
+libjpeg-turbo
+libmpdec
+libnghttp2
+libpng
+libtiff
+libunistring
+libuv
+libvmaf
+libvpx
+libx11
+libxau
+libxcb
+libxdmcp
+libxext
+libxrender
+little-cms2
+llhttp
+lz4
+lzo
+merve
+mongodb-database-tools
+mongosh
+mpdecimal
+mpg123
+nbytes
+node
+node.js
+nodejs
+npm
+nvm
+openexr
+openexr@3
+openjdk@11
+openjpeg
+openjph
+openssl
+openssl@3
+openssl@3.3
+openssl@3.4
+openssl@3.5
+openssl@3.6
+openssl@4
+opus
+pandoc
+pango
+pcre2
+pipx
+pixman
+python
+python3
+python@3
+python@3.15
+pzstd
+readline
+sdl2
+sdl2-compat
+sdl3
+simdjson
+simdutf
+sqlite
+sqlite3
+svt-av1
+tesseract

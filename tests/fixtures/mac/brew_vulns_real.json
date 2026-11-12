@@ -1,0 +1,107 @@
+{
+  "findings": [
+    {
+      "formula": "openjpeg",
+      "version": "2.5.4",
+      "tag": "v2.5.4",
+      "repo_url": "https://github.com/uclouvain/openjpeg",
+      "vulnerabilities": [],
+      "patched": [
+        {
+          "id": "CVE-2026-6192",
+          "severity": "UNKNOWN",
+          "summary": "uclouvain openjpeg pi.c opj_pi_initialise_encode integer overflow",
+          "aliases": [],
+          "fixed_versions": [
+            "839936aa33eb8899bbbd80fda02796bb65068951"
+          ]
+        },
+        {
+          "id": "OSV-2025-219",
+          "severity": "HIGH",
+          "summary": "Heap-buffer-overflow in opj_j2k_read_tile_header",
+          "aliases": [],
+          "fixed_versions": [
+            "d33cbecc148d3affcdf403211fddc2cc5d442379",
+            "91d08b11a72764f6d199f32fa0c1b1abd4edc2ad"
+          ]
+        }
+      ]
+    },
+    {
+      "formula": "openssl@3",
+      "version": "3.5.9",
+      "tag": "openssl-3.5.9",
+      "repo_url": "https://github.com/openssl/openssl",
+      "vulnerabilities": [
+        {
+          "id": "CVE-2026-88822",
+          "severity": "UNKNOWN",
+          "summary": "QUIC Uses Uninitialized Stack Bytes During Automated Peer Detection",
+          "aliases": [],
+          "fixed_versions": [
+            "7b4f5344aa0401e7b777640050b5257ed2a70e88",
+            "911eee8eb7550b95a206f1ad8cbdb986098982f3",
+            "1a73dc590cbad62d6f0329ea4779eadaa8d8fd75"
+          ]
+        },
+        {
+          "id": "CVE-2026-88823",
+          "severity": "UNKNOWN",
+          "summary": "AES-GCM-SIV AAD Forgery After Zero-length Incremental AAD Update",
+          "aliases": [],
+          "fixed_versions": [
+            "6747b1a278816dd7db46438040a70b0b5e5e0a90",
+            "2f5fc833ff9b5bfe00b32f8b5c74f73c5773c682",
+            "159e1de0c448d7b9f09ad768c8e141def4aa1eb4"
+          ]
+        }
+      ],
+      "patched": []
+    },
+    {
+      "formula": "libssh2",
+      "version": "1.11.1",
+      "tag": "1.11.1",
+      "repo_url": "https://github.com/libssh2/libssh2",
+      "vulnerabilities": [
+        {
+          "id": "OSV-2025-433",
+          "severity": "UNKNOWN",
+          "summary": "Null-dereference READ in _libssh2_packet_add",
+          "aliases": [],
+          "fixed_versions": []
+        }
+      ],
+      "patched": [
+        {
+          "id": "CVE-2025-15661",
+          "severity": "UNKNOWN",
+          "summary": "libssh2 - Heap Buffer Over-read via sftp_symlink() in sftp.c",
+          "aliases": [],
+          "fixed_versions": [
+            "2dae3024897e1898d389835151f4e9606227721d"
+          ]
+        },
+        {
+          "id": "CVE-2026-55199",
+          "severity": "UNKNOWN",
+          "summary": "libssh2 - Pre-Authentication DoS via SSH_MSG_EXT_INFO Handler",
+          "aliases": [],
+          "fixed_versions": [
+            "17626857d20b3c9a1addfa45979dadcee1cd84a4"
+          ]
+        }
+      ]
+    }
+  ],
+  "skipped_formulae": [
+    "lame",
+    "libtiff",
+    "pinentry"
+  ],
+  "checked": 84,
+  "complete": false,
+  "outdated_without_sbom": [],
+  "unscanned_formulae": {}
+}

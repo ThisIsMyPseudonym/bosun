@@ -1,0 +1,29 @@
+
+[2KChecking for updates...[2KUpdate Assistant: Idle, Installing: [MSWD2019, PPT32019, OPIM2019: 48%][2KUpdate Assistant: Idle, Installing: [MSWD2019, PPT32019, OPIM2019: 53%][2KUpdate Assistant: Idle, Installing: [MSWD2019, PPT32019, OPIM2019: 54%][2KUpdate Assistant: Idle, Installing: [MSWD2019, PPT32019, OPIM2019: 55%][2KUpdate Assistant: Idle, Installing: [MSWD2019, PPT32019, OPIM2019: 93%][2KUpdate Assistant: Idle, Installing: [MSWD2019, PPT32019, OPIM2019: 94%][2KUpdate Assistant: Checking, Installing: [MSWD2019, PPT32019, OPIM2019: 94%][2KUpdate Assistant: Idle, Installing: [MSWD2019, PPT32019, OPIM2019: 94%][2K<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>MSWD2019</key>
+	<dict>
+		<key>AppState</key>
+		<integer>12</integer>
+		<key>Title</key>
+		<string></string>
+	</dict>
+	<key>OPIM2019</key>
+	<dict>
+		<key>AppState</key>
+		<integer>14</integer>
+		<key>Title</key>
+		<string></string>
+	</dict>
+	<key>PPT32019</key>
+	<dict>
+		<key>AppState</key>
+		<integer>12</integer>
+		<key>Title</key>
+		<string></string>
+	</dict>
+</dict>
+</plist>
+

@@ -1,0 +1,36 @@
+/* Bosun's terminal: a manual update, run here. A sheet above the page and the details drawer, below Ask Bosun.
+   Same tokens as everything else; the sixteen terminal colours are tuned per scheme so they read on both. */
+:root { --t0: #74858c; --t1: #ef8a7c; --t2: #7fd69a; --t3: #e3bf62; --t4: #7fb4ee; --t5: #c9a0e8; --t6: #62d6c4; --t7: #e6eeee; }
+@media (prefers-color-scheme: light) {
+  :root { --t0: #5d7074; --t1: #a3302c; --t2: #1f7a3e; --t3: #8a6a12; --t4: #1f5fa8; --t5: #7a3fa8; --t6: #0d7d6e; --t7: #142120; }
+}
+.termpanel { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 25;
+  width: min(920px, calc(100% - 24px)); height: min(640px, calc(100% - 24px)); display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 20px; box-shadow: var(--shadow); overflow: hidden; }
+.termpanel[hidden], .termpanel [hidden] { display: none; }
+.termhead { display: flex; align-items: center; gap: 10px; padding: 14px 14px 6px 20px; }
+.termhead h2 { margin: 0; font-size: 16px; font-weight: 750; letter-spacing: -.2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.termcmd { margin: 0; padding: 0 20px 10px; color: var(--ink-3); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere; border-bottom: 1px solid var(--line); min-height: 1.5em; max-height: 4.6em; overflow: hidden; }
+.term { flex: 1; min-height: 0; overflow: auto; padding: 12px 20px; background: var(--bg); color: var(--ink);
+  font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; }
+.term .tl { min-height: 1.5em; }
+.term .b { font-weight: 700; } .term .d { color: var(--ink-3); }
+.term .f0, .term .f8 { color: var(--t0); } .term .f1, .term .f9 { color: var(--t1); } .term .f2, .term .f10 { color: var(--t2); }
+.term .f3, .term .f11 { color: var(--t3); } .term .f4, .term .f12 { color: var(--t4); } .term .f5, .term .f13 { color: var(--t5); }
+.term .f6, .term .f14 { color: var(--t6); } .term .f7, .term .f15 { color: var(--t7); }
+.termfoot { padding: 12px 20px 16px; border-top: 1px solid var(--line); }
+.termrow { display: flex; gap: 8px; align-items: center; }
+.termin { flex: 1; min-width: 0; padding: 8px 12px; background: var(--bg); color: var(--ink); border: 1.5px solid var(--line-strong);
+  border-radius: 10px; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.termin:disabled { opacity: .5; }
+/* a password: dots, without telling the browser it is a credential field (no offer to save it) */
+.termin.secret { -webkit-text-security: disc; }
+@supports not (-webkit-text-security: disc) { .termin.secret { color: transparent; caret-color: var(--ink); } }
+.termnote { margin: 8px 0 0; }
+.termresult { margin: 0 0 8px; font-weight: 650; } .termresult.bad { color: var(--brick-text); }
+.termdone .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.recipes { display: flex; flex-direction: column; gap: 6px; }
+.recipes:empty { display: none; }
+.recipe { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.recipe .hint { margin: 0; }

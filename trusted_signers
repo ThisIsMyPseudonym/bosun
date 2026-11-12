@@ -1,0 +1,3 @@
+# Keys whose signature Bosun accepts on its own updates (ssh-keygen allowed_signers format). See selfupdate.verify.
+# Changing this file takes a commit signed by a key already listed here.
+bosun-maintainer namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ6ZPVZopNfjeHwZyL8w8dlBp6eNi287PLxcKTke/exj

@@ -1,0 +1,33 @@
+/Applications/Antigravity IDE.app|2.5.5|com.google.antigravity-ide|
+/Applications/Antigravity.app|2.2.1|com.google.antigravity|
+/Applications/Audacity 4.app|4.0.0|org.audacityteam.audacity4|
+/Applications/ChatGPT.app|26.1007.30912|com.openai.codex|
+/Applications/Claude.app|3.6556.2|com.anthropic.claudefordesktop|
+/Applications/Cursor.app|3.10.17|com.todesktop.230313mzl4w4u92|
+/Applications/Developer.app|11.1|developer.apple.wwdc-Release|mas
+/Applications/Docker.app|4.96.3|com.docker.docker|
+/Applications/Google Chrome.app|156.0.8078.47|com.google.Chrome|
+/Applications/Google Docs.app|133.0|com.google.drivefs.shortcuts.docs|
+/Applications/Google Drive.app|133.0|com.google.drivefs|
+/Applications/Google Sheets.app|133.0|com.google.drivefs.shortcuts.sheets|
+/Applications/Google Slides.app|133.0|com.google.drivefs.shortcuts.slides|
+/Applications/Keynote.app|14.5|com.apple.iWork.Keynote|mas
+/Applications/Logi Tune.app|3.12.193|com.logitech.logitune|
+/Applications/Microsoft Defender Shim.app|101.26060.0000|com.microsoft.wdav.shim|
+/Applications/Microsoft Excel.app|16.114|com.microsoft.Excel|
+/Applications/Microsoft PowerPoint.app|16.114|com.microsoft.Powerpoint|
+/Applications/Microsoft Teams.app|26225.1704.5081.2906|com.microsoft.teams2|
+/Applications/Microsoft Word.app|16.114|com.microsoft.Word|
+/Applications/Notepad - Text Editor.app|2.3|com.solaz.notepad|mas
+/Applications/Numbers.app|14.5|com.apple.iWork.Numbers|mas
+/Applications/Obsidian.app|1.8.10|md.obsidian|
+/Applications/OneDrive.app|26.173.0906|com.microsoft.OneDrive|
+/Applications/OrcaSlicer.app|2.3.1|com.softfever3d.orca-slicer|
+/Applications/Pages.app|14.5|com.apple.iWork.Pages|mas
+/Applications/Roblox.app|0.727.0.7271199|com.roblox.RobloxPlayer|
+/Applications/RustDesk.app|1.5.0|com.carriez.rustdesk|
+/Applications/Safari.app|27.0.1|com.apple.Safari|
+/Applications/Steam Link.app|1.4.2|com.valvesoftware.SteamLink17|mas
+/Applications/T3 Code (Nightly).app|0.1.3-nightly.20261023.3579|com.t3tools.t3code|
+/Applications/Tailscale.app|1.102.4|io.tailscale.ipn.macsys|
+/Applications/zoom.us.app|6.4.0 (51205)|us.zoom.xos|

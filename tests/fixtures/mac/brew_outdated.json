@@ -1,0 +1,294 @@
+{
+  "formulae": [
+    {
+      "name": "cairo",
+      "installed_versions": [
+        "1.18.4"
+      ],
+      "current_version": "1.18.6",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "fontconfig",
+      "installed_versions": [
+        "2.17.1"
+      ],
+      "current_version": "2.18.3",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "freetype",
+      "installed_versions": [
+        "2.14.1_1"
+      ],
+      "current_version": "2.15.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "fribidi",
+      "installed_versions": [
+        "1.0.16"
+      ],
+      "current_version": "1.0.17",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "gh",
+      "installed_versions": [
+        "2.102.0"
+      ],
+      "current_version": "2.103.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "giflib",
+      "installed_versions": [
+        "5.2.2"
+      ],
+      "current_version": "6.1.3",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "glib",
+      "installed_versions": [
+        "2.86.3"
+      ],
+      "current_version": "2.90.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "graphite2",
+      "installed_versions": [
+        "1.3.14"
+      ],
+      "current_version": "1.3.15",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "harfbuzz",
+      "installed_versions": [
+        "12.3.0"
+      ],
+      "current_version": "15.0.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "imath",
+      "installed_versions": [
+        "3.2.2"
+      ],
+      "current_version": "3.2.3",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "jpeg-turbo",
+      "installed_versions": [
+        "3.1.3"
+      ],
+      "current_version": "3.2.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "jpeg-xl",
+      "installed_versions": [
+        "0.11.1_3"
+      ],
+      "current_version": "0.12.0_1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "libarchive",
+      "installed_versions": [
+        "3.8.4"
+      ],
+      "current_version": "3.8.10",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "libdeflate",
+      "installed_versions": [
+        "1.25"
+      ],
+      "current_version": "1.26",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "libpng",
+      "installed_versions": [
+        "1.6.53"
+      ],
+      "current_version": "1.6.59",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "libtiff",
+      "installed_versions": [
+        "4.7.1"
+      ],
+      "current_version": "4.7.2",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "libx11",
+      "installed_versions": [
+        "1.8.12"
+      ],
+      "current_version": "1.8.14",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "libxext",
+      "installed_versions": [
+        "1.3.6"
+      ],
+      "current_version": "1.3.7",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "libxrender",
+      "installed_versions": [
+        "0.9.12"
+      ],
+      "current_version": "0.9.13",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "little-cms2",
+      "installed_versions": [
+        "2.17"
+      ],
+      "current_version": "2.19.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "nvm",
+      "installed_versions": [
+        "0.40.3"
+      ],
+      "current_version": "0.40.8",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "openexr",
+      "installed_versions": [
+        "3.4.4_1"
+      ],
+      "current_version": "3.5.2",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "openjdk@11",
+      "installed_versions": [
+        "11.0.29"
+      ],
+      "current_version": "11.0.32.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "openjpeg",
+      "installed_versions": [
+        "2.5.4"
+      ],
+      "current_version": "2.5.4_1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "openjph",
+      "installed_versions": [
+        "0.26.0"
+      ],
+      "current_version": "0.32.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "openssl@3",
+      "installed_versions": [
+        "3.6.0"
+      ],
+      "current_version": "3.5.9",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "pandoc",
+      "installed_versions": [
+        "3.8.3"
+      ],
+      "current_version": "3.12.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "pango",
+      "installed_versions": [
+        "1.57.0_1"
+      ],
+      "current_version": "1.58.2",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "tesseract",
+      "installed_versions": [
+        "5.5.2"
+      ],
+      "current_version": "5.5.3",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "xorgproto",
+      "installed_versions": [
+        "2025.1"
+      ],
+      "current_version": "2026.1",
+      "pinned": false,
+      "pinned_version": null
+    }
+  ],
+  "casks": [
+    {
+      "name": "claude-code",
+      "installed_versions": [
+        "2.1.71"
+      ],
+      "current_version": "2.1.308",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "orcaslicer",
+      "installed_versions": [
+        "2.3.1"
+      ],
+      "current_version": "2.4.2",
+      "pinned": false,
+      "pinned_version": null
+    }
+  ]
+}

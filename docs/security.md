@@ -1,0 +1,135 @@
+# Security
+
+What Bosun tells you about each vulnerability, and what protects your computer from Bosun, its agents and the data it reads.
+
+## Security in plain terms
+
+Each item's details answer *"can someone hack my computer through this?"* from the facts:
+
+- **How it's reached:** every CVSS vector becomes one of remote with no login, remote with
+  a login, same network, needs you to act (open a file, install a package), local access,
+  or physical access. These are shown as a bar and per vulnerability.
+- **What an attacker gets:** full compromise, data read or change, or a crash, taken from
+  the vector's impact metrics.
+- **How likely exploitation is:** [EPSS](https://www.first.org/epss/) (the probability of
+  exploitation in the next 30 days), and CISA KEV (actively exploited).
+- **Where it's used:**
+  - For system tools: which projects use them and the version each pins
+    (`packageManager`, `engines`, `.nvmrc`, `requires-python`, lockfile versions).
+  - For global pip packages: which installed packages require them.
+  - For project dependencies: the chain that pulls them in (from `package-lock.json` /
+    `uv.lock`) and the source files that import them.
+- **Impact assessment (on demand, Claude Code):** weighs all of the above against how this
+  machine uses the software. It returns:
+  - the exposure
+  - a direct answer
+  - the realistic attack and its preconditions
+  - the worst case
+  - the urgency
+  - the breakage risk for each project
+  - steps to take before and after upgrading
+
+  It runs sandboxed like the summaries and is cached per upgrade.
+
+## Safety
+
+- The server binds to `127.0.0.1` and rejects any request with a non-loopback `Host`
+  header, which blocks DNS rebinding.
+- Only you can talk to it. Every request, reads included, needs a session cookie, and the only way to get one
+  is a one-time login code made from a key file that only your account can read (`session.key` in the data
+  folder). The Bosun icon and `bosun open` do that for you; a browser that hasn't been let in sees a page
+  telling you to open Bosun from its icon. Other accounts, containers and sandboxed apps on the same computer
+  get nothing but "Bosun is running". The data folder itself is readable by your account only.
+- Every state-changing request from a browser also needs a per-process token plus a same-origin check. The
+  Content-Security-Policy blocks inline scripts and styles.
+- A local agent (`bosun mcp`, started by Claude Code as you) has no cookie. It sends a second value made from
+  the same key file, different from the cookie, so again only your account can make it. Such a request is
+  refused if it carries anything a browser adds by itself (`Origin`, `Sec-Fetch-Site`), reaches actions only
+  (not the page), and is recorded as `agent:<name>`. The key and what is made from it are never logged, never
+  returned by any tool, and never put on a command line.
+- What an agent may do is decided in the dashboard: read, change Bosun's own state, install. Quitting apps,
+  opening system updaters, pushing branches and opening pull requests are refused until you turn each on, and
+  no agent or automation can change those switches, the Claude budgets or Autopilot. Refused attempts are
+  recorded too. An agent never gets a password window.
+- The Ask Bosun assistant is inside the dashboard and has no credential of its own. It can read. Anything else
+  it asks for runs only with an approval the dashboard issued for that one action and that exact input, given
+  by a request from your signed-in browser (cookie and page token); each approval is used once and lapses
+  after five minutes. It can never change the limits above (ignoring items, Autopilot, notifications,
+  budgets, what agents may do), and agents cannot use the panel: they can't ask, approve, or read your
+  conversations. The model gets no shell, no file access, no web access, none of your Claude Code settings
+  or other MCP servers, and an empty folder to run in.
+- Git never runs a repository's own commands. Bosun runs git in every repository it finds under your home,
+  including ones you only unpacked, and a repository's config can name programs for git to run
+  (`core.fsmonitor`, hooks). Every git call switches those off.
+- Updates to Bosun itself come from signed release tags, every commit in them signed by a trusted key, and
+  never move it to an older version (see [Staying current](operating.md#staying-current-in-full)). An update that doesn't install and import is undone,
+  and the dashboard never restarts onto code that doesn't start. osv-scanner must match a hash written in
+  this repository.
+- A checkout never migrates a database another checkout owns. The database records the checkout that last
+  migrated it (or runs it as the installed dashboard); another checkout, such as a development worktree with
+  newer code, is refused when it would change that database's schema, unless `BOSUN_ALLOW_MIGRATE=1` is set.
+  A copy of the database in another folder, and a new database, are not affected. The database is copied to
+  `bosun.db.bak-v<N>` before every migration.
+- Changelog pages named by a package's metadata are fetched over https only, never from an address on this
+  computer or network, and never more than 2 MB.
+- Upgrade commands are built from strictly validated ids and run as argv lists, never
+  through a shell. A suite's one button is no exception: the request carries item keys and a recipe's
+  name, each item must offer that recipe itself, and the one command is built from their ids.
+- App icons are read from this computer's own app bundles (macOS asks the system; nothing is parsed by
+  hand unless that fails) and cached as small PNGs in the data folder. Bosun ships no third-party artwork
+  and fetches none. `GET /api/icon?key=<item key>` serves one to the signed-in browser only: agents are
+  refused, the file is chosen from the item in the current snapshot and never from the request, and icons
+  are not sent to other machines, put in a diagnostic bundle or a prompt, or readable by `bosun query`.
+  `BOSUN_NO_ICONS=1` turns the reading off.
+- Putting an item away (acknowledge, snooze, ignore) is yours alone, like every setting that hides a
+  finding, and none of them can hide an attack: an item that becomes exploited or is reported as malware
+  comes back.
+- Bosun's terminal ([Run it here](sources.md#run-it-here)) runs one of a fixed list of recipes, built the same way, in a
+  pseudo-terminal: no shell, no second command, input only to the command Bosun started and only
+  while it runs. Starting one, typing and stopping are yours alone (cookie and page token), never
+  an agent's or the assistant's; its output stream needs the session cookie. What you type is
+  passed on and not stored, logged or traced; the stored output is redacted. A run is ended with
+  its whole process group, and does not outlive the dashboard.
+- An app's own update feed (Sparkle) is fetched the way changelog pages are: https only, never
+  from an address on this computer or network, never more than 2 MB. The id Bosun gives Microsoft
+  AutoUpdate comes from a table in Bosun, not from AutoUpdate's output.
+- Watching an app you update by hand reads one `Info.plist` inside an Applications folder and asks `codesign`
+  who signed the bundle. The path comes from the item in the current snapshot and must be an app directly
+  inside `/Applications` or `~/Applications`, not a symlink. The guard for app bundles (`appguard.py`: signer,
+  signature and Gatekeeper assessment, a kept copy and the way back to it) runs fixed commands on such paths
+  only.
+- One recipe replaces an app: `brew-cask-takeover` (`takeover.py`). It is the only recipe that passes `--force`,
+  only for a cask the collector found safe to force, only on a person's click, and only inside the guard: copy
+  kept first, same signer afterwards, the copy put back otherwise. Homebrew does the download and the checksum;
+  Bosun never keeps or uses a download address.
+- An ordinary Homebrew upgrade of an app (`brew upgrade --cask`, by a click, Autopilot or an agent, with or
+  without the password window) runs inside the same guard (`caskguard.py`), for the cask's app in an
+  Applications folder when you own it. Before: who signed the copy that is there, whether macOS accepts it, and a
+  copy kept for 14 days (the oldest go sooner if the kept copies together pass 20 GB, but never within a day). After: the new app's signature must verify and chain to the same developer (a code
+  requirement, not the Team ID a bundle prints) and, if the old one verified in full and was accepted, the new
+  one must too (nested code included; Gatekeeper is tried twice). If not, the kept copy goes back, the job fails saying why, Autopilot leaves that
+  app to you, and the update is listed again as a reinstall for you to decide. If there is no copy to put back,
+  the new app is moved out of Applications into `kept-apps/rejected` in Bosun's data folder, renamed and
+  with nothing in it executable, so it cannot be opened by mistake; Bosun never deletes it, and the app is then
+  gone from Bosun's list until you install it again. Homebrew's
+  checksum says the download is the file its catalogue names; this says it came from the developer whose app
+  you were already running. Not covered: an app with no developer signature, or one whose
+  signature cannot be tied to a developer (the job's record says the upgrade ran without the check), a cask
+  that installs something other than an app, a cask's second app, an upgrade that renames the app, an app
+  Homebrew puts somewhere other than `/Applications`, and an admin cask you run in Bosun's terminal. An old app
+  that never verified in full is compared on its signature alone, which does not see a changed file inside
+  nested code. A developer who really has changed
+  certificates is stopped too: update that one yourself.
+- `bosun query` and `/api/query` can only read, and only what [`data-model.md`](data-model.md) lists (see [Ask the database](operating.md#ask-the-database)).
+- Release notes, repository files and model output are treated as untrusted. Prompts say
+  so, and the UI renders them with `textContent` only. A model's reading of release notes never authorises an
+  unattended install of a major version, and nothing a release note says can make the assistant act: the
+  approval card is the only way.
+
+Known limit: Branch + test has no operating-system sandbox on Windows, or on Linux without `bwrap` and `socat`.
+There the allow-list of commands is the only limit, and a dependency's install script or a test still runs
+with your access. The fix's details say "Ran without an OS sandbox" when that was the case.
+
+Data and logs live in `%LOCALAPPDATA%\bosun` on Windows, in
+`~/Library/Application Support/bosun` on macOS and in `~/.local/share/bosun` on Linux
+(`BOSUN_DATA_DIR` overrides this).

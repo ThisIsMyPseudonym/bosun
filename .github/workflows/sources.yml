@@ -1,0 +1,48 @@
+# Bosun reads OSV.dev, NVD, CISA's KEV list, Homebrew's cask catalogue, npm, PyPI, endoflife.date and GitHub.
+# Once a week this asks each for one well-known record and checks that the fields Bosun reads are still there.
+# When one has changed, it opens an issue (or adds to the one already open), so it is noticed before users are.
+name: Sources
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays, 06:17 UTC (off the hour: GitHub's queues are busiest on it)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write  # to open or comment on the one issue below, and nothing else
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      # actions are pinned to a full commit, never a tag a maintainer (or an attacker) can move
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - name: Ask each source
+        id: contract
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}  # raises GitHub's rate limit from 60 to 1000 requests an hour
+        run: uv run pytest -q -p no:cacheprovider -m contract tests/contract -rfs 2>&1 | tee contract.log; exit "${PIPESTATUS[0]}"
+      - name: Open an issue, or comment on the one that is open
+        if: failure() && steps.contract.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="A source Bosun reads has changed"
+          failed="$(grep -E '^FAILED' contract.log | cut -c1-300 || true)"
+          body="$(printf 'The weekly source check failed: %s\n\n%s\n\nEach FAILED line is a service Bosun reads that no longer answers the way Bosun reads it. A service that was only down is skipped, not failed.\n' "$RUN_URL" "$failed")"
+          existing="$(gh issue list --state open --search "\"$title\" in:title" --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

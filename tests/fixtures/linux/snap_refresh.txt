@@ -1,0 +1,2 @@
+Name  Version   Rev   Size    Publisher       Notes
+cups  2.4.20-1  1272  53.2MB  openprinting**  -

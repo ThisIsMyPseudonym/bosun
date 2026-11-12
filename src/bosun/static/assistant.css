@@ -1,0 +1,93 @@
+/* Ask Bosun: a slide-over above the page and the details drawer. Same tokens as everything else; the one filled
+   button is Approve (and Send), and an approval card is the only thing that raises its voice. */
+.askpanel { position: fixed; top: 12px; right: 12px; bottom: 12px; width: min(460px, calc(100% - 24px)); z-index: 30;
+  display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: 20px; box-shadow: var(--shadow); overflow: hidden; }
+.askpanel[hidden], .askpanel [hidden] { display: none; }
+.askhead { display: flex; align-items: center; gap: 4px; padding: 14px 14px 10px 20px; border-bottom: 1px solid var(--line); }
+.askhead h2 { margin: 0; font-size: 16px; font-weight: 750; letter-spacing: -.2px; }
+.asklog, .asklist { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+.asklog > *, .asklist > * { flex: none; }
+
+.askmsg { max-width: 92%; font-size: 13.5px; }
+.askmsg.user { align-self: flex-end; background: var(--raise); border-radius: 14px 14px 4px 14px; padding: 8px 12px; }
+.askmsg.assistant { align-self: flex-start; }
+.asktext { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.asktext:last-child { margin-bottom: 0; }
+.askmsg.live .askrich:last-child > :last-child::after { content: "▍"; color: var(--ink-3); }
+.askcode { position: relative; margin: 6px 0 10px; }
+.askcode pre, .asktool pre, .askcard pre { margin: 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 10px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap;
+  overflow-wrap: anywhere; max-height: 260px; overflow-y: auto; }
+.askcode pre { padding-right: 58px; }
+.askcode .link { position: absolute; top: 4px; right: 6px; font-size: 11.5px; background: var(--bg); }
+
+.asktool { font-size: 12.5px; color: var(--ink-3); }
+.asktool > summary { cursor: pointer; list-style: none; padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asktool > summary::-webkit-details-marker { display: none; }
+.asktool > summary::before { content: "›"; display: inline-block; width: 12px; color: var(--ink-3); }
+.asktool[open] > summary::before { content: "⌄"; }
+.asktool .askname { color: var(--ink-2); font-weight: 600; }
+.asktool.bad .askstate { color: var(--brick-text); }
+.asktool .askrun { margin-left: 8px; font-size: 11.5px; }
+.asktoolbody { display: flex; flex-direction: column; gap: 6px; padding: 6px 0 4px 12px; }
+.asktoolbody .tracelink { font-size: 12px; }
+
+.askcard { border: 1.5px solid var(--ochre); background: var(--ochre-tint); border-radius: 14px; padding: 12px 14px; font-size: 13px; }
+.askcard.settled { border: 1px solid var(--line); background: transparent; color: var(--ink-2); }
+.askcardhead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.askcard .chip { background: var(--ochre); color: var(--accent-ink); }
+.askcard.settled .chip { background: var(--raise); color: var(--ink-2); }
+.askcard p { margin: 0 0 6px; }
+.askcard .hint { margin: 0 0 6px; color: var(--ink-2); }
+.askitems { margin: 4px 0 8px; padding-left: 18px; }
+.askcard details > summary { cursor: pointer; font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+.askdecide { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.askdecide .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.askdecide .hint { margin: 0; }
+.askreason, .askrowin textarea { width: 100%; background: var(--surface); color: var(--ink); border: 1.5px solid var(--line-strong);
+  border-radius: 10px; padding: 7px 10px; font: inherit; font-size: 13px; }
+.askstate { margin: 6px 0 0; font-weight: 600; font-size: 12.5px; }
+.askstate:empty { display: none; }
+.asktool .askstate { display: inline; font-weight: 400; }
+
+.asknote { margin: 0; font-size: 12.5px; color: var(--ink-3); }
+.asknote.bad, .askhint.bad { color: var(--brick-text); }
+.askempty { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; margin-top: 8px; }
+.askempty .quiet { white-space: normal; text-align: left; }
+
+.askfoot { border-top: 1px solid var(--line); padding: 10px 14px 12px; }
+.askrowin { display: flex; gap: 8px; align-items: flex-end; }
+.askrowin textarea { flex: 1; resize: none; min-height: 40px; max-height: 160px; border-radius: 12px; }
+.askbusy { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-3); margin-bottom: 6px; }
+.askfoot .askhint { margin: 8px 2px 0; }
+
+.askrow { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--line); padding: 6px 0; }
+.askopen { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; background: none; border: 0;
+  color: var(--ink); cursor: pointer; padding: 4px 6px; border-radius: 8px; font-size: 13px; }
+.askopen:hover { background: var(--raise); }
+.askopen strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.askopen .hint { margin: 0; }
+
+.hello .quiet { margin-top: 8px; }
+.usage .pagehead h1 .quiet { font-weight: 600; }
+
+@media (max-width: 820px) {
+  .askpanel { top: 0; right: 0; bottom: 0; width: 100%; border-radius: 0; border: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .askpanel:not([hidden]) { animation: askin .16s ease-out; }
+  @keyframes askin { from { transform: translateX(16px); opacity: 0; } to { transform: none; opacity: 1; } }
+}
+
+/* an answer's light Markdown, shown as formatting */
+.askrich > :last-child { margin-bottom: 0; }
+.askrich .askh { margin: 12px 0 6px; font-size: 13.5px; font-weight: 750; } .askrich .askh:first-child { margin-top: 0; }
+.askrich code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; background: var(--raise); padding: 1px 5px; border-radius: 5px; overflow-wrap: anywhere; }
+.askrich .asklistmd { margin: 0 0 8px; padding-left: 20px; } .askrich .asklistmd li { margin: 3px 0; overflow-wrap: anywhere; }
+.askrich .asklistmd li.sub { margin-left: 16px; list-style-type: circle; }
+.askrich hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+.asktable { overflow-x: auto; margin: 0 0 8px; }
+.asktable table { border-collapse: collapse; font-size: 12.5px; }
+.asktable th, .asktable td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.asktable th { color: var(--ink-3); font-weight: 700; font-size: 11.5px; }

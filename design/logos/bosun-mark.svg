@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="currentColor" role="img" aria-label="Bosun">
+  <title>Bosun</title>
+  <!-- mast and sails form the B, leaning 9° forward -->
+  <g transform="translate(7 0) skewX(-9)">
+    <path d="M40 18a4 4 0 0 1 8 0v74h-8z"/>
+    <path d="M53 29c19 1.2 29 7.4 29 15s-10 13.6-29 14.4z"/>
+    <path d="M53 64c27 .8 39 7.6 39 16.4S80 93.4 53 94z"/>
+  </g>
+  <!-- hull, bow swept up toward the heading -->
+  <path d="M14 99h90c5 0 9-1.6 12-5.5c-2.6 12.4-14 21.5-29 21.5H44c-13.6 0-24-6.6-30-16z"/>
+</svg>

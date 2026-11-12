@@ -1,0 +1,6 @@
+Listing...
+gir1.2-glib-2.0/noble-updates 2.80.0-6ubuntu3.10 amd64 [upgradable from: 2.80.0-6ubuntu3.9]
+libglib2.0-0t64/noble-updates 2.80.0-6ubuntu3.10 amd64 [upgradable from: 2.80.0-6ubuntu3.9]
+libglib2.0-bin/noble-updates 2.80.0-6ubuntu3.10 amd64 [upgradable from: 2.80.0-6ubuntu3.9]
+libglib2.0-data/noble-updates 2.80.0-6ubuntu3.10 all [upgradable from: 2.80.0-6ubuntu3.9]
+tmux/noble-updates 3.4-1ubuntu0.2 amd64 [upgradable from: 3.4-1ubuntu0.1]
