@@ -116,8 +116,8 @@ def test_a_release_with_no_date_or_a_date_ahead_of_the_clock_is_not_old_enough()
 
 
 def test_only_a_confirmed_urgent_fix_skips_the_wait():
-    fixed = lambda **kw: _d("now", offered=0, vulns_fixed=(Vuln("CVE-2026-1000", **kw),))  # noqa: E731
-    assert autopilot.eligible(fixed(kev=True), {})
+    fixed = lambda offered=-2.0, **kw: _d("now", offered=offered, vulns_fixed=(Vuln("CVE-2026-1000", **kw),))  # noqa: E731
+    assert autopilot.eligible(fixed(kev=True, offered=-1.01), {})  # a day, not three (and not at once: see below)
     assert autopilot.eligible(_d("now", offered=0, vulns_fixed=(Vuln("GHSA-aaaa-bbbb-cccc", aliases=("MAL-2026-1",)),)), {})
     # a score is chosen by whoever publishes the advisory, and an old fix says nothing about the newest release
     assert not autopilot.eligible(fixed(cvss=10.0), {})
@@ -127,6 +127,74 @@ def test_only_a_confirmed_urgent_fix_skips_the_wait():
     assert not autopilot.eligible(_d("now", offered=0, notes_cves=("CVE-2026-1002",)), {})
     # and urgency never widens what Autopilot may touch
     assert not autopilot.eligible({**fixed(kev=True), "lane": "plan"}, {})
+
+
+HOUR = 3600.0
+
+
+def _kev_fix(offered_hours, lane="batch", **kw):
+    """A drop-in update whose new version fixes a flaw on CISA's list, first seen `offered_hours` from now."""
+    d = _d(lane, offered=None, vulns_fixed=(Vuln("CVE-2026-1000", kev=True),), **kw)
+    if offered_hours is not None:
+        d["offered"] = time.time() + offered_hours * HOUR
+    return d
+
+
+def test_the_shipped_hold_for_an_exploited_fix_is_a_day():
+    import importlib
+    assert importlib.reload(importlib.import_module("bosun.autopilot")).KEV_HOLD_HOURS == 24
+
+
+def test_a_fix_for_an_exploited_flaw_seen_an_hour_ago_is_held_for_a_day():
+    fresh = _kev_fix(-1)
+    assert autopilot.qualifies(fresh, {}) and not autopilot.eligible(fresh, {})
+    assert autopilot.held_until(fresh) == fresh["offered"] + 24 * HOUR
+    assert autopilot.queued([fresh], {}) == [] and autopilot.kev_held(fresh, {})
+    [w] = autopilot.waiting([fresh], {})
+    assert w["exploited"] and w["wait"] == "24 hours" and w["dated"]
+
+
+def test_a_fix_for_an_exploited_flaw_seen_over_a_day_ago_goes_without_the_full_wait():
+    old = _kev_fix(-25)
+    assert autopilot.eligible(old, {}) and autopilot.held_until(old) is None and not autopilot.kev_held(old, {})
+    assert autopilot.queued([old], {}) == ["winget:Git.Git"]
+    assert not autopilot.eligible(_d(offered=-25 / 24), {})  # an ordinary update of that age still waits its 3 days
+
+
+def test_a_fix_for_an_exploited_flaw_with_no_date_or_a_date_ahead_of_the_clock_has_not_waited():
+    now = time.time()
+    for d in (_kev_fix(None), _kev_fix(+30), _kev_fix(+0.5), {**_kev_fix(-30), "offered": float("nan")}):
+        assert autopilot.held_until(d, now) == now + 24 * HOUR, d.get("offered")
+        assert not autopilot.eligible(d, {}, now=now)
+        # and not "in the hold": one that can't end is said as exploited instead (notify.needs)
+        assert not autopilot.kev_held(d, {}, now=now)
+
+
+def test_a_version_that_replaces_malware_still_does_not_wait():
+    mal = _d("now", offered=0, vulns_fixed=(Vuln("GHSA-aaaa-bbbb-cccc", aliases=("MAL-2026-1",)),))
+    assert autopilot.eligible(mal, {}) and autopilot.held_until(mal) is None and not autopilot.kev_held(mal, {})
+    both = _d("now", offered=0, vulns_fixed=(Vuln("MAL-2026-2"), Vuln("CVE-2026-1000", kev=True)))
+    assert autopilot.eligible(both, {})  # malware installed is the known danger, exploited or not
+    undated = {k: v for k, v in mal.items() if k != "offered"}
+    assert autopilot.eligible(undated, {})
+
+
+def test_the_hold_never_outlasts_the_wait_itself(monkeypatch):
+    monkeypatch.setattr(autopilot, "WAIT_DAYS", 0)
+    assert autopilot.eligible(_kev_fix(-1), {})
+
+
+def test_a_refresh_holds_an_exploited_fix_for_a_day_then_autopilot_installs_it(tmp_path, monkeypatch):
+    R, s, store, ran = _refresh_with(tmp_path, monkeypatch, Item(
+        Source.WINGET, "Git.Git", "Git", "2.50.0", "2.55.0", lane="now", vulns_fixed=(Vuln("CVE-2026-1000", kev=True),)))
+    autopilot.set_on(store, True)
+    assert R.refresh(s, store)["auto_upgraded"] == [] and ran == []  # first seen just now
+    with store._tx() as db:
+        db.execute("UPDATE offers SET first_seen = first_seen - ?", (23 * HOUR,))
+    assert R.refresh(s, store)["auto_upgraded"] == [] and ran == []
+    with store._tx() as db:
+        db.execute("UPDATE offers SET first_seen = first_seen - ?", (2 * HOUR,))
+    assert R.refresh(s, store)["auto_upgraded"] == ["winget:Git.Git: ok"]
 
 
 def test_a_new_version_starts_its_own_wait_and_the_same_version_keeps_its_date(tmp_path):

@@ -10,7 +10,7 @@ const heldFor = (S, key) => S.autopilot.on ? (S.autopilot.waiting || []).find((w
 // when the wait ends; the install is at Autopilot's first daily check after that
 const waitEnds = (w, days) => w.dated
   ? `at its first check after ${new Date(w.until * 1000).toLocaleString(undefined, { weekday: "long", hour: "numeric", minute: "2-digit" })}`
-  : `once Bosun has seen it on offer for ${days || 3} days`;
+  : `once Bosun has seen it on offer for ${w.wait || `${days || 3} days`}`;
 
 // ---------- what needs a human ----------
 function machineEntry(S, p) {
@@ -35,6 +35,7 @@ function machineEntry(S, p) {
   if (p.lane === "plan") return { ...e, line: "Big update with security fixes. Check what changes first.", verb: "Details", act: e.open };
   const held = heldFor(S, lead.key);
   const auto = queuedSet(S).has(lead.key) ? ` Autopilot does it ${runTime(S)} otherwise.`
+    : held && held.exploited ? ` It fixes a flaw attackers are using, but this release is new, so Autopilot holds it ${held.wait}: it installs it ${waitEnds(held, S.autopilot.wait_days)}. Update now to skip the hold.`
     : held ? ` This release is new, so Autopilot waits: it installs it ${waitEnds(held, S.autopilot.wait_days)}.` : "";
   return { ...e, line: `${p.headline || "Security fix, drop-in."}${auto}`, verb: "Update", act: () => MC.actions.upgrade([lead.key]) };
 }
@@ -238,7 +239,8 @@ function waitingLine(a) {
   const held = a.on ? a.waiting || [] : [];
   if (!held.length) return null;
   return el("div", { class: "apwait", title: held.map((w) => `${w.name}: ${waitEnds(w, a.wait_days)}`).join("\n") },
-    el("span", { text: `${plural(held.length, "new release")} waiting ${a.wait_days || 3} days before installing` }),
+    el("span", { text: `${plural(held.length, "new release")} waiting ${new Set(held.map((w) => w.wait)).size === 1
+      ? `${held[0].wait || `${a.wait_days || 3} days`} ` : ""}before installing` }),
     el("button", { class: "apbtn", text: "Update now",
       onclick: () => MC.actions.upgradeKeys(held.map((w) => w.key), held.map((w) => w.name)) }));
 }

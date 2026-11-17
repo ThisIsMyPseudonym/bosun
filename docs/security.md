@@ -153,6 +153,13 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   Bosun read what casks depend on (those two are tried again next time; a refresh downloads such a catalogue
   again, and writes each download into place in one step).
 - `bosun query` and `/api/query` can only read, and only what [`data-model.md`](data-model.md) lists (see [Ask the database](operating.md#ask-the-database)).
+- An install nobody at this computer clicked for (Autopilot, an item set to update automatically, an agent's
+  or the assistant's request) waits until this computer has seen the version on offer for three days. A fix
+  for a flaw on CISA's KEV list waits 24 hours instead. It does not go at once, because which version fixes a
+  CVE often comes from the project's own advisory: a hijacked maintainer account could name a real exploited
+  CVE and reach every Autopilot machine within hours. A first-seen date later than the clock counts as not
+  waited. Bosun notifies you when such a fix is held, and a click installs it at once. Only an update that
+  replaces a version reported as malware skips the wait. See [Autopilot](autopilot.md).
 - Release notes, repository files and model output are treated as untrusted. Prompts say
   so, and the UI renders them with `textContent` only. A model's reading of release notes never authorises an
   unattended install of a major version, and nothing a release note says can make the assistant act: the

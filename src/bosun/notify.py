@@ -1,7 +1,8 @@
 """Native notifications, only when something needs you.
 
-The dashboard checks every couple of minutes and speaks up for four things, each once:
-something actively exploited, an update that failed while you weren't looking, a downloaded
+The dashboard checks every couple of minutes and speaks up for five things, each once:
+something actively exploited, a fix for an exploited flaw that Autopilot is holding for a day
+(once per item and version), an update that failed while you weren't looking, a downloaded
 browser update waiting for a relaunch, and a newly found update that needs your decision.
 It stays quiet while the dashboard is open in front of you (you can already see it), groups
 bursts into one notification, and never repeats something it has already said.
@@ -59,11 +60,12 @@ def needs(items: list[dict], prefs: dict[str, dict], pilot_on: bool, busy: set[s
             continue
         if i["source"] in ("repo", "container"):  # project dependencies: one entry per project
             key, name = f"project:{i.get('project') or i.get('location', '')}", i.get("project_name") or "a project"
-        elif pilot_on and (autopilot.eligible(i, prefs, hands_off)
+        elif pilot_on and (autopilot.eligible(i, prefs, hands_off) or autopilot.kev_held(i, prefs, hands_off)
                            or (not kev and autopilot.qualifies(i, prefs, hands_off)
                                and autopilot.first_offered(i, time.time()) is not None)):
             # Autopilot has it: now, or once the release has been out long enough. Never quiet about something
-            # exploited, or about a wait with no date to count from (that one would never end)
+            # exploited, or about a wait with no date to count from (that one would never end). A fix for an
+            # exploited flaw in its short hold is said by `holds` instead, once per version
             continue
         elif i.get("opens") and not (i.get("unsupported") or i.get("ends_soon")):  # one trip to Windows Update covers them all
             key, name = "system-updates", machine.UPDATES_LABEL
@@ -76,6 +78,16 @@ def needs(items: list[dict], prefs: dict[str, dict], pilot_on: bool, busy: set[s
     return {m: v for m, v in out.items() if m.endswith("#kev") or f"{m}#kev" not in out}
 
 
+def holds(items: list[dict], prefs: dict[str, dict], pilot_on: bool, busy: set[str],
+          hands_off: dict[str, str] | None = None) -> dict[str, str]:
+    """mark -> name for each fix of an exploited flaw that Autopilot holds for autopilot.KEV_HOLD_HOURS. The mark
+    carries the version: a newer version in the same hold is said again, the same one on the next check is not."""
+    if not pilot_on:
+        return {}
+    return {f"kev-hold:{i['key']}@{i.get('available') or ''}": i.get("name") or i["key"] for i in items
+            if i["key"] not in busy and autopilot.kev_held(i, prefs, hands_off)}
+
+
 def _names(names: list[str], limit: int = 3) -> str:
     names = list(dict.fromkeys(names))
     if len(names) > limit:
@@ -83,12 +95,23 @@ def _names(names: list[str], limit: int = 3) -> str:
     return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
-def compose(exploited: list[str], failed: list[str], ready: list[str], fresh: list[str], updated: int) -> Note | None:
+def compose(exploited: list[str], failed: list[str], ready: list[str], fresh: list[str], updated: int,
+            held: list[str] = ()) -> Note | None:
     """One notification for everything new, headed by the most urgent part."""
     lines: list[tuple[str, str]] = []
+    full: set[int] = set()  # lines said in full wherever they come: a hold asks for a choice
     if exploited:
         lines.append((f"Actively exploited: {_names(exploited, 2)}",
                       "Attackers are using this now. Open Bosun today to see what to do."))
+    if held:
+        one = len(set(held)) == 1
+        hours = f"{autopilot.KEV_HOLD_HOURS:g}-hour"
+        full.add(len(lines))
+        lines.append((f"{_names(held, 2)}: fix for an exploited flaw",
+                      f"The new version{'' if one else 's'} of {_names(held)} fix{'es' if one else ''} a flaw attackers "
+                      f"are using now. Autopilot installs {'it' if one else 'them'} after a {hours} hold, in case the "
+                      f"release itself was tampered with. To install {'it' if one else 'them'} now, click Update in "
+                      "the Bosun dashboard."))
     if failed:
         lines.append((f"{_names(failed, 2)} didn't update" if len(failed) <= 2 else f"{len(failed)} updates didn't finish",
                       "Open Bosun to see why and retry."))
@@ -100,7 +123,9 @@ def compose(exploited: list[str], failed: list[str], ready: list[str], fresh: li
     if not lines:
         return None
     title, first = lines[0]
-    rest = [t if t.endswith(".") else f"{t}." for t, _ in lines[1:]]
+    # the rest are named by their titles
+    rest = [f"{t}. {b}" if n in full else t if t.endswith(".") else f"{t}."
+            for n, (t, b) in enumerate(lines) if n]
     if updated:
         rest.append(f"Bosun updated {updated} other thing{'s' if updated != 1 else ''}.")
     return Note(title, " ".join([first, *rest]))
@@ -132,9 +157,11 @@ class Notifier:
         prefs = self.store.prefs()
         jobs = self.store.jobs()
         busy = {j["item_key"] for j in jobs if j["status"] in ("waiting", "queued", "running")}
-        current = needs(list(items.values()), prefs, autopilot.is_on(self.store), busy, autopilot.hands_off(self.store, list(items.values())))
+        pilot, skip = autopilot.is_on(self.store), autopilot.hands_off(self.store, list(items.values()))
+        current = needs(list(items.values()), prefs, pilot, busy, skip)
+        held = holds(list(items.values()), prefs, pilot, busy, skip)
         ready = {f"relaunch:{r['app']}@{r['version']}": r["name"] for r in self.pending()}
-        marks = {*current, *ready}
+        marks = {*current, *held, *ready}
 
         raw_seen, raw_cursor = self.store.setting(SEEN), self.store.setting(CURSOR)
         if raw_seen is None or raw_cursor is None:  # first run: what's on screen today is already known
@@ -147,14 +174,15 @@ class Notifier:
         new = {m: v for m, v in current.items() if m not in seen and m.split("#")[0] not in failed}  # failed says it
 
         quiet = not is_on(self.store) or now - self.last_viewed < WATCHING_S
-        if not quiet and now - self.last_sent < GAP_S and (new or failed or set(ready) - seen):
+        if not quiet and now - self.last_sent < GAP_S and (new or failed or set(ready) - seen or set(held) - seen):
             return None  # too soon after the last one: keep it all for the next
         note = None if quiet else compose(
             exploited=[n for n, kev in new.values() if kev],
             failed=self._job_names(failed, items),
             ready=[n for m, n in ready.items() if m not in seen],
             fresh=[n for n, kev in new.values() if not kev],
-            updated=updated)
+            updated=updated,
+            held=[n for m, n in held.items() if m not in seen])
         if note:
             if not self.say(note):
                 return None  # try again next tick rather than lose it

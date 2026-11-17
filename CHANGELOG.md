@@ -3,6 +3,20 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/).
 
+## 1.0.2 - 2026-11-17
+
+A security release. Autopilot now waits a day before installing a fix for an exploited flaw.
+
+### Security
+
+- Autopilot no longer installs a fix for an exploited flaw (CISA KEV) the moment it appears. It waits until
+  this computer has seen that version on offer for 24 hours. Which version fixes a CVE often comes from the
+  project's own advisory, so a hijacked release could name a real exploited CVE and be installed at once on
+  every machine with Autopilot on. A first-seen date later than the clock counts as not waited. Bosun notifies
+  you once for each item and version that goes into this hold, and a click in the dashboard still installs it
+  at once. The same hold applies to items set to update automatically and to agents' requests. An update that
+  replaces a version reported as malware still does not wait.
+
 ## 1.0.1 - 2026-11-16
 
 A security fix release. Update as soon as you can.

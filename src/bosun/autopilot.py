@@ -12,13 +12,18 @@ It waits, too. A release Bosun first saw less than WAIT_DAYS ago is held: a rele
 (a hijacked publisher account or build) is usually noticed and withdrawn within days, and the machines it
 reaches are the ones that installed it in its first hours with nobody watching. The wait counts from when this
 machine first saw the version on offer, which is never earlier than its release and which no publisher can
-set. Only one kind of update does not wait: one that fixes a vulnerability attackers are using now (CISA's list),
-or that replaces a version reported as malware. There the known danger outweighs the possible one. A severity
-score is not enough: whoever publishes an advisory chooses its score, most security updates are rated high,
-and a fix that shipped in an earlier release says nothing about the newest one, which is the one that gets
-installed. Those wait three days like everything else, and Bosun tells you about them meanwhile. This is judged
-from `vulns_fixed` only, which holds what a vulnerability source confirmed for these versions, never what
-release notes claim.
+set. A severity score never shortens it: whoever publishes an advisory chooses its score, most security updates
+are rated high, and a fix that shipped in an earlier release says nothing about the newest one, which is the one
+that gets installed. This is judged from `vulns_fixed` only, which holds what a vulnerability source confirmed
+for these versions, never what release notes claim.
+
+Two kinds of update wait less. One that replaces a version reported as malware does not wait at all: the
+installed copy is the known danger. One that fixes a vulnerability attackers are using now (CISA's list) waits
+KEV_HOLD_HOURS instead of the full period, and Bosun tells you at once so you can install it yourself sooner.
+It still waits that long because the link from "this version" to "this fixes that CVE" is often written by the
+project's own maintainers, in their advisory: someone who took over a publisher account can release a version,
+name a real exploited CVE as fixed, and would otherwise reach every Autopilot machine within hours. A day gives
+the usual reports of a hijacked release time to arrive, and costs little against a flaw you can fix by hand now.
 
 The wait covers every install nobody at this computer asked for: Autopilot, an item set to update
 automatically, and an update requested by an agent or the assistant. A click in the dashboard runs at once.
@@ -45,14 +50,45 @@ DROP_IN_LANES = frozenset({"now", "batch"})
 WAIT_DAYS = 3  # Dependabot's default is 3 days, pnpm's one, Yarn's seven
 
 
-def fixes_urgent(item: dict) -> bool:
-    """Does this update fix something that can't wait: exploited now, or malware in the installed version?
-    Only confirmed findings count, and a severity score alone never does (see the module note)."""
+KEV_HOLD_HOURS = 24  # the shorter wait for a fix of an exploited flaw (see the module note)
+
+
+def replaces_malware(item: dict) -> bool:
+    """Is the installed version reported as malware (an OSV MAL- record), so the update removes it?"""
     for v in item.get("vulns_fixed") or ():
         ids = (str(v.get("id") or ""), *(str(a) for a in v.get("aliases") or ()))
-        if v.get("kev") is True or any(i.startswith("MAL-") for i in ids):
+        if any(i.startswith("MAL-") for i in ids):
             return True
     return False
+
+
+def fixes_exploited(item: dict) -> bool:
+    """Does this update fix a vulnerability on CISA's list of ones attackers are using now? Only confirmed
+    findings count, and a severity score alone never does (see the module note)."""
+    return any(v.get("kev") is True for v in item.get("vulns_fixed") or ())
+
+
+def fixes_urgent(item: dict) -> bool:
+    """Does this update fix something that can't wait: exploited now, or malware in the installed version?"""
+    return replaces_malware(item) or fixes_exploited(item)
+
+
+def wait_seconds(item: dict) -> float:
+    """How long a version must have been on offer before an install nobody asked for: 0 for one that replaces
+    malware, KEV_HOLD_HOURS for a fix of an exploited flaw, WAIT_DAYS for the rest. Never longer than WAIT_DAYS."""
+    full = max(WAIT_DAYS, 0) * 86400.0
+    if replaces_malware(item):
+        return 0.0
+    if fixes_exploited(item):
+        return min(KEV_HOLD_HOURS * 3600.0, full)
+    return full
+
+
+def wait_label(item: dict) -> str:
+    """The waiting period for this update, in words: "24 hours", "3 days"."""
+    if fixes_exploited(item) and not replaces_malware(item) and KEV_HOLD_HOURS * 3600.0 < WAIT_DAYS * 86400.0:
+        return f"{KEV_HOLD_HOURS:g} hours"
+    return f"{WAIT_DAYS} day{'s' if WAIT_DAYS != 1 else ''}"
 
 
 def first_offered(item: dict, now: float) -> float | None:
@@ -66,14 +102,16 @@ def first_offered(item: dict, now: float) -> float | None:
 def held_until(item: dict, now: float | None = None) -> float | None:
     """When the waiting period for this update ends, or None when it is over or doesn't apply. A version with
     no first-seen date (a snapshot from before the wait existed, a date that couldn't be recorded, a clock that
-    went backwards) is not old enough: it waits the whole period from now."""
-    if WAIT_DAYS <= 0 or fixes_urgent(item):
+    went backwards) is not old enough: it waits the whole period from now. That holds for the shorter wait of a
+    fix for an exploited flaw too."""
+    period = wait_seconds(item)
+    if period <= 0:
         return None
     now = time.time() if now is None else now
     offered = first_offered(item, now)
     if offered is None:
-        return now + WAIT_DAYS * 86400
-    until = offered + WAIT_DAYS * 86400
+        return now + period
+    until = offered + period
     return until if until > now else None
 
 
@@ -95,6 +133,15 @@ def eligible(item: dict, prefs: dict[str, dict], hands_off: dict[str, str] | Non
     return qualifies(item, prefs, hands_off, now) and held_until(item, now) is None
 
 
+def kev_held(item: dict, prefs: dict[str, dict], hands_off: dict[str, str] | None = None,
+             now: float | None = None) -> bool:
+    """Autopilot's to install, a fix for an exploited flaw, and still in its KEV_HOLD_HOURS hold. One with no
+    first-seen date to count from is not: its hold would never end, so it stays exploited and the user's."""
+    now = time.time() if now is None else now
+    return (fixes_exploited(item) and not replaces_malware(item) and qualifies(item, prefs, hands_off, now)
+            and first_offered(item, now) is not None and held_until(item, now) is not None)
+
+
 def waiting(items: list[dict], prefs: dict[str, dict], hands_off: dict[str, str] | None = None,
             now: float | None = None) -> list[dict]:
     """What Autopilot will install once the release has been out long enough, and when that is."""
@@ -104,7 +151,8 @@ def waiting(items: list[dict], prefs: dict[str, dict], hands_off: dict[str, str]
         if until is not None:
             # undated: Bosun has no first-seen date for it, so "until" moves; the page says so instead of a day
             out.append({"key": i["key"], "name": i.get("name") or i["key"], "until": until,
-                        "dated": first_offered(i, time.time() if now is None else now) is not None})
+                        "dated": first_offered(i, time.time() if now is None else now) is not None,
+                        "wait": wait_label(i), "exploited": fixes_exploited(i)})
     return out
 
 

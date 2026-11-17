@@ -17,6 +17,9 @@ How Bosun sorts every item into a lane, rates its risk, and lets you put an item
   A CVE with no EPSS score yet keeps its CVSS rating.
 - **Malware** (an OSV `MAL-` advisory: the package itself is hostile) is always Do now, even
   in a dormant project. Removing it is the fix; there is no version to wait for.
+- **Exploited** does not mean Autopilot installs it at once. A new version that fixes a flaw on the KEV
+  list is held 24 hours first, and Bosun notifies you so you can install it yourself now. Other new
+  versions wait three days. See [Autopilot and the waiting period](autopilot.md).
 - **Readiness** is the migration effort Claude Code assigns from the release notes. A
   major version jump counts as work unless the assessment says it's drop-in. Browsers are
   always drop-in: they bump majors monthly, while pnpm 9 → 12 is a different matter.

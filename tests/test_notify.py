@@ -178,3 +178,54 @@ def test_a_held_update_is_quiet_only_while_its_wait_can_end(monkeypatch):
     assert needs([{**fresh, "kev": True}], {}, True, set()) == {"winget:Git.Git#kev": ("Git", True)}  # exploited: said at once
     undated = {k: v for k, v in fresh.items() if k != "offered"}
     assert needs([undated], {}, True, set()) == {"winget:Git.Git": ("Git", False)}  # no date: the wait would never end
+
+
+def _kev_fix(hours_ago, available="2.55.0"):
+    import time
+    return {**GIT, "lane": "batch", "available": available, "offered": time.time() - hours_ago * 3600,
+            "vulns_fixed": [{"id": "CVE-2026-1000", "kev": True}]}
+
+
+def test_a_held_fix_for_an_exploited_flaw_is_said_once_per_version(tmp_path, monkeypatch):
+    from bosun import autopilot
+    monkeypatch.setattr(autopilot, "WAIT_DAYS", 3)
+    store, n, sent, clock = setup(tmp_path, [])
+    autopilot.set_on(store, True)
+    n.tick()  # first run: nothing on offer yet
+    store.save_snapshot([_kev_fix(1)], [])  # Bosun's own first-seen date is now, whatever the item said
+    clock.t += 300
+    note = n.tick()
+    assert note.title == "Git: fix for an exploited flaw"
+    for said in ("new version of Git", "attackers are using now", "Autopilot installs it after a 24-hour hold",
+                 "install it now, click Update in the Bosun dashboard"):
+        assert said in note.body, said
+    for _ in range(3):  # every later check, and every refresh, while the hold lasts: already said
+        store.save_snapshot([_kev_fix(1)], [])
+        clock.t += notify.GAP_S + 1
+        assert n.tick() is None
+    store.save_snapshot([_kev_fix(1, available="2.56.0")], [])  # a newer version in the same hold is news
+    clock.t += notify.GAP_S + 1
+    assert n.tick().title == "Git: fix for an exploited flaw" and len(sent) == 2
+
+
+def test_a_held_exploited_fix_is_one_mark_not_also_exploited_or_needs_you(monkeypatch):
+    from bosun import autopilot
+    monkeypatch.setattr(autopilot, "WAIT_DAYS", 3)
+    held = {**_kev_fix(1), "kev": True, "lane": "now"}
+    assert needs([held], {}, True, set()) == {}
+    assert notify.holds([held], {}, True, set()) == {"kev-hold:winget:Git.Git@2.55.0": "Git"}
+    assert notify.holds([held], {}, False, set()) == {}  # Autopilot off: nothing is held, it needs you as before
+    assert needs([held], {}, False, set()) == {"winget:Git.Git#kev": ("Git", True)}
+    assert notify.holds([held], {}, True, {"winget:Git.Git"}) == {}  # already updating
+    assert notify.holds([_kev_fix(25)], {}, True, set()) == {}  # the day is over: Autopilot installs it now
+    assert notify.holds([held], {"winget:Git.Git": {"ignored": True}}, True, set()) == {}
+    undated = {k: v for k, v in held.items() if k != "offered"}  # its hold would never end: said as exploited
+    assert notify.holds([undated], {}, True, set()) == {}
+    assert needs([undated], {}, True, set()) == {"winget:Git.Git#kev": ("Git", True)}
+
+
+def test_a_hold_is_said_in_full_also_after_something_more_urgent():
+    note = compose(exploited=["WinRAR"], failed=[], ready=[], fresh=[], updated=0, held=["Git", "7-Zip"])
+    assert note.title == "Actively exploited: WinRAR"
+    assert "Git and 7-Zip: fix for an exploited flaw. The new versions of Git and 7-Zip fix" in note.body
+    assert "Autopilot installs them after a 24-hour hold" in note.body

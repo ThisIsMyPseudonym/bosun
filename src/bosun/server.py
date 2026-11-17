@@ -781,7 +781,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                 elif until is not None:
                     keys.remove(k)
                     held.append({"key": k, "reason": f"This release is new: Bosun installs nothing unattended until it has "
-                                 f"been on offer {autopilot.WAIT_DAYS} days (about {time.strftime('%A %d %B', time.localtime(until))}). "
+                                 f"been on offer {autopilot.wait_label(known[k])} (about {time.strftime('%A %d %B', time.localtime(until))}). "
                                  "The user can update it now from the dashboard."})
         # a password window needs you at the machine: only a person clicking in the dashboard gets one
         out = upgrader.start_many([item_from_dict(known[k]) for k in keys], allow_password=ctx.actor == "user",

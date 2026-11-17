@@ -249,6 +249,19 @@ def test_an_agents_request_is_held_by_the_waiting_period_and_a_click_is_not(app,
 
 
 
+def test_a_fix_for_an_exploited_flaw_is_held_a_day_for_an_agent_and_a_click_installs_it_at_once(app, agent, user, monkeypatch):
+    from bosun.models import Vuln
+    monkeypatch.setattr("bosun.autopilot.WAIT_DAYS", 3)
+    fix = Item(Source.WINGET, "Git.Git", "Git", "2.50.0", "2.55.0", vulns_fixed=(Vuln("CVE-2026-1000", kev=True),))
+    app.store.save_snapshot([item_to_dict(fix)], [])  # first seen on offer just now
+    before = len(app.upgrade_calls)
+    r = agent.post("/api/upgrade", json={"keys": ["winget:Git.Git"]}, auth=AGENT)
+    assert r.status_code == 202 and len(app.upgrade_calls) == before
+    assert "24 hours" in r.json()["skipped"][0]["reason"]
+    r = user.post("/api/upgrade", json={"keys": ["winget:Git.Git"]}, headers=USER)
+    assert r.json()["skipped"] == [] and app.upgrade_calls[before:] == [("winget:Git.Git", True)]
+
+
 def test_the_upgrade_action_says_who_asked_so_an_agents_install_is_the_unattended_kind(app, agent, user):
     agent.post("/api/upgrade", json={"keys": ["winget:Git.Git"]}, auth=AGENT)
     user.post("/api/upgrade", json={"keys": ["winget:Git.Git"]}, headers=USER)
