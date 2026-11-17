@@ -64,7 +64,9 @@ def _signed_commit_repo(tmp_path):
     body = (f"tree {tree}\nparent {parent}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n"
             "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEEnotarealsignature\n -----END PGP SIGNATURE-----\n"
             "\nsigned\n")
-    run("update-ref", "HEAD", run("hash-object", "-t", "commit", "-w", "--stdin", input=body))
+    made = subprocess.run(["git", "-C", str(repo), "hash-object", "-t", "commit", "-w", "--stdin"], check=True,
+                          capture_output=True, input=body.encode())  # bytes: text mode on Windows writes CRLF
+    run("update-ref", "HEAD", made.stdout.decode().strip())
     fake_gpg = tmp_path / "fake-gpg"
     fake_gpg.write_text(f"#!/bin/sh\n\"{Path(sys.executable).as_posix()}\" -c "
                         f"\"open(r'{marker.as_posix()}', 'a').write('x')\"\n")

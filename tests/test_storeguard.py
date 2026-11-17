@@ -66,7 +66,7 @@ def test_a_cask_install_whose_app_only_the_catalogue_names_is_refused_too(tmp_pa
     store.save_snapshot([item_to_dict(item)], [])
     job, ok = up.run_blocking(item)
     assert ok is False and ran == []
-    assert "Work/Slack.app is the App Store's copy of Slack" in store.job(job)["output"]
+    assert f"{Path('Work') / 'Slack.app'} is the App Store's copy of Slack" in store.job(job)["output"]
     store.save_snapshot([], [])  # no longer listed: the command's cask is still checked, by its token
     job, ok = up.run_blocking(item)
     assert ok is False and ran == [] and "App Store's copy of slack" in store.job(job)["output"]

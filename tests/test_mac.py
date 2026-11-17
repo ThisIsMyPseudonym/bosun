@@ -1,9 +1,11 @@
 import datetime as dt
 import json
 import plistlib
+import sys
 from pathlib import Path
 
 import httpx
+import pytest
 
 from bosun.collectors.mac import (
     App, app_is_newer, app_items, cask_items, cask_needs_admin, catalog_index, formula_items, load_cask_catalog,
@@ -112,6 +114,7 @@ def test_an_info_plist_value_that_is_not_text_is_read_as_missing(tmp_path):
     assert read_app(tmp_path / "Odd.app") == App(str(tmp_path / "Odd.app"), "Odd", "", "com.x.odd", False)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="makes a pipe with os.mkfifo, which Windows does not have")
 def test_an_oversized_or_odd_info_plist_is_not_read_and_the_page_says_how_many_apps_were_skipped(tmp_path, caplog):
     import os
     import threading
@@ -143,6 +146,7 @@ def test_an_oversized_or_odd_info_plist_is_not_read_and_the_page_says_how_many_a
     assert "Nowhere" not in " ".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="makes a pipe with os.mkfifo, which Windows does not have")
 def test_an_info_plist_swapped_for_a_pipe_after_it_was_looked_at_does_not_hold_up_the_scan(tmp_path, monkeypatch):
     """Looked at as a file and then opened, a plist the app swapped for a FIFO in between would wait for a writer
     forever. It is opened first, without waiting, and checked by what was opened."""
@@ -239,6 +243,7 @@ def test_a_kept_cask_catalog_from_before_depends_on_was_kept_is_downloaded_again
     assert load_cask_catalog(tmp_path / "c.json", http)[0]["depends_on"] == {}  # and the next refresh tries again
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="limits the file size with the resource module, which Windows does not have")
 def test_a_catalogue_download_that_cannot_be_written_in_full_leaves_the_kept_copy_whole(tmp_path):
     """The App Store check reads the kept copy while a refresh replaces it: it is never seen half written."""
     import resource
