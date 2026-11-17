@@ -23,7 +23,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from . import attention, autopilot, machine, proc, relaunch
+from . import attention, autopilot, machine, migrations, proc, relaunch
+from .collectors.mcp import WITHHELD
 from .serialize import compact
 from .store import Store
 
@@ -192,9 +193,12 @@ def parse(raw: bytes | str) -> dict:
 
 
 def receive(store: Store, data: dict) -> bool:
-    """Keep another machine's summary (never our own echoed back)."""
+    """Keep another machine's summary (never our own echoed back). A plain-http MCP server's address is never
+    kept from another machine: one running a version from before migration 8 still sends it with any
+    user:password in it, and a clean host:port can't be told apart from what such a password leaves."""
     if data["machine"]["id"] == identity(store)["id"]:
         return False
+    migrations.withhold_http(data.get("items"), WITHHELD)
     store.put_peer(data["machine"]["id"], data["machine"]["name"], data["machine"]["kind"], data)
     return True
 

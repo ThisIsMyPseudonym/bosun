@@ -20,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import plistlib
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -85,11 +84,8 @@ def _mac_bundle(item: dict) -> Path | None:
 
 def _icns(bundle: Path) -> Path | None:
     """The .icns the bundle's Info.plist names, if it is a real file inside the bundle's Resources."""
-    try:
-        with open(bundle / "Contents" / "Info.plist", "rb") as f:
-            name = plistlib.load(f).get("CFBundleIconFile")
-    except (OSError, plistlib.InvalidFileException, ValueError):
-        return None
+    from .collectors.mac import read_plist  # late: the Mac collector is not needed to serve an icon
+    name = (read_plist(bundle / "Contents" / "Info.plist") or {}).get("CFBundleIconFile")
     if not isinstance(name, str) or not name:
         return None
     resources = (bundle / "Contents" / "Resources").resolve()

@@ -120,6 +120,9 @@ def test_the_icon_file_an_app_names_must_be_inside_its_own_resources(tmp_path):
     assert icons._icns(bundle) is None
     (bundle / "Contents" / "Info.plist").write_bytes(b"not a plist")
     assert icons._icns(bundle) is None
+    for damaged in (plistlib.dumps({"CFBundleIconFile": "AppIcon"})[:60], plistlib.dumps(["AppIcon"])):
+        (bundle / "Contents" / "Info.plist").write_bytes(damaged)  # broken XML; a list where a dictionary goes
+        assert icons._icns(bundle) is None
 
 
 def test_the_mac_reader_runs_two_fixed_commands_on_the_bundle(tmp_path, monkeypatch):

@@ -47,9 +47,11 @@ def run(argv: list[str] | tuple[str, ...], timeout: float = 300, cwd: str | None
 
 
 # A repository's own .git/config can make git run commands: core.fsmonitor on any status/ls-files/grep, hooks on
-# checkout and commit. Bosun runs git in every repo it finds under your home, including ones you only unpacked,
-# so every git call goes through here with both switched off. Command-line -c beats the repo's config.
-GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}", "-c", "protocol.ext.allow=never")
+# checkout and commit, and gpg.program on any log of a signed commit when log.showSignature is on. Bosun runs git
+# in every repo it finds under your home, including ones you only unpacked, so every git call goes through here
+# with those switched off. Command-line -c beats the repo's config.
+GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}", "-c", "protocol.ext.allow=never",
+            "-c", "log.showSignature=false")
 
 
 def git(path: str | os.PathLike, *args: str, timeout: float = 120) -> Result:

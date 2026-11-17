@@ -3,7 +3,32 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/).
 
-## 1.0.0 - Unreleased
+## 1.0.1 - 2026-11-16
+
+A security fix release. Update as soon as you can.
+
+### Security
+
+- A repository's own git config could make Bosun run a program as you while it read the repository's history
+  during a refresh, with no click needed. Bosun's git commands now turn that setting off.
+- An MCP server on plain http is listed by host and port only, never with a user name or password from its
+  address. Migration 8 withholds the full addresses older versions saved: in snapshots, in what other machines
+  sent and in the database backups. It then rebuilds those files. Addresses another machine sends are always
+  withheld, because a machine still on 1.0.0 sends them whole.
+- No Homebrew cask or pkg is installed over an App Store copy of the same app. A cask whose app Bosun can't
+  identify is handed to you instead whenever this Mac has an App Store app. It is not run.
+- A cookie, login code or page token that is not ASCII is refused with 401, not a server error.
+
+### Fixed
+
+- One damaged, oversized or swapped `Info.plist` no longer hides every app update. Apps Bosun could not read
+  are named on the page. An iPhone or iPad app on an Apple silicon Mac is not counted as unreadable.
+- A version or bundle id that is not text no longer crashes the relaunch check.
+- A cask catalogue download is written in full before it replaces the kept copy.
+- A migration backs up the database under the write lock, and only while a migration is still pending.
+- CI installs exactly what `uv.lock` pins.
+
+## 1.0.0 - 2026-11-12
 
 The first public release. macOS is supported. Windows and Linux are experimental (tested in CI only).
 

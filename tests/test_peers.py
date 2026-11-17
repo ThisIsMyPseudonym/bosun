@@ -103,3 +103,15 @@ def test_peer_exchange_command_reads_stdin_and_answers_on_stdout(tmp_path, monke
     assert [p["name"] for p in Store(tmp_path / "here" / "bosun.db").peers()] == [peers.identity(other)["name"]]
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"{}")))
     assert cli.main(["peer-exchange"]) == 2
+
+
+def test_receive_withholds_plain_http_addresses_an_older_machine_still_sends(tmp_path):
+    pc, mac = store_with(tmp_path, "pc"), store_with(tmp_path, "mac", items=(GIT,))
+    sent = peers.summary(mac)
+    old = {**sent["items"][0], "key": "mcp:claude/notes/http", "source": "mcp", "name": "notes",
+           "installed": "user:hunter2@10.0.0.5:8080"}  # what a machine from before migration 8 sends
+    theirs = peers.parse(json.dumps({**sent, "items": [*sent["items"], old]}))
+    assert peers.receive(pc, theirs)
+    kept = json.dumps(pc.peers())
+    assert "hunter2" not in kept and "(address withheld)" in kept
+    assert any(i["installed"] == GIT["installed"] for i in pc.peers()[0]["data"]["items"])  # the rest untouched

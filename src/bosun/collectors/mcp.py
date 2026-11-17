@@ -220,11 +220,34 @@ def server_items(sv: Server) -> list[Item]:
     u = urlparse(sv.url) if sv.url else None
     if u and u.scheme == "http" and (u.hostname or "") not in _LOCAL_HOSTS:
         items.append(Item(Source.MCP, f"{sv.client}/{sv.name}/http", f"{sv.name}: unencrypted connection ({where})",
-                          u.netloc, None, flag_risk=5.5, **base,
+                          _host_port(sv.url, u), None, flag_risk=5.5, **base,
                           manual=f"Use the server's https:// address in {sv.config}, or remove it if it has none.",
                           summary=Summary(headline="Talks to a remote server over plain http: anyone on the way can read it",
                                           upgrade_value="medium", migration_effort="none", generated_by="heuristic")))
     return items
+
+
+WITHHELD = "(address withheld)"  # also what migrations._withhold_http_addresses writes over old snapshots
+_CLEAN_HOST = re.compile(r"[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]")
+
+
+def _host_port(raw: str, u) -> str:
+    """Where a URL points, without the user:password a URL can carry in front (`netloc` keeps them). A password
+    with an unencoded / ? or # in it ends the netloc early: in http://u:secret/x@h/ urlparse finds host u, and in
+    http://tok:12345#@h/ host tok and port 12345. So when an "@" is left outside the netloc, or the host or
+    port isn't clean, nothing of the address is kept."""
+    host = u.hostname or ""
+    if ":" in host:  # IPv6: hostname drops the brackets
+        host = f"[{host}]"
+    try:
+        port = u.port
+    except ValueError:  # not a number: what follows the colon may be a password
+        return WITHHELD
+    rest = raw.split("//", 1)[-1]
+    rest = rest[len(u.netloc):] if rest.startswith(u.netloc) else rest  # what follows the address
+    if "@" in rest or not _CLEAN_HOST.fullmatch(host):  # (an "@" in a path is withheld too: it can't be told apart)
+        return WITHHELD
+    return f"{host}:{port}" if port else host
 
 
 def _strict_json(text: str) -> bool:

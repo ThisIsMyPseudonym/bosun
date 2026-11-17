@@ -155,6 +155,208 @@ def test_server_findings():
     assert {i.lane for i in out} == {"batch"} and {i.kind for i in out} == {"dev"}  # worth fixing, not an emergency
 
 
+def test_a_plain_http_server_is_listed_by_host_and_port_never_with_its_password():
+    for url, shown in (("http://alice:hunter2@mcp.example.com:8080/sse", "mcp.example.com:8080"),
+                       ("http://tok3n@mcp.example.com/sse", "mcp.example.com"),
+                       ("http://bob:s3cret@[2001:db8::5]:9000/mcp", "[2001:db8::5]:9000")):
+        found, = server_items(Server("Claude Code", "api", "f", url=url))
+        assert found.installed == shown, url
+        stored = json.dumps(item_to_dict(found))
+        assert all(secret not in stored for secret in ("hunter2", "alice", "tok3n", "s3cret", "bob")), url
+
+
+def test_a_password_that_ends_the_address_early_withholds_the_whole_address():
+    """An unencoded / ? or # in a password ends urlparse's netloc early: what it finds as host or port is then part
+    of the password."""
+    for url, secret in (("http://u:secret/x@h.example/", "secret"), ("http://tok:12345#@h.example/", "12345"),
+                        ("http://tok:12345?@h.example/", "12345"), ("http://u:p@ssw0rd/x@h.example/mcp", "ssw0rd"),
+                        ("http://u:secret@/mcp", "secret")):
+        found, = server_items(Server("Claude Code", "api", "f", url=url))
+        assert found.installed == "(address withheld)", url
+        assert secret not in json.dumps(item_to_dict(found)), url
+    found, = server_items(Server("Claude Code", "api", "f", url="http://mcp.example.com:8080/sse?v=1#top"))
+    assert found.installed == "mcp.example.com:8080"  # nothing to withhold
+
+
+def test_old_snapshots_lose_the_http_addresses_they_kept(tmp_path):
+    import sqlite3
+
+    from bosun import migrations
+    from bosun.store import Store
+
+    path = tmp_path / "bosun.db"
+    db = sqlite3.connect(path)
+    migrations.migrate(db, None, tuple(m for m in migrations.MIGRATIONS if m.version <= 7))
+    db.close()
+    old = Store(path)  # (already at the latest: the rows are written as the previous release wrote them)
+    leaked = {"key": "mcp:Claude Code/api/http", "source": "mcp", "name": "api", "installed": "alice:hunter2@h:8080"}
+    plain = {"key": "brew:jq", "source": "brew", "name": "jq", "installed": "alice:hunter2@1.7"}  # not an address
+    for _ in range(2):
+        old.save_snapshot([leaked, plain], [])
+    old._db.execute("DELETE FROM schema_migrations WHERE version = 8")
+    old._db.commit()
+    old._db.close()
+    store = Store(path)
+    assert migrations.current_version(store._db) == migrations.latest_version()
+    blobs = [json.loads(r[0]) for r in store._db.execute("SELECT items FROM snapshots")]
+    assert len(blobs) == 2 and all(b[0]["installed"] == "(address withheld)" and b[1] == plain for b in blobs)
+    rows = store._db.execute("SELECT item_key, installed FROM snapshot_items ORDER BY item_key").fetchall()
+    assert [tuple(r) for r in rows] == [("brew:jq", "alice:hunter2@1.7")] * 2 + [
+        ("mcp:Claude Code/api/http", "(address withheld)")] * 2
+
+
+def _v7_database_with_a_leaked_address(path, snapshots=2):
+    """A database as the release before v8 left it: snapshots that kept a plain-http address with a password,
+    among a few hundred other items (so each snapshot spans several pages, as a real one does). Past KEEP_BLOBS,
+    saving one prunes the oldest, as on a Mac that has run Bosun for a while."""
+    import sqlite3
+
+    from bosun import migrations
+    from bosun.store import Store
+
+    db = sqlite3.connect(path)
+    migrations.migrate(db, None, tuple(m for m in migrations.MIGRATIONS if m.version <= 7))
+    db.close()
+    old = Store(path)
+    leaked = {"key": "mcp:Claude Code/api/http", "source": "mcp", "name": "api", "installed": "alice:s3cretpw@h:8080"}
+    others = [{"key": f"brew:tool{n}", "source": "brew", "name": f"tool{n}", "installed": "1.0"} for n in range(300)]
+    for _ in range(snapshots):
+        old.save_snapshot([*others[:150], leaked, *others[150:]], [])
+    old._db.execute("DELETE FROM schema_migrations WHERE version = 8")
+    old._db.commit()
+    old._db.close()
+
+
+def test_the_backups_and_free_pages_lose_the_http_addresses_too(tmp_path):
+    """Migrating copies the database to bosun.db.bak-v7 first, with the passwords in it. The old text is also in
+    pages pruning freed long before the migration, in the spare room of pages a row was split across, and in the
+    WAL. No file beside the database may keep a password."""
+    import shutil
+    import sqlite3
+
+    from bosun.store import KEEP_BLOBS, Store
+
+    path = tmp_path / "bosun.db"
+    _v7_database_with_a_leaked_address(path, snapshots=KEEP_BLOBS + 40)
+    shutil.copy(path, tmp_path / "bosun.db.bak-v6")  # an older backup, made by an earlier migration
+    store = Store(path)
+    assert sorted(p.name for p in tmp_path.glob("bosun.db.bak-v*")) == ["bosun.db.bak-v6", "bosun.db.bak-v7"]
+    for bak in tmp_path.glob("bosun.db.bak-v*"):  # kept, scrubbed
+        con = sqlite3.connect(bak)
+        assert [d["installed"] for r in con.execute("SELECT items FROM snapshots") for d in json.loads(r[0])
+                if d["source"] == "mcp"] == ["(address withheld)"] * KEEP_BLOBS
+        assert {r[0] for r in con.execute("SELECT installed FROM snapshot_items WHERE source = 'mcp'")} == {
+            "(address withheld)"}
+        con.close()
+    on_disk = {f.name: f.read_bytes().count(b"s3cretpw") for f in tmp_path.iterdir() if f.is_file()}
+    assert on_disk and not any(on_disk.values()), on_disk  # the database, its WAL, the backups
+    store._db.close()
+
+
+def test_a_backup_copied_before_another_process_migrated_never_lands_over_the_scrubbed_one(tmp_path, monkeypatch):
+    """Two processes open a v7 database at once. One copies it aside and, before that copy is put into place, the
+    other backs it up, migrates and scrubs bosun.db.bak-v7. The first copy, put into place then, would be the
+    backup with the password, and nothing would scrub it after."""
+    import threading
+
+    from bosun import migrations
+    from bosun.store import Store
+
+    path = tmp_path / "bosun.db"
+    _v7_database_with_a_leaked_address(path)
+    real, other = migrations._put_into_place, []
+
+    def the_other_process_meanwhile(tmp, dest):
+        if not other:
+            other.append(threading.Thread(target=lambda: other.append(Store(path)), daemon=True))
+            other[0].start()
+            other[0].join(2)  # it finishes here unless this copy holds the write lock it needs
+        real(tmp, dest)
+
+    monkeypatch.setattr(migrations, "_put_into_place", the_other_process_meanwhile)
+    store = Store(path)
+    other[0].join(60)
+    assert not other[0].is_alive()
+    assert migrations.current_version(store._db) == migrations.latest_version()
+    on_disk = {f.name: f.read_bytes().count(b"s3cretpw") for f in tmp_path.iterdir() if f.is_file()}
+    assert "bosun.db.bak-v7" in on_disk and not any(on_disk.values()), on_disk
+    store._db.close()
+    other[1]._db.close()
+
+
+def test_what_another_machine_sent_loses_the_http_addresses_too(tmp_path):
+    """Another machine's summary kept the address it had for its own plain-http server: a machine that never
+    reports again would keep it there for good."""
+    import sqlite3
+
+    from bosun.store import Store
+
+    path = tmp_path / "bosun.db"
+    _v7_database_with_a_leaked_address(path)
+    con = sqlite3.connect(path)
+    sent = {"v": 1, "machine": {"id": "m2", "name": "laptop", "kind": "mac"}, "projects": [], "items": [
+        {"key": "mcp:Cursor/api/http", "source": "mcp", "name": "api", "installed": "bob:s3cretpw@h:9090"},
+        {"key": "brew:jq", "source": "brew", "name": "jq", "installed": "1.7"}]}
+    con.execute("INSERT INTO peers VALUES ('m2', 'laptop', 'mac', ?, 0)", (json.dumps(sent),))
+    con.commit()
+    con.close()
+    store = Store(path)
+    (peer,) = store.peers()
+    assert [d["installed"] for d in peer["data"]["items"]] == ["(address withheld)", "1.7"]
+    assert peer["data"]["machine"] == sent["machine"]
+    assert not any(f.read_bytes().count(b"s3cretpw") for f in tmp_path.iterdir() if f.is_file())
+    store._db.close()
+
+
+def test_a_backup_that_cannot_be_opened_does_not_stop_the_migration(tmp_path, caplog):
+    from bosun import migrations
+    from bosun.store import Store
+
+    path = tmp_path / "bosun.db"
+    _v7_database_with_a_leaked_address(path)
+    (tmp_path / "bosun.db.bak-v5").write_bytes(b"not a database, but bigger than its header " * 50)
+    (tmp_path / "bosun.db.bak-v4").mkdir()  # cannot be opened at all
+    caplog.set_level("WARNING", logger="bosun.migrations")
+    store = Store(path)
+    assert migrations.current_version(store._db) == migrations.latest_version()
+    assert b"s3cretpw" not in path.read_bytes()
+    warned = " ".join(r.getMessage() for r in caplog.records)
+    assert "bosun.db.bak-v5" in warned and "bosun.db.bak-v4" in warned
+    assert (tmp_path / "bosun.db.bak-v5").read_bytes().startswith(b"not a database")  # left as it was
+    assert (tmp_path / "bosun.db.bak-v4").is_dir()
+    assert b"s3cretpw" not in (tmp_path / "bosun.db.bak-v7").read_bytes()  # and the one it could open is scrubbed
+    store._db.close()
+
+
+def test_withholding_the_http_addresses_twice_changes_nothing_more(tmp_path):
+    import sqlite3
+
+    from bosun import migrations
+    from bosun.store import Store
+
+    path = tmp_path / "bosun.db"
+    _v7_database_with_a_leaked_address(path)
+    store = Store(path)
+
+    def everything():
+        out = []
+        for f in sorted([path, *tmp_path.glob("bosun.db.bak-v*")]):
+            con = sqlite3.connect(f)
+            out.append([tuple(r) for t in ("snapshots", "snapshot_items") for r in con.execute(f"SELECT * FROM {t}")])
+            con.close()
+        return out
+
+    once, was = everything(), store._db.execute("PRAGMA secure_delete").fetchone()[0]
+    with store._lock:
+        store._db.execute("BEGIN IMMEDIATE")
+        migrations._withhold_http_addresses(store._db)
+        store._db.execute("COMMIT")
+        migrations._vacuum(store._db)
+    assert everything() == once
+    assert store._db.execute("PRAGMA secure_delete").fetchone()[0] == was  # the connection is left as it was
+    store._db.close()
+
+
 def test_config_formats():
     claude = json.dumps({"mcpServers": {"fs": {"command": "npx", "args": ["-y", "@x/fs"]}},
                          "projects": {"/Users/me/app": {"mcpServers": {"db": {"type": "http", "url": "http://10.0.0.5/mcp"}}}}})

@@ -62,7 +62,15 @@ updates. The server binds to `127.0.0.1` and does not bind anywhere else.
   nothing a release note says can make the assistant act. Only an approval card you click can.
 - Web pages in your browser. Every request needs the session cookie, and every change needs the page token
   and a same-origin check.
-- Repositories on disk. Every git call switches off `core.fsmonitor` and hooks.
+- Repositories on disk. Every git call switches off `core.fsmonitor`, hooks and `git log`'s signature check
+  (`log.showSignature`). Fix branches are the exception, being hardened. Preparing one (`status`, `add`,
+  `commit`, `worktree add`) can still run a repository's filter and diff programs, and `commit` the signing
+  program its config names (`gpg.program`, `gpg.ssh.program`, `gpg.x509.program`) when it sets
+  `commit.gpgsign`. Opening its pull request
+  (`git push`, `gh pr create`) can still run a program the repository's config names
+  (`remote.<name>.receivepack`, `core.sshCommand`, `credential.helper`), and `gh` runs git without Bosun's
+  protections. That needs a person's click (the dashboard's button, or an approval for the assistant), and an
+  agent can do it only once you turn that on.
 - Other software writing to Bosun's data folder. Databases from another checkout are not migrated, and
   the database is copied before every migration.
 - Other local agents. They get no cookie, reach actions only, and may not quit apps, open system updaters,

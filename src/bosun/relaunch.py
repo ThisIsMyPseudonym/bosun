@@ -9,7 +9,6 @@ make Chrome save its session) and never force-kills; if the app won't close, it 
 from __future__ import annotations
 
 import os
-import plistlib
 import re
 import subprocess
 import time
@@ -80,11 +79,9 @@ def _win_dir(app: App) -> Path | None:
 
 
 def _mac_bundle_version(app: App) -> str | None:
-    try:
-        with open(Path(app.mac_bundle) / "Contents" / "Info.plist", "rb") as f:
-            return plistlib.load(f).get("CFBundleShortVersionString")
-    except (OSError, plistlib.InvalidFileException):
-        return None
+    from .collectors.mac import plist_text, read_plist  # late: the Mac collector is not needed to relaunch
+    return plist_text(read_plist(Path(app.mac_bundle) / "Contents" / "Info.plist") or {},
+                      "CFBundleShortVersionString") or None
 
 
 def staged(app: App, ps_text: str | None = None) -> str | None:

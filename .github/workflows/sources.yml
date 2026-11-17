@@ -23,13 +23,13 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.13"
-      - run: uv sync
+      - run: uv sync --locked
       - name: Ask each source
         id: contract
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}  # raises GitHub's rate limit from 60 to 1000 requests an hour
-        run: uv run pytest -q -p no:cacheprovider -m contract tests/contract -rfs 2>&1 | tee contract.log; exit "${PIPESTATUS[0]}"
+        run: uv run --locked pytest -q -p no:cacheprovider -m contract tests/contract -rfs 2>&1 | tee contract.log; exit "${PIPESTATUS[0]}"
       - name: Open an issue, or comment on the one that is open
         if: failure() && steps.contract.outcome == 'failure'
         env:

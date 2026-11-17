@@ -19,6 +19,8 @@ import platform
 import plistlib
 import re
 import shutil
+import stat
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -165,18 +167,61 @@ class App:
     feed: str = ""  # SUFeedURL: a Sparkle app's own update feed
 
 
-def read_app(path: Path) -> App | None:
+MAX_PLIST = 8 * 1024 * 1024  # an Info.plist is a few KB; one this big is not read
+
+
+def read_plist(path: Path) -> dict | None:
+    """A property list's top-level dictionary, or None. The file is the app's to write: broken XML (expat's own
+    error), a binary plist that doesn't parse, a list where a dictionary goes, a file over 8 MB or one that is not
+    a file must cost that one app, never the scan of every app beside it. A missing file is ordinary (many paths
+    asked about are only what a catalogue says); anything else is logged as a warning."""
+    # opened first and checked by its descriptor, so nothing can be swapped in between; O_NONBLOCK: a FIFO opens
+    # without waiting for a writer, and is then turned away as not a file
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_BINARY", 0)
     try:
-        with open(path / "Contents" / "Info.plist", "rb") as fh:
-            info = plistlib.load(fh)
-    except (OSError, plistlib.InvalidFileException, ValueError) as exc:
-        log.debug("unreadable app %s: %s", path, exc)
+        fd = os.open(path, flags)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        log.debug("no plist %s: %s", path, exc)
         return None
-    build = str(info.get("CFBundleVersion") or "")
-    version = str(info.get("CFBundleShortVersionString") or build)
-    feed = info.get("SUFeedURL")
-    return App(str(path), path.stem, version, str(info.get("CFBundleIdentifier") or ""),
-               (path / "Contents" / "_MASReceipt").exists(), build=build, feed=feed if isinstance(feed, str) else "")
+    except OSError as exc:
+        log.warning("unreadable plist %s: %s", path, exc)
+        return None
+    try:
+        with open(fd, "rb") as fh:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_PLIST:
+                log.warning("plist %s not read: %s", path, "not a file" if not stat.S_ISREG(st.st_mode)
+                            else f"{st.st_size} bytes, over {MAX_PLIST // 2**20} MB")
+                return None
+            raw = fh.read(MAX_PLIST + 1)  # it may have grown since the fstat
+        if len(raw) > MAX_PLIST:
+            log.warning("plist %s not read: over %d MB", path, MAX_PLIST // 2**20)
+            return None
+        data = plistlib.loads(raw)
+    except Exception as exc:  # plistlib raises several kinds on a damaged file, not only InvalidFileException
+        log.warning("unreadable plist %s: %s", path, exc)
+        return None
+    if not isinstance(data, dict):
+        log.warning("plist %s not read: a %s, not a dictionary", path, type(data).__name__)
+        return None
+    return data
+
+
+def plist_text(info: dict, key: str) -> str:
+    """A property list's string value, or "": the app writes the file, and a number, a date or a dictionary
+    where a version or an id goes must not become text such as "{'x': 1}"."""
+    v = info.get(key)
+    return v if isinstance(v, str) and v.strip() else ""
+
+
+def read_app(path: Path) -> App | None:
+    info = read_plist(path / "Contents" / "Info.plist")
+    if info is None:
+        return None
+    build = plist_text(info, "CFBundleVersion")
+    version = plist_text(info, "CFBundleShortVersionString") or build
+    return App(str(path), path.stem, version, plist_text(info, "CFBundleIdentifier"),
+               (path / "Contents" / "_MASReceipt").exists(), build=build, feed=plist_text(info, "SUFeedURL"))
 
 
 def parse_app_list(text: str) -> list[App]:
@@ -189,12 +234,34 @@ def parse_app_list(text: str) -> list[App]:
     return out
 
 
+def is_wrapped_ios_app(path: Path) -> bool:
+    """An iPhone or iPad app installed on an Apple silicon Mac: X.app holds Wrapper/ (the iOS bundle, with its
+    own Info.plist, and the App Store's metadata) and a WrappedBundle link into it, and no Contents/Info.plist.
+    Bosun has always left these out: the App Store updates them."""
+    return (path / "Wrapper").is_dir() or os.path.lexists(path / "WrappedBundle")
+
+
 def scan_apps(dirs: tuple[Path, ...] = (Path("/Applications"), Path.home() / "Applications")) -> list[App]:
-    apps = []
+    """The apps in these folders. One whose Info.plist can't be read is left out, and the page says how many."""
+    apps, unread = [], []
     for d in dirs:
         if d.is_dir():
             # not dot-names: a copy Bosun is moving into place is not an app yet (appguard.restore)
-            apps.extend(a for p in sorted(d.glob("*.app")) if not p.name.startswith(".") and (a := read_app(p)))
+            for p in sorted(d.glob("*.app")):
+                if p.name.startswith("."):
+                    continue
+                a = read_app(p)
+                if a:
+                    apps.append(a)
+                elif not is_wrapped_ios_app(p):
+                    unread.append(p.stem)
+    if unread:
+        n = len(unread)
+        names = ", ".join(unread[:3]) + (f" and {n - 3} more" if n > 3 else "")
+        one = n == 1
+        outages.say("unread-apps", f"{n} app{'' if one else 's'} could not be read ({names}), so "
+                    f"{'it is' if one else 'they are'} not listed and no update for {'it' if one else 'them'} can be "
+                    f"shown. {'Its Info.plist is' if one else 'Their Info.plists are'} missing, damaged or too large.")
     return apps
 
 
@@ -451,7 +518,7 @@ def load_cask_catalog(cache: Path, http: httpx.Client | None = None, max_age_hou
     """Homebrew's public cask catalog (~20 MB), cached on disk for a day."""
     if cache.exists() and time.time() - cache.stat().st_mtime < max_age_hours * 3600:
         kept = _kept_catalog(cache)
-        if kept:
+        if kept and "depends_on" in kept[0]:  # a copy saved before Bosun kept depends_on is fetched again
             return kept
     try:
         client = http or httpx.Client(timeout=60, headers={"User-Agent": "bosun/1.0"})
@@ -461,7 +528,7 @@ def load_cask_catalog(cache: Path, http: httpx.Client | None = None, max_age_hou
         if not data or not isinstance(data, list) or not all(isinstance(c, dict) for c in data):
             raise ValueError("not a list of casks")  # the real one has thousands
         slim = [{**{k: c.get(k) for k in ("token", "name", "homepage", "version", "auto_updates", "disabled", "artifacts",
-                                          "deprecated", "conflicts_with")},
+                                          "deprecated", "conflicts_with", "depends_on")},
                  # the download address is not kept, and never used: only whether Homebrew publishes a checksum
                  "checked": bool(re.fullmatch(r"[0-9a-f]{64}", str(c.get("sha256") or "")))} for c in data]
     except (httpx.HTTPError, ValueError) as exc:
@@ -472,7 +539,24 @@ def load_cask_catalog(cache: Path, http: httpx.Client | None = None, max_age_hou
                      unreadable=not isinstance(exc, httpx.HTTPError))
         return kept
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(slim), encoding="utf-8")
+    for old in cache.parent.glob(f".{cache.name}.*.tmp"):  # left by a process that stopped mid-write
+        try:
+            if time.time() - old.stat().st_mtime > 3600:  # another refresh's own is newer than that
+                old.unlink()
+        except OSError:
+            pass
+    # into place in one step: a reader (the App Store check, another refresh) never sees half a file, and on disk
+    # before the rename, so a crash or power cut leaves the old copy or the new one, never an empty file
+    fd, tmp = tempfile.mkstemp(dir=cache.parent, prefix=f".{cache.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(slim))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, cache)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     return slim
 
 

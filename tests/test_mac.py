@@ -7,7 +7,8 @@ import httpx
 
 from bosun.collectors.mac import (
     App, app_is_newer, app_items, cask_items, cask_needs_admin, catalog_index, formula_items, load_cask_catalog,
-    nvm_versions, parse_app_list, parse_brew_info, parse_brew_outdated, parse_softwareupdate, read_app, runtime_items,
+    nvm_versions, parse_app_list, parse_brew_info, parse_brew_outdated, parse_softwareupdate, read_app, read_plist,
+    runtime_items, scan_apps,
 )
 from bosun.enrich.eol import EolClient
 from bosun.collectors.mac import App, app_items, by_hand_how
@@ -84,6 +85,89 @@ def test_read_app_plist(tmp_path):
     assert read_app(tmp_path / "Missing.app") is None
 
 
+def test_a_damaged_info_plist_hides_only_its_own_app(tmp_path):
+    def bundle(name: str, plist: bytes) -> None:
+        (tmp_path / f"{name}.app" / "Contents").mkdir(parents=True)
+        (tmp_path / f"{name}.app" / "Contents" / "Info.plist").write_bytes(plist)
+
+    good = plistlib.dumps({"CFBundleShortVersionString": "2.1", "CFBundleIdentifier": "com.x.good"})
+    bundle("Good", good)
+    bundle("Truncated", good[: len(good) // 2])  # broken XML: expat's own error, not plistlib's
+    bundle("List", plistlib.dumps(["not", "a", "dict"]))  # a plist, but not the dictionary an Info.plist is
+    bundle("Number", plistlib.dumps(7, fmt=plistlib.FMT_BINARY))
+    assert [a.name for a in scan_apps((tmp_path,))] == ["Good"]
+    for name in ("Truncated", "List", "Number", "Missing"):
+        assert read_plist(tmp_path / f"{name}.app" / "Contents" / "Info.plist") is None, name
+    assert read_plist(tmp_path / "Good.app" / "Contents" / "Info.plist")["CFBundleIdentifier"] == "com.x.good"
+
+
+def test_an_info_plist_value_that_is_not_text_is_read_as_missing(tmp_path):
+    (tmp_path / "Odd.app" / "Contents").mkdir(parents=True)
+    (tmp_path / "Odd.app" / "Contents" / "Info.plist").write_bytes(plistlib.dumps(
+        {"CFBundleShortVersionString": {"x": 1}, "CFBundleVersion": "1234", "CFBundleIdentifier": ["com.x.odd"],
+         "SUFeedURL": 7}))
+    assert read_app(tmp_path / "Odd.app") == App(str(tmp_path / "Odd.app"), "Odd", "1234", "", False, build="1234")
+    (tmp_path / "Odd.app" / "Contents" / "Info.plist").write_bytes(plistlib.dumps(
+        {"CFBundleShortVersionString": 2, "CFBundleVersion": "", "CFBundleIdentifier": "com.x.odd"}))
+    assert read_app(tmp_path / "Odd.app") == App(str(tmp_path / "Odd.app"), "Odd", "", "com.x.odd", False)
+
+
+def test_an_oversized_or_odd_info_plist_is_not_read_and_the_page_says_how_many_apps_were_skipped(tmp_path, caplog):
+    import os
+    import threading
+
+    from bosun import outages
+
+    def bundle(name: str) -> Path:
+        (tmp_path / f"{name}.app" / "Contents").mkdir(parents=True)
+        return tmp_path / f"{name}.app" / "Contents" / "Info.plist"
+
+    good = plistlib.dumps({"CFBundleShortVersionString": "2.1", "CFBundleIdentifier": "com.x.good"})
+    bundle("Good").write_bytes(good)
+    huge = bundle("Huge")
+    huge.write_bytes(good[:-20] + b" " * (8 * 1024 * 1024) + good[-20:])  # parses, but is over 8 MB
+    bundle("Broken").write_bytes(good[:40])
+    os.mkfifo(bundle("Pipe"))  # opening it would wait for a writer forever
+    outages.clear()
+    caplog.set_level("WARNING", logger="bosun.collectors.mac")
+    done = []
+    scan = threading.Thread(target=lambda: done.append(scan_apps((tmp_path,))), daemon=True)
+    scan.start()
+    scan.join(10)
+    assert done and [a.name for a in done[0]] == ["Good"]
+    assert outages.take() == ["3 apps could not be read (Broken, Huge, Pipe), so they are not listed and no update "
+                              "for them can be shown. Their Info.plists are missing, damaged or too large."]
+    warned = " ".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    assert all(f"{name}.app" in warned for name in ("Huge", "Broken", "Pipe"))
+    assert read_plist(tmp_path / "Nowhere.app" / "Contents" / "Info.plist") is None  # missing: not a warning
+    assert "Nowhere" not in " ".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+
+def test_an_info_plist_swapped_for_a_pipe_after_it_was_looked_at_does_not_hold_up_the_scan(tmp_path, monkeypatch):
+    """Looked at as a file and then opened, a plist the app swapped for a FIFO in between would wait for a writer
+    forever. It is opened first, without waiting, and checked by what was opened."""
+    import os
+    import threading
+
+    plain = tmp_path / "plain.plist"
+    plain.write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.x.y"}))
+    pipe = tmp_path / "Info.plist"
+    os.mkfifo(pipe)
+    real = Path.stat
+    monkeypatch.setattr(Path, "stat", lambda self, **kw: real(plain if self == pipe else self, **kw))  # a file, then
+    done = []
+    reader = threading.Thread(target=lambda: done.append(read_plist(pipe)), daemon=True)
+    reader.start()
+    reader.join(5)
+    if reader.is_alive():  # let it go before failing
+        try:
+            os.close(os.open(pipe, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
+    assert done == [None]
+    assert read_plist(plain) == {"CFBundleIdentifier": "com.x.y"}
+
+
 def test_softwareupdate():
     assert parse_softwareupdate((FIX / "softwareupdate.txt").read_text(encoding="utf-8")) == []
     text = ("Software Update found the following new or updated software:\n"
@@ -133,8 +217,108 @@ def test_cask_catalog_cache(tmp_path):
     second = load_cask_catalog(tmp_path / "c.json", http)
     assert first == second == [{"token": "x", "name": None, "homepage": None, "version": "1", "auto_updates": None,
                                 "disabled": None, "artifacts": [], "deprecated": None, "conflicts_with": None,
-                                "checked": False}]  # no address and no checksum kept: only whether one is published
+                                "depends_on": None, "checked": False}]  # no address and no checksum kept: only whether one is published
     assert len(calls) == 1  # served from the disk cache the second time
+
+
+def test_a_kept_cask_catalog_from_before_depends_on_was_kept_is_downloaded_again_at_once(tmp_path):
+    """The App Store check needs `depends_on`: a copy saved by the release before has none, however new it is."""
+    (tmp_path / "c.json").write_text(json.dumps([{"token": "x", "version": "1", "artifacts": []}]))
+    calls = []
+
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json=[{"token": "x", "version": "1", "artifacts": [], "depends_on": {}}])
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    assert load_cask_catalog(tmp_path / "c.json", http)[0]["depends_on"] == {} and len(calls) == 1
+    assert load_cask_catalog(tmp_path / "c.json", http)[0]["depends_on"] == {} and len(calls) == 1  # then kept
+    failing = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(503)))
+    (tmp_path / "c.json").write_text(json.dumps([{"token": "x", "version": "1", "artifacts": []}]))
+    assert "depends_on" not in load_cask_catalog(tmp_path / "c.json", failing)[0]  # a failed download keeps the old
+    assert load_cask_catalog(tmp_path / "c.json", http)[0]["depends_on"] == {}  # and the next refresh tries again
+
+
+def test_a_catalogue_download_that_cannot_be_written_in_full_leaves_the_kept_copy_whole(tmp_path):
+    """The App Store check reads the kept copy while a refresh replaces it: it is never seen half written."""
+    import resource
+    import signal
+
+    import pytest
+
+    old = [{"token": "x", "version": "1", "artifacts": []}]  # from before depends_on: downloaded again at once
+    (tmp_path / "c.json").write_text(json.dumps(old))
+    casks = [{"token": f"cask-{n}", "version": "1", "artifacts": [{"app": [f"App {n}.app"]}], "depends_on": {}}
+             for n in range(500)]
+    http = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, json=casks)))
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    sigxfsz = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)  # the disk fills up part way: the write fails
+    try:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (4096, hard))
+        with pytest.raises(OSError):
+            load_cask_catalog(tmp_path / "c.json", http)
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+        signal.signal(signal.SIGXFSZ, sigxfsz)
+    assert json.loads((tmp_path / "c.json").read_text()) == old
+    assert [f.name for f in tmp_path.iterdir()] == ["c.json"]  # and nothing half written is left beside it
+    assert len(load_cask_catalog(tmp_path / "c.json", http)) == 500
+
+
+def test_a_catalogue_download_is_on_disk_before_it_replaces_the_kept_copy(tmp_path, monkeypatch):
+    """Renamed before its bytes reach the disk, a power cut could leave an empty catalogue where the old one was."""
+    import os
+
+    casks = [{"token": "x", "version": "1", "artifacts": [], "depends_on": {}}]
+    http = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, json=casks)))
+    did, fsync, replace = [], os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: did.append(("fsync", os.fstat(fd).st_size)) or fsync(fd))
+    monkeypatch.setattr(os, "replace", lambda a, b: did.append(("replace", Path(b).name)) or replace(a, b))
+    load_cask_catalog(tmp_path / "c.json", http)
+    assert did == [("fsync", (tmp_path / "c.json").stat().st_size), ("replace", "c.json")]  # all of it, then
+
+
+def test_a_catalogue_download_clears_what_an_interrupted_one_left_behind(tmp_path):
+    """A process stopped mid-write leaves its temporary file: the next download removes those over an hour old,
+    and leaves a newer one, which may be another refresh's own."""
+    import os
+    import time
+
+    stale, recent = tmp_path / ".c.json.abc123.tmp", tmp_path / ".c.json.def456.tmp"
+    for f, age in ((stale, 2 * 3600), (recent, 600)):
+        f.write_text("[")
+        os.utime(f, (time.time() - age,) * 2)
+    (tmp_path / ".other.json.zzz.tmp").write_text("[")  # not the catalogue's
+    casks = [{"token": "x", "version": "1", "artifacts": [], "depends_on": {}}]
+    http = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, json=casks)))
+    load_cask_catalog(tmp_path / "c.json", http)
+    assert sorted(f.name for f in tmp_path.iterdir()) == [".c.json.def456.tmp", ".other.json.zzz.tmp", "c.json"]
+
+
+def test_an_iphone_app_installed_on_a_mac_is_left_out_without_being_counted_as_unreadable(tmp_path):
+    """On Apple silicon an iPhone or iPad app from the App Store is X.app/Wrapper/X.app (an iOS bundle, its
+    Info.plist at the top), the App Store's metadata beside it, and X.app/WrappedBundle linking to it. There is
+    no X.app/Contents/Info.plist: that is how it is built, not a damaged app."""
+    from bosun import outages
+
+    game = tmp_path / "Fixture Game.app"
+    (game / "Wrapper" / "Fixture Game.app").mkdir(parents=True)
+    (game / "Wrapper" / "Fixture Game.app" / "Info.plist").write_bytes(plistlib.dumps(
+        {"CFBundleIdentifier": "com.example.game", "CFBundleShortVersionString": "3.0"}))
+    for meta in ("iTunesMetadata.plist", "BundleMetadata.plist"):
+        (game / "Wrapper" / meta).write_bytes(plistlib.dumps({}))
+    (game / "WrappedBundle").symlink_to("Wrapper/Fixture Game.app")
+    linked_only = tmp_path / "Fixture Linked.app"  # a WrappedBundle link whose folder is not there (yet)
+    linked_only.mkdir()
+    (linked_only / "WrappedBundle").symlink_to("Wrapper/Fixture Linked.app")
+    (tmp_path / "Broken.app" / "Contents").mkdir(parents=True)  # a Mac app with no Info.plist: still counted
+    outages.clear()
+    assert scan_apps((tmp_path,)) == []
+    assert outages.take() == ["1 app could not be read (Broken), so it is not listed and no update for it can be "
+                              "shown. Its Info.plist is missing, damaged or too large."]
+    import shutil
+    shutil.rmtree(tmp_path / "Broken.app")
+    assert scan_apps((tmp_path,)) == [] and outages.take() == []
 
 
 def test_launchd_plists(tmp_path):

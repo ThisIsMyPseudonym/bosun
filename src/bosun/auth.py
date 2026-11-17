@@ -120,7 +120,8 @@ class Sessions:
         self._lock = threading.Lock()
 
     def valid_cookie(self, value: str | None) -> bool:
-        return bool(value) and hmac.compare_digest(value, self._cookie)
+        # compare bytes: compare_digest refuses non-ASCII text, and a cookie can hold anything
+        return bool(value) and hmac.compare_digest(value.encode("utf-8", "replace"), self._cookie.encode())
 
     def valid_agent(self, authorization: str | None, method: str, target: str, body: bytes,
                     now: float | None = None) -> bool:
@@ -156,6 +157,7 @@ class Sessions:
             age = now - int(ts)
         except ValueError:
             return None
-        if not (-5 <= age <= CODE_TTL_S) or not hmac.compare_digest(mac, _mac(self._key, f"login|{ts}|{nonce}")):
+        if not (-5 <= age <= CODE_TTL_S) or not hmac.compare_digest(
+                mac.encode("utf-8", "replace"), _mac(self._key, f"login|{ts}|{nonce}").encode()):
             return None
         return self._cookie if self._once(nonce, now) else None

@@ -1,6 +1,6 @@
 [project]
 name = "bosun-watch"
-version = "1.0.0"
+version = "1.0.1"
 description = "Bosun: a local dashboard of outdated software and dependencies, with security context and one-click upgrades"
 authors = [
     { name = "ThisIsMyPseudonym", email = "35669751+ThisIsMyPseudonym@users.noreply.github.com" }

@@ -58,3 +58,10 @@ def _no_waiting_period(monkeypatch):
     """Autopilot's waiting period is off unless a test is about it (tests/test_autopilot.py turns it back on):
     most tests build an item and ask what Autopilot does with it, without saying how long it has been on offer."""
     monkeypatch.setattr("bosun.autopilot.WAIT_DAYS", 0)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_store_apps(monkeypatch, tmp_path):
+    """The check for an App Store copy before a cask install looks in an empty folder, never this Mac's
+    /Applications (tests/test_storeguard.py gives it its own)."""
+    monkeypatch.setattr("bosun.storeguard.roots", lambda home=None: (tmp_path / "no-store-apps",))

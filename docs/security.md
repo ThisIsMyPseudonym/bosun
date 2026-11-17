@@ -58,9 +58,19 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   budgets, what agents may do), and agents cannot use the panel: they can't ask, approve, or read your
   conversations. The model gets no shell, no file access, no web access, none of your Claude Code settings
   or other MCP servers, and an empty folder to run in.
-- Git never runs a repository's own commands. Bosun runs git in every repository it finds under your home,
-  including ones you only unpacked, and a repository's config can name programs for git to run
-  (`core.fsmonitor`, hooks). Every git call switches those off.
+- When Bosun reads a repository, git does not run the programs that repository's config names. Bosun runs
+  git in every repository it finds under your home, including ones you only unpacked, and a repository's
+  config can name programs for git to run: `core.fsmonitor`, hooks, and the signature checker
+  (`gpg.program`) that `git log` starts when `log.showSignature` is on. Every git call switches those off.
+  Fix branches are a known exception, being hardened: to prepare a fix, Bosun runs `status`, `add`, `commit`
+  and `worktree add` in the repository, and those can still run filter and diff programs that the
+  repository's config and `.gitattributes` name. `commit` also runs the signing program the repository's config
+  names (`gpg.program`, `gpg.ssh.program`, `gpg.x509.program`) when that config turns on `commit.gpgsign`. To
+  open its pull request, Bosun runs `git push` and
+  `gh pr create`, which can still run a program the repository's config names (`remote.<name>.receivepack`,
+  `core.sshCommand`, `credential.helper`), and `gh` runs git without Bosun's protections. Opening a pull
+  request needs a person's click: the dashboard's button, or your approval of the assistant's request. An agent
+  can do it only once you turn that on.
 - Updates to Bosun itself come from signed release tags, every commit in them signed by a trusted key, and
   never move it to an older version (see [Staying current](operating.md#staying-current-in-full)). An update that doesn't install and import is undone,
   and the dashboard never restarts onto code that doesn't start. osv-scanner must match a hash written in
@@ -70,6 +80,15 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   newer code, is refused when it would change that database's schema, unless `BOSUN_ALLOW_MIGRATE=1` is set.
   A copy of the database in another folder, and a new database, are not affected. The database is copied to
   `bosun.db.bak-v<N>` before every migration.
+- A plain-http MCP server's address is kept as its host and port, never with a user name or password in it.
+  Migration 8 withholds the addresses older versions kept: in saved snapshots, in what other machines sent, and
+  in the database backups. It then rebuilds those files so no freed page keeps one. If another program has the
+  database open at that moment, its rebuild may not finish: Bosun logs that, and old text can stay in freed
+  pages until the file is rebuilt (quit Bosun and run `sqlite3 bosun.db VACUUM` in the data folder).
+  Another machine's plain-http addresses are never kept, since one running an older version still sends them
+  whole. Two copies are left: an Ask
+  Bosun conversation saved before then may still quote an old address, and going back to code from before this
+  fix writes full addresses again at its next refresh.
 - Changelog pages named by a package's metadata are fetched over https only, never from an address on this
   computer or network, and never more than 2 MB.
 - Upgrade commands are built from strictly validated ids and run as argv lists, never
@@ -120,6 +139,19 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   that never verified in full is compared on its signature alone, which does not see a changed file inside
   nested code. A developer who really has changed
   certificates is stopped too: update that one yourself.
+- No Homebrew cask install, upgrade or reinstall, and no Microsoft AutoUpdate pkg install, runs while the App
+  Store has a copy of the same app (`storeguard.py`, an interim rule). Before any such job starts, by a click,
+  Autopilot, a released waiting job or Bosun's terminal, Bosun looks in `/Applications`, one folder below it and
+  `~/Applications` for an app with an App Store receipt and the same bundle id or app name (in any case). If it
+  finds one, the job fails naming both copies, and Autopilot leaves that app to you: remove one copy, then
+  update. Which app a cask installs comes from the listed item and the cask catalogue Bosun last saved, for the
+  cask and every cask it depends on. A cask counts as known only when it uses nothing but `app` and stanzas that
+  install no app (fonts, command-line tools, completions, plugins and the like). For any other cask (a pkg, a
+  suite, an `artifact`, a pre- or postflight script, a cask from a tap) the job is refused while this Mac has App
+  Store apps, and Autopilot leaves it to you as one Bosun can't see into. So is a job when an App Store copy's `Info.plist` can't be read and its name doesn't settle it, and
+  a job whose check could not be made or found the saved catalogue missing, unreadable, empty or saved before
+  Bosun read what casks depend on (those two are tried again next time; a refresh downloads such a catalogue
+  again, and writes each download into place in one step).
 - `bosun query` and `/api/query` can only read, and only what [`data-model.md`](data-model.md) lists (see [Ask the database](operating.md#ask-the-database)).
 - Release notes, repository files and model output are treated as untrusted. Prompts say
   so, and the UI renders them with `textContent` only. A model's reading of release notes never authorises an

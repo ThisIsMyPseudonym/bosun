@@ -1,5 +1,8 @@
 """Relaunch: spot an update a browser has downloaded but not applied, and restart it gracefully."""
 
+import dataclasses
+import plistlib
+
 from bosun import relaunch
 from bosun.proc import Result
 
@@ -87,3 +90,31 @@ def test_pending_lists_processes_once_and_keeps_its_answer_when_the_listing_fail
     assert relaunch.pending() == first
     answer.update(out="/usr/sbin/cfprefsd agent\n", code=0)  # a good listing without the app: gone
     assert relaunch.pending() == []
+
+
+def test_a_damaged_info_plist_reads_as_no_version(tmp_path):
+    app = dataclasses.replace(CHROME, mac_bundle=str(tmp_path / "Chrome.app"))
+    (tmp_path / "Chrome.app" / "Contents").mkdir(parents=True)
+    for damaged in (b"<?xml version='1.0'?><plist><dict><key>CF", plistlib.dumps(["156.0"])):
+        (tmp_path / "Chrome.app" / "Contents" / "Info.plist").write_bytes(damaged)
+        assert relaunch._mac_bundle_version(app) is None
+
+
+def test_a_version_that_is_not_text_reads_as_no_version_and_keeps_the_other_apps_relaunches(tmp_path, monkeypatch):
+    app = dataclasses.replace(CHROME, mac_bundle=str(tmp_path / "Chrome.app"))
+    (tmp_path / "Chrome.app" / "Contents").mkdir(parents=True)
+    for odd in ({"x": 1}, ["156.0"], 156, "", "  "):
+        (tmp_path / "Chrome.app" / "Contents" / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleShortVersionString": odd}))
+        assert relaunch._mac_bundle_version(app) is None, odd
+    other = dataclasses.replace(CHROME, id="other", mac_bundle=str(tmp_path / "Other.app"))
+    (tmp_path / "Other.app" / "Contents").mkdir(parents=True)
+    (tmp_path / "Other.app" / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleShortVersionString": "156.0.8078.48"}))
+    monkeypatch.setattr(relaunch.machine, "IS_MAC", True)
+    monkeypatch.setattr(relaunch.machine, "IS_WINDOWS", False)
+    monkeypatch.setattr(relaunch, "APPS", {"chrome": app, "other": other})
+    monkeypatch.setattr(relaunch.proc, "run", lambda argv, timeout=0, **kw: Result(tuple(argv), 0, PS, ""))
+    (tmp_path / "Chrome.app" / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleShortVersionString": {"x": 1}}))
+    assert [p["app"] for p in relaunch.pending()] == ["other"]  # one odd Info.plist hides no other relaunch

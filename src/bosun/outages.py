@@ -20,6 +20,12 @@ def note(service: str, name: str, effect: str, unreadable: bool = False) -> None
         _heard.setdefault(service, f"{name} {what}; {effect}")
 
 
+def say(key: str, line: str) -> None:
+    """A problem on this machine rather than a service's, said once a refresh in the same list."""
+    with _lock:
+        _heard.setdefault(key, line)
+
+
 def take() -> list[str]:
     with _lock:
         out = list(_heard.values())

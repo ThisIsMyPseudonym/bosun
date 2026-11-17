@@ -151,7 +151,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             origin = request.headers.get("origin")
             if origin is not None and origin not in allowed_origins:
                 return JSONResponse({"error": "forbidden origin"}, status_code=403)
-            if not secrets.compare_digest(request.headers.get("x-bosun-token", ""), token):
+            if not secrets.compare_digest(request.headers.get("x-bosun-token", "").encode("utf-8", "replace"),
+                                          token.encode()):  # bytes: compare_digest refuses non-ASCII text
                 return JSONResponse({"error": "missing or invalid token"}, status_code=403)
         return None
 

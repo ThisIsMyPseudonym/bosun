@@ -47,6 +47,64 @@ def test_a_repo_cannot_run_code_through_bosuns_git_calls(tmp_path):
     assert not marker.exists()
 
 
+def _signed_commit_repo(tmp_path):
+    """A repo whose own config shows signatures (log.showSignature) with a program it names (gpg.program), and whose
+    last commit carries a signature: `git log` then runs that program to check it."""
+    repo, marker = tmp_path / "signed", tmp_path / "ran"
+    repo.mkdir()
+    run = lambda *a, **kw: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True,  # noqa: E731
+                                          text=True, **kw).stdout.strip()
+    run("init", "-q")
+    (repo / "a.txt").write_text("x\n")
+    run("add", "-A")
+    run("commit", "-q", "-m", "init")
+    (repo / ".env").write_text("A=1\n")  # the secrets scan's `git log` lists commits that added one
+    run("add", "-A")
+    tree, parent = run("write-tree"), run("rev-parse", "HEAD")
+    body = (f"tree {tree}\nparent {parent}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n"
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEEnotarealsignature\n -----END PGP SIGNATURE-----\n"
+            "\nsigned\n")
+    run("update-ref", "HEAD", run("hash-object", "-t", "commit", "-w", "--stdin", input=body))
+    fake_gpg = tmp_path / "fake-gpg"
+    fake_gpg.write_text(f"#!/bin/sh\n\"{Path(sys.executable).as_posix()}\" -c "
+                        f"\"open(r'{marker.as_posix()}', 'a').write('x')\"\n")
+    fake_gpg.chmod(0o755)
+    run("config", "log.showSignature", "true")
+    run("config", "gpg.program", fake_gpg.as_posix())
+    return repo, marker
+
+
+def test_a_repo_cannot_run_code_through_bosuns_git_log(tmp_path):
+    repo, marker = _signed_commit_repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%ct"], capture_output=True)
+    assert marker.exists()  # the trap is real: plain git runs the repo's program
+    marker.unlink()
+    scan_repo(repo)  # the secrets scan's git log --all ... --name-only
+    projects.build_projects({str(repo)})  # the project's age: git log -1 --format=%ct
+    assert not marker.exists()
+
+
+def test_the_docs_name_every_git_call_on_a_fix_branch_that_a_repository_can_still_reach():
+    """GIT_SAFE can't stop `git push` running a program the repository's config names for it (receivepack,
+    sshCommand, credential.helper), nor `git commit` running the signing program it names when it turns on
+    commit.gpgsign, and `gh pr create` runs git without GIT_SAFE at all. Both docs say so, and
+    stay two different documents (f89a8bf once wrote the policy over the guide)."""
+    root = Path(__file__).parent.parent
+    guide, policy = (root / "docs" / "security.md").read_text(encoding="utf-8"), (root / "SECURITY.md").read_text(
+        encoding="utf-8")
+    # Two different documents: the guide explains Bosun's safety in plain terms, the policy is the threat model.
+    assert "\n## Security in plain terms\n" in guide and "\n## Safety\n" in guide
+    assert "\n## Threat model\n" in policy and "\n## Reporting a vulnerability\n" in policy
+    assert "## Threat model" not in guide and "## Security in plain terms" not in policy
+    for doc, raw in (("docs/security.md", guide), ("SECURITY.md", policy)):
+        text = " ".join(raw.split())
+        text = text[text.index("Fix branches"):]  # the exceptions (the guide names `gpg.program` before, for git log)
+        for name in ("`status`", "`add`", "`commit`", "`worktree add`", "`git push`", "`gh pr create`",
+                     "receivepack", "`core.sshCommand`", "`credential.helper`", "`gpg.program`",
+                     "`gpg.ssh.program`", "`gpg.x509.program`", "`commit.gpgsign`", "a person's click"):
+            assert name in text, (doc, name)
+
+
 def test_autopilot_never_installs_a_major_jump_on_a_models_word():
     from bosun import autopilot
 
@@ -246,6 +304,22 @@ def test_a_login_code_works_once_briefly_and_only_from_the_key(tmp_path):
     assert c.get("/api/state").status_code == 401
 
 
+def test_a_non_ascii_cookie_login_code_or_page_token_is_refused_not_an_error(tmp_path):
+    from bosun import auth
+
+    s, c = _dashboard(tmp_path)
+    name = auth.cookie_name(s.port)
+    ts, nonce, _ = auth.login_code("s" * 48).split(".")
+    assert c.get(f"/login?code={ts}.{nonce}.caf%C3%A9").status_code == 401  # compare_digest refused str like this
+    signed = auth.cookie_value("s" * 48)
+    # header bytes arrive as latin-1 text: UTF-8 bytes above 0x7f become non-ASCII characters
+    assert c.get("/api/state", headers={"cookie": f"{name}=café".encode()}).status_code == 401
+    c.cookies.set(name, signed)
+    assert c.post("/api/autopilot", json={"on": True},
+                  headers={"x-bosun-token": "té".encode() + b"t" * 30}).status_code == 403
+    assert auth.Sessions("s" * 48).valid_cookie("café") is False
+
+
 def test_the_key_file_is_private_and_stable(tmp_path):
     import os
     import stat
@@ -328,3 +402,17 @@ def test_the_test_suite_cannot_reach_the_real_data_folder():
     from bosun.config import load_settings
 
     assert load_settings().data_dir != machine.default_data_dir() and "bosun-tests-" in str(load_settings().data_dir)
+
+
+def test_ci_installs_exactly_what_the_lockfile_pins():
+    """A bare `uv sync`, or a bare `uv run` (which syncs first), rewrites uv.lock when it is out of date, so CI could
+    test packages nobody reviewed. `--frozen` is not enough: it installs the lock without checking that it still
+    matches pyproject.toml. `--locked` fails instead."""
+    import re
+
+    workflows = sorted((Path(__file__).parent.parent / ".github" / "workflows").glob("*.yml"))
+    calls = [(w.name, line.strip()) for w in workflows for line in w.read_text(encoding="utf-8").splitlines()
+             if re.search(r"\buv (sync|run)\b", line)]
+    assert any("uv sync" in line for _, line in calls), calls
+    uv_flag = r"\buv (sync|run)( -[-\w]+(=\S+)?)* --locked(\s|$)"  # uv's own flag, before what `uv run` runs
+    assert all(re.search(uv_flag, line) for _, line in calls), calls

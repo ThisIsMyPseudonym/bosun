@@ -219,6 +219,13 @@ _NEEDS_PERSON = [
      "needs your password"),
     # caskguard: the new app was not from the developer of the old one, or macOS would not accept it
     (r"Stopped: the new .+ (is signed by|did not check out)", "did not pass Bosun's check of who made it"),
+    # storeguard: the App Store has a copy of the app too, and that stays so until a person removes one. Not a
+    # check that failed ("could not check whether the App Store also has"): the next attempt makes it again.
+    (r"Not run: .+ (is the App Store's copy of|could not tell whether .+ is the same app)", "has an App Store copy too"),
+    # ...or Bosun can't see what the cask installs (a pkg, a script, a cask from a tap) while the Mac has App Store
+    # apps: that stays so too. Not a catalogue it has yet to download (storeguard._OLD_CATALOGUE, _NOT_LISTED): that
+    # settles itself.
+    (r"Not run: .+ could not tell which app .+ installs", "Bosun can't see what this cask installs"),
 ]
 ATTENDED = frozenset({"needs an admin prompt approved", "needs your password"})  # being there fixes these
 
@@ -553,6 +560,15 @@ class Upgrader:
                        trace_id=job.get("trace_id") or None, parent=job.get("parent_trace", ""),
                        jobs=list(ids)) as run:
             log.info("job %s: %s", ",".join(map(str, ids)), " ".join(trace.redact.argv(argv)))
+            refused = self._store_copy(keys, argv)
+            if refused:  # an App Store copy of the app is there: every way in (Autopilot, a click, a recipe) stops
+                for j in ids:
+                    self.store.finish_job(j, "failed", refused)
+                run.fail(refused)
+                if in_terminal:
+                    self._guards.pop(ids[0], None)
+                    self.terminal.finish(ids[0], status="failed", ended="error", note=refused, trace_id=run.trace_id)
+                return False
             if in_terminal:
                 return self._run_in_terminal(ids, keys[0] if keys else "", argv, run)
             try:
@@ -612,6 +628,21 @@ class Upgrader:
                 goback.remember(self.store, str(guard.path), getattr(guard, "rejected", "") or "", was.version if was else "")
             except Exception:
                 log.exception("could not note that %s was put back", key)
+
+    def _store_copy(self, keys: list[str], argv: list[str]) -> str:
+        """Why this install must not run because the App Store has a copy of the app (storeguard), or ""."""
+        from . import storeguard  # late: it reads the Mac collector
+        if not storeguard.installs_app(argv):
+            return ""
+        try:
+            from .serialize import item_from_dict
+            listed = {d.get("key"): d for d in (self.store.latest_snapshot() or {}).get("items", [])}
+            items = [item_from_dict(listed[k]) if k in listed else None for k in keys]
+            return storeguard.refusal(items, argv, lambda: storeguard.catalogue(self.settings.data_dir / "cask-catalog.json"))
+        except Exception as exc:  # this check keeps two copies of one app apart: if it can't be made, nothing runs
+            log.exception("could not check %s for an App Store copy", ", ".join(keys))
+            return (f"Not run: Bosun could not check whether the App Store also has a copy of this app "
+                    f"({exc.__class__.__name__}). Nothing was changed. Update it yourself.")
 
     def _cask_guard(self, keys: list[str], argv: list[str]):
         """The before-and-after check for `brew upgrade --cask` or `brew reinstall --cask` of one app

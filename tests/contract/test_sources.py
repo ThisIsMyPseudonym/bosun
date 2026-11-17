@@ -102,6 +102,7 @@ def test_homebrews_cask_catalogue_has_the_fields_bosun_keeps():
         assert isinstance(cask[key], bool)
     assert isinstance(has(cask, "artifacts", list)[0], dict)
     has(cask, "conflicts_with", (dict, type(None)))
+    assert isinstance(has(cask, "depends_on", dict).get("cask", []), list)  # storeguard.py follows these
     assert "sha256" in cask  # whether Homebrew publishes a checksum is all Bosun reads of it
 
 

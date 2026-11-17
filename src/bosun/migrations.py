@@ -13,6 +13,7 @@ Rules, so a self-update can never strand a machine:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -62,6 +63,7 @@ class Migration:
     name: str
     sql: str = ""
     fn: Callable[[sqlite3.Connection], None] | None = None
+    after: Callable[[sqlite3.Connection], None] | None = None  # once it is committed; a failure is only logged
 
 
 def statements(script: str) -> list[str]:
@@ -449,6 +451,110 @@ CREATE TABLE IF NOT EXISTS offers (
 """
 
 
+def _withhold_http_addresses(db: sqlite3.Connection) -> None:
+    """Snapshots saved before v8 kept a plain-http MCP server's address as the URL's netloc, which carries any
+    user:password in it (and, when a password has an unencoded / ? or #, part of one with no "@" to see). Every
+    such address kept is replaced with collectors/mcp.WITHHELD; the next refresh writes the host and port again.
+    So is each one another machine sent (peers.data), which would stay until that machine reports again. The
+    backups beside the database (bosun.db.bak-v<N>, one made just now) are scrubbed the same way. Older copies of
+    the text are still in the file's free pages (pruned snapshots) and in the spare room of live pages: each
+    backup is VACUUMed here, and the database itself by _vacuum once this is committed."""
+    was = {0: "OFF", 1: "ON", 2: "FAST"}.get(db.execute("PRAGMA secure_delete").fetchone()[0], "OFF")
+    db.execute("PRAGMA secure_delete=ON")  # zeroes the pages this frees: restoring it before COMMIT is fine
+    try:
+        _scrub_http_addresses(db)
+    finally:
+        db.execute(f"PRAGMA secure_delete={was}")
+    for bak in _backups_of(db):
+        try:
+            _scrub_backup(bak)
+        except (sqlite3.Error, OSError) as exc:  # not a database, unreadable, locked: the migration goes on
+            log.warning("could not withhold http addresses in %s: %s", bak, exc)
+
+
+def withhold_http(items: object, withheld: str) -> bool:
+    """Withhold the address of each plain-http MCP server in a list of item dicts. -> whether any was.
+    Also peers.receive, for what an older machine still sends."""
+    hit = [d for d in items if isinstance(d, dict) and d.get("source") == "mcp"
+           and str(d.get("key") or "").endswith("/http")] if isinstance(items, list) else []
+    for d in hit:
+        d["installed"] = withheld
+    return bool(hit)
+
+
+def _scrub_http_addresses(db: sqlite3.Connection) -> None:
+    withheld = "(address withheld)"
+    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}  # a backup may be old
+    if "snapshot_items" in tables:
+        db.execute("UPDATE snapshot_items SET installed = ? WHERE source = 'mcp' AND item_key LIKE '%/http'",
+                   (withheld,))
+    if "peers" in tables:  # what each other machine last sent (peers.summary), its items as serialize.compact keeps
+        for peer_id in [r[0] for r in db.execute("SELECT id FROM peers WHERE instr(data, '/http') > 0")]:
+            row = db.execute("SELECT data FROM peers WHERE id = ?", (peer_id,)).fetchone()
+            try:
+                data = json.loads(row[0])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(data, dict) and withhold_http(data.get("items"), withheld):
+                db.execute("UPDATE peers SET data = ? WHERE id = ?", (json.dumps(data), peer_id))
+    if "snapshots" not in tables:
+        return
+    # the ids first, then one snapshot at a time: never every blob in memory, and no row changed under a SELECT
+    # still being read
+    ids = [r[0] for r in db.execute("SELECT id FROM snapshots WHERE instr(items, '/http') > 0")]
+    for snapshot_id in ids:
+        row = db.execute("SELECT items FROM snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+        try:
+            items = json.loads(row[0])
+        except (TypeError, ValueError):
+            continue
+        if withhold_http(items, withheld):
+            db.execute("UPDATE snapshots SET items = ? WHERE id = ?", (json.dumps(items), snapshot_id))
+
+
+def _backups_of(db: sqlite3.Connection) -> list[Path]:
+    """The copies migrate() keeps beside this database (none for one in memory)."""
+    file = next((r[2] for r in db.execute("PRAGMA database_list") if r[1] == "main"), "")
+    if not file:
+        return []
+    path = Path(file)
+    pattern = re.compile(rf"{re.escape(path.name)}\.bak-v\d+")
+    try:
+        return sorted(p for p in path.parent.iterdir() if pattern.fullmatch(p.name))
+    except OSError:
+        return []
+
+
+def _scrub_backup(bak: Path) -> None:
+    """Each backup in its own connection and transaction, kept where it is, then rebuilt (VACUUM) so no free page
+    or page's spare room keeps the old text. Nothing else has a backup open."""
+    con = sqlite3.connect(bak, isolation_level=None, timeout=5)
+    try:
+        con.execute("PRAGMA secure_delete=ON")
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            _scrub_http_addresses(con)
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        con.execute("VACUUM")
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        con.close()
+
+
+def _vacuum(db: sqlite3.Connection) -> None:
+    """Rebuild the database (VACUUM) so no free page or page's spare room keeps the old text, then copy it over
+    the database file and empty the WAL. Another process using the database at this moment can keep either from
+    finishing: that is logged, and the migration stands (the old text stays until a later VACUUM)."""
+    db.execute("VACUUM")
+    busy = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+    if busy:
+        log.warning("bosun.db: the WAL could not be emptied after withholding http addresses (another reader)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline", fn=_baseline),
     Migration(2, "tracing", fn=_tracing),
@@ -457,6 +563,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(5, "assistant", fn=_assistant),
     Migration(6, "item_states", fn=_item_states),
     Migration(7, "offers", sql=OFFERS),
+    Migration(8, "withhold_http_addresses", fn=_withhold_http_addresses, after=_vacuum),
 )
 
 
@@ -478,14 +585,16 @@ def _has_user_tables(db: sqlite3.Connection) -> bool:
 
 def backup(db: sqlite3.Connection, path: Path, version: int) -> Path:
     """Copy the database aside. Several processes may migrate at once: each writes its own temporary file and
-    renames it into place, so the backup is always one whole copy."""
+    renames it into place, so the backup is always one whole copy. It is read through a connection of its own,
+    since `db` may hold the write lock (migrate), and a backup through that connection would wait for it."""
     dest = path.with_name(f"{path.name}.bak-v{version}")
     tmp = path.with_name(f".{path.name}.bak-v{version}.{uuid.uuid4().hex}.tmp")
-    target = sqlite3.connect(tmp)
+    source, target = sqlite3.connect(path, timeout=30), sqlite3.connect(tmp)
     try:
-        db.backup(target)
+        source.backup(target)
     finally:
         target.close()
+        source.close()
     _put_into_place(tmp, dest)
     pattern = re.compile(rf"{re.escape(path.name)}\.bak-v\d+")
     olds = []
@@ -614,7 +723,15 @@ def migrate(db: sqlite3.Connection, path: Path | None = None,
     if path is not None:
         refuse_foreign_checkout(db, path, start, known)
     if path is not None and _has_user_tables(db):  # v0 with tables = a database from before migrations
-        log.info("bosun.db schema v%s -> v%s; backup at %s", start, known, backup(db, path, start))
+        # under the write lock, and only while a migration is still pending: a copy made before another process
+        # migrated, put into place after it, would replace the backup migration 8 scrubbed with an unscrubbed one
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            start = current_version(db)
+            if start < known:
+                log.info("bosun.db schema v%s -> v%s; backup at %s", start, known, backup(db, path, start))
+        finally:
+            db.execute("ROLLBACK")
     applied = []
     for m in sorted(migrations, key=lambda m: m.version):
         db.execute("BEGIN IMMEDIATE")
@@ -637,6 +754,11 @@ def migrate(db: sqlite3.Connection, path: Path | None = None,
                           m.version, m.name, current_version(db))
             raise
         applied.append(m.version)
+        if m.after is not None:
+            try:
+                m.after(db)
+            except sqlite3.Error as exc:  # committed already: what follows is housekeeping
+                log.warning("schema migration v%s (%s): the step after it failed: %s", m.version, m.name, exc)
     if applied:
         log.info("bosun.db schema migrated to v%s (applied %s)", known, applied)
         if path is not None and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone():
