@@ -190,8 +190,6 @@ def test_nobody_else_gets_one(app):
     assert ("GET", "/api/icon") in registry.EXEMPT_ROUTES
 
 
-def test_icons_stay_out_of_what_leaves_the_page(app, tmp_path):
-    from bosun import peers, query
-    store = Store(tmp_path / "db.sqlite")
-    assert "icon" not in peers.summary(store, pending=lambda: [])["items"][0]  # other machines get no artwork
+def test_icons_stay_out_of_what_leaves_the_page():
+    from bosun import query
     assert not any("icon" in c for cols in query.READABLE.values() for c in cols)

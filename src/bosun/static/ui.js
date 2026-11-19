@@ -172,7 +172,7 @@ MC.KIND = { os: "Operating system", firmware: "Firmware", driver: "Driver", hard
 // how it arrived, where that adds something to the kind
 MC.VIA = { winget: "winget", choco: "Chocolatey", "npm-global": "npm", "pip-global": "pip", "wsl-apt": "WSL",
            image: "Docker", brew: "Homebrew", "brew-cask": "Homebrew", apt: "apt", snap: "snap", "windows-update": "Windows Update" };
-// snapshots and other machines from before kinds existed: a best guess from the source
+// snapshots from before kinds existed: a best guess from the source
 const KIND_OF_SOURCE = { mcp: "dev", secret: "project", "npm-global": "dev", "pip-global": "dev", "wsl-apt": "dev", image: "dev", brew: "dev", runtime: "dev",
                          macos: "os", distro: "os", "windows-update": "os", repo: "project", container: "project" };
 MC.kindOf = (i) => i.kind || KIND_OF_SOURCE[i.source] || "app";
@@ -240,13 +240,12 @@ MC.buildScopes = function buildScopes(S) {
   const urgency = (sc) => [sc.sum.kev, sc.sum.counts.now, sc.sum.counts.plan, sc.sum.counts.watch, sc.sum.counts.batch];
   const cmp = (a, b) => { const x = urgency(a), y = urgency(b); for (let k = 0; k < x.length; k++) if (x[k] !== y[k]) return y[k] - x[k]; return a.name.localeCompare(b.name); };
   const visible = projects.filter((p) => !p.ignored || S.showIgnored || p.items.length);  // an ignored project with an attack in it shows
-  const peers = MC.peerScopes(S);
   return {
-    pc, peers, ignoredProjects: projects.filter((p) => p.ignored),
+    pc, ignoredProjects: projects.filter((p) => p.ignored),
     // a dormant project only lands in "now" through malware: that one can't wait in the dormant pile
     active: visible.filter((p) => !p.project.dormant || p.sum.counts.now).sort(cmp),
     dormant: visible.filter((p) => p.project.dormant && !p.sum.counts.now).sort((a, b) => b.sum.total - a.sum.total),
-    byId: new Map([pc, ...projects, ...peers].map((s) => [s.id, s])),
+    byId: new Map([pc, ...projects].map((s) => [s.id, s])),
   };
 };
 
@@ -255,7 +254,6 @@ MC.route = {
     const h = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
     if (h.startsWith("project/")) return { page: "scope", id: h.slice(8) };
     if (h === "pc") return { page: "scope", id: "pc" };
-    if (h.startsWith("machine/")) return { page: "scope", id: `peer:${h.slice(8)}` };
     if (h === "packages") return { page: "packages" };
     if (h === "runs") return { page: "runs" };
     if (h === "usage") return { page: "usage" };
@@ -263,7 +261,6 @@ MC.route = {
     return { page: "today" };  // also the old #/overview links
   },
   href(page, id) {
-    if (page === "scope" && id.startsWith("peer:")) return `#/machine/${encodeURIComponent(id.slice(5))}`;
     if (page === "scope") return id === "pc" ? "#/pc" : `#/project/${encodeURIComponent(id)}`;
     return `#/${page}`;
   },

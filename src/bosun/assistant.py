@@ -232,6 +232,11 @@ class Assistant:
         trace.thread(self._run, (turn, compose(context, history, body.text)), name="assistant")
         return {"conversation_id": cid, "turn": turn.number, "trace_id": turn.trace_id}
 
+    def busy(self) -> bool:
+        """True while any Ask Bosun turn is still running."""
+        with self._lock:
+            return any(not t.done for t in self._turns.values())
+
     def stop(self, conversation_id: str) -> dict[str, Any]:
         turn = self._turns.get(conversation_id)
         if turn is None or turn.done:
@@ -366,7 +371,7 @@ class Assistant:
                             delta = message.event.get("delta") or {}
                             if (message.event.get("type") == "content_block_delta" and delta.get("type") == "text_delta"
                                     and not message.parent_tool_use_id):
-                                turn.emit("text", delta=delta.get("text") or "")
+                                turn.emit("text", delta=redact.text(delta.get("text") or ""))
                         elif isinstance(message, AssistantMessage):
                             if message.error:
                                 error = str(message.error)

@@ -473,8 +473,7 @@ def _withhold_http_addresses(db: sqlite3.Connection) -> None:
 
 
 def withhold_http(items: object, withheld: str) -> bool:
-    """Withhold the address of each plain-http MCP server in a list of item dicts. -> whether any was.
-    Also peers.receive, for what an older machine still sends."""
+    """Withhold the address of each plain-http MCP server in a list of item dicts. -> whether any was."""
     hit = [d for d in items if isinstance(d, dict) and d.get("source") == "mcp"
            and str(d.get("key") or "").endswith("/http")] if isinstance(items, list) else []
     for d in hit:
@@ -488,7 +487,7 @@ def _scrub_http_addresses(db: sqlite3.Connection) -> None:
     if "snapshot_items" in tables:
         db.execute("UPDATE snapshot_items SET installed = ? WHERE source = 'mcp' AND item_key LIKE '%/http'",
                    (withheld,))
-    if "peers" in tables:  # what each other machine last sent (peers.summary), its items as serialize.compact keeps
+    if "peers" in tables:  # legacy table from older versions: scrub any rows left from pre-v8 databases
         for peer_id in [r[0] for r in db.execute("SELECT id FROM peers WHERE instr(data, '/http') > 0")]:
             row = db.execute("SELECT data FROM peers WHERE id = ?", (peer_id,)).fetchone()
             try:

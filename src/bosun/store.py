@@ -35,6 +35,17 @@ def _wal(db: sqlite3.Connection, tries: int = 50) -> None:
             time.sleep(0.05 * (attempt + 1))
 
 
+def _json_capped(value: Any, limit: int) -> str:
+    """Serialize JSON after redaction, keeping it valid JSON even when it exceeds `limit`."""
+    raw = json.dumps(redact.value(value), default=str)
+    if len(raw) <= limit:
+        return raw
+    summary: dict[str, Any] = {"truncated": f"{len(raw)} chars dropped"}
+    if isinstance(value, dict):
+        summary["keys"] = sorted(map(str, value))[:50]
+    return json.dumps(summary)
+
+
 class Store:
     def __init__(self, path: Path):
         machine.private_dir(path.parent)
@@ -47,8 +58,12 @@ class Store:
         migrations.migrate(self._db, path)
 
     @contextmanager
-    def _tx(self):
+    def _tx(self, *, write: bool = False):
         with self._lock, self._db:
+            if write and not self._db.in_transaction:
+                # Claim the write lock up front so a read-then-write transaction waits on busy_timeout
+                # instead of failing immediately with SQLITE_BUSY on a mid-transaction lock upgrade.
+                self._db.execute("BEGIN IMMEDIATE")
             yield self._db
 
     # --- cache ---------------------------------------------------------------
@@ -62,7 +77,7 @@ class Store:
         return json.loads(row["value"])
 
     def cache_put(self, kind: str, key: str, value: Any) -> None:
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             db.execute("INSERT OR REPLACE INTO cache VALUES (?,?,?,?)", (kind, key, json.dumps(value), time.time()))
 
     # --- snapshots -------------------------------------------------------------
@@ -71,9 +86,7 @@ class Store:
         """Save the blob the dashboard reads and, in the same transaction, the rows questions are asked of.
         `unread`: sources that could not be read this time; their first-seen dates are left alone."""
         ts = time.time()
-        with self._tx() as db:
-            if not db.in_transaction:
-                db.execute("BEGIN")  # a savepoint alone would commit by itself: dates and snapshot are one write
+        with self._tx(write=True) as db:
             self._stamp_offers(db, items, ts, unread)
             cur = db.execute("INSERT INTO snapshots (ts, items, errors, meta) VALUES (?,?,?,?)",
                              (ts, json.dumps(items), json.dumps(errors), json.dumps(meta or {})))
@@ -176,7 +189,7 @@ class Store:
             ignored = None
         if auto_upgrade is None and ignored is None:
             return
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             self._write_flags(db, item_key, auto_upgrade, ignored)
             normalize.apply_pref(db, item_key)  # v_current_items shows it now, not after the next refresh
 
@@ -197,7 +210,7 @@ class Store:
             raise ValueError(f"unknown state {state!r}")
         if item_key.startswith(attention.PROJECT):
             raise ValueError("a project is ignored as a whole (set_pref), not acknowledged or snoozed")
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             if state:
                 db.execute("INSERT OR REPLACE INTO item_states (item_key, state, state_at, until_ts, until_version, "
                            "seen_risk, seen_kev, seen_malicious) VALUES (?,?,?,?,?,?,?,?)",
@@ -216,29 +229,15 @@ class Store:
         return None if row is None else row["value"]
 
     def set_setting(self, key: str, value: str) -> None:
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, value))
-
-    # --- other machines (read-only summaries they sent) ----------------------------
-    def put_peer(self, peer_id: str, name: str, kind: str, data: dict) -> None:
-        with self._tx() as db:
-            db.execute("INSERT OR REPLACE INTO peers VALUES (?,?,?,?,?)", (peer_id, name, kind, json.dumps(data), time.time()))
-
-    def peers(self) -> list[dict]:
-        with self._tx() as db:
-            rows = db.execute("SELECT * FROM peers ORDER BY name").fetchall()
-        return [{**dict(r), "data": json.loads(r["data"])} for r in rows]
-
-    def delete_peer(self, peer_id: str) -> None:
-        with self._tx() as db:
-            db.execute("DELETE FROM peers WHERE id=?", (peer_id,))
 
     # --- jobs ----------------------------------------------------------------------
     def create_job(self, item_key: str, argv: list[str], status: str = "queued", trace_id: str | None = None,
                    actor: str | None = None) -> int:
         """A job gets its own trace (the run that does the work) and remembers the run that asked for it.
         Jobs run together (one apt command for several packages) share a trace_id."""
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             cur = db.execute("INSERT INTO jobs (item_key, argv, status, started, trace_id, parent_trace, actor) "
                              "VALUES (?,?,?,?,?,?,?)", (item_key, json.dumps(argv), status, time.time(),
                                                         trace_id or trace.new_id(), trace.current_trace_id(),
@@ -251,18 +250,18 @@ class Store:
         return {**dict(row), "argv": json.loads(row["argv"])} if row else None
 
     def mark_job(self, job_id: int, status: str) -> None:
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             db.execute("UPDATE jobs SET status=?, started=? WHERE id=?", (status, time.time(), job_id))
 
     def abandon_stale_jobs(self) -> int:
         """Jobs left queued/running by a previous process will never finish: say so."""
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             cur = db.execute("UPDATE jobs SET status='abandoned', finished=? WHERE status IN ('queued','running')",
                              (time.time(),))
             return cur.rowcount
 
     def finish_job(self, job_id: int, status: str, output: str) -> None:
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             db.execute("UPDATE jobs SET status=?, output=?, finished=? WHERE id=?",
                        (status, redact.text(output)[-20000:], time.time(), job_id))
             if status == "succeeded":  # it was updated: the next version is a new decision ("ignore" stays)
@@ -294,25 +293,25 @@ class Store:
         return [{**dict(r), "argv": json.loads(r["argv"])} for r in rows]
 
     def note_job(self, job_id: int, output: str) -> None:
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             db.execute("UPDATE jobs SET output=? WHERE id=?", (output[-20000:], job_id))
 
     def claim_waiting_job(self, job_id: int) -> bool:
         """waiting -> queued, atomically, so a cancel and a release can't both win."""
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             cur = db.execute("UPDATE jobs SET status='queued', started=? WHERE id=? AND status='waiting'",
                              (time.time(), job_id))
             return cur.rowcount == 1
 
     def cancel_waiting_job(self, job_id: int) -> bool:
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             cur = db.execute("UPDATE jobs SET status='cancelled', finished=? WHERE id=? AND status='waiting'",
                              (time.time(), job_id))
             return cur.rowcount == 1
 
     # --- fixes (Claude Code branch + test) ---------------------------------------------
     def create_fix(self, item_key: str, project: str, keys: list[str] | None = None) -> int:
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             cur = db.execute("INSERT INTO fixes (item_key, project, status, started, result, trace_id, parent_trace, "
                              "actor) VALUES (?,?,?,?,?,?,?,?)",
                              (item_key, project, "queued", time.time(), json.dumps({"keys": keys or [item_key]}),
@@ -326,16 +325,17 @@ class Store:
             if val is not None:
                 sets.append(f"{col}=?")
                 vals.append(val)
-        if result is not None:  # merge, so "keys" set at creation survives later updates
-            current = self.fix(fix_id) or {}
-            sets.append("result=?")
-            vals.append(json.dumps({**(current.get("result") or {}), **result}))
         if status in ("fixed", "partial", "needs_human", "failed", "no_changes"):
             sets.append("finished=?")
             vals.append(time.time())
-        if not sets:
+        if not sets and result is None:
             return
-        with self._tx() as db:
+        with self._tx(write=True) as db:
+            if result is not None:  # merge inside the write tx so "keys" set at creation survives later updates
+                row = db.execute("SELECT result FROM fixes WHERE id=?", (fix_id,)).fetchone()
+                prev = json.loads(row["result"]) if row and row["result"] else {}
+                sets.append("result=?")
+                vals.append(json.dumps({**prev, **result}))
             db.execute(f"UPDATE fixes SET {', '.join(sets)} WHERE id=?", (*vals, fix_id))
 
     def fix(self, fix_id: int) -> dict | None:
@@ -365,7 +365,7 @@ class Store:
                                    "SELECT 1 FROM fixes WHERE status IN ('queued','running') LIMIT 1").fetchone())
 
     def abandon_stale_fixes(self) -> int:
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             cur = db.execute("UPDATE fixes SET status='failed', finished=?, "
                              "result=json_object('error','interrupted: server restarted') "
                              "WHERE status IN ('queued','running')", (time.time(),))
@@ -433,6 +433,8 @@ class Store:
         conversations. A job still queued or running, and a fix still working, are never dropped."""
         day = 86400
         with self._db:
+            if not self._db.in_transaction:
+                self._db.execute("BEGIN IMMEDIATE")
             if now is None:  # the database's own clock: the rest of the pruning has its own too
                 now = float(self._db.execute("SELECT strftime('%s','now')").fetchone()[0])
             cache = self._db.execute("DELETE FROM cache WHERE ts < ?", (now - CACHE_DAYS * day,)).rowcount
@@ -452,10 +454,8 @@ class Store:
                       outcome: str, error: str = "", duration_ms: float | None = None, ts: float | None = None,
                       approved_by: str = "", approval_id: str = "") -> int:
         """One row per action that changes something, whoever asked for it and however it ended."""
-        text = json.dumps(redact.value(args), default=str)
-        if len(text) > 20000:  # still valid JSON, and it says what happened
-            text = json.dumps({"truncated": f"{len(text)} chars of input dropped", "keys": sorted(map(str, args))[:50]})
-        with self._tx() as db:
+        text = _json_capped(args, 20000)
+        with self._tx(write=True) as db:
             cur = db.execute("INSERT INTO audit (ts, actor, action, input, risk, surface, trace_id, outcome, error, "
                              "duration_ms, approved_by, approval_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                              (time.time() if ts is None else ts, actor, action, text, risk, surface, trace_id, outcome,
@@ -470,13 +470,13 @@ class Store:
     # --- Ask Bosun conversations (written by assistant.py) ------------------------------------------------------
     def create_conversation(self, conversation_id: str, title: str, model: str = "") -> None:
         now = time.time()
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             db.execute("INSERT INTO conversations (id, title, created, updated, model) VALUES (?,?,?,?,?)",
                        (conversation_id, redact.text(title)[:120], now, now, model))
 
     def note_turn(self, conversation_id: str, *, started: bool = False, cost_usd: float = 0.0) -> int:
         """A turn began or ended: count it, add what it cost, and return the turn number."""
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             db.execute("UPDATE conversations SET updated=?, turns=turns+?, cost_usd=ROUND(cost_usd+?, 6) WHERE id=?",
                        (time.time(), int(started), cost_usd, conversation_id))
             row = db.execute("SELECT turns FROM conversations WHERE id=?", (conversation_id,)).fetchone()
@@ -485,13 +485,13 @@ class Store:
     def add_message(self, conversation_id: str, turn: int, role: str, *, text: str = "", tool: str = "",
                     input: Any = None, outcome: str = "", risk: str = "", trace_id: str = "", approval_id: str = "",
                     context: Any = None, max_chars: int = 20000) -> int:
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             cur = db.execute(
                 "INSERT INTO messages (conversation_id, turn, ts, role, text, tool, input, outcome, risk, trace_id, "
                 "approval_id, context) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (conversation_id, turn, time.time(), role, redact.text(text)[:max_chars], tool,
-                 json.dumps(redact.value(input or {}), default=str)[:20000], outcome, risk, trace_id, approval_id,
-                 json.dumps(redact.value(context or {}), default=str)[:4000]))
+                 _json_capped(input or {}, 20000), outcome, risk, trace_id, approval_id,
+                 _json_capped(context or {}, 4000)))
             return int(cur.lastrowid)
 
     def update_message(self, message_id: int, *, outcome: str | None = None, text: str | None = None,
@@ -503,7 +503,7 @@ class Store:
                 sets.append(f"{col}=?")
                 args.append(val)
         if sets:
-            with self._tx() as db:
+            with self._tx(write=True) as db:
                 db.execute(f"UPDATE messages SET {', '.join(sets)} WHERE id=?", (*args, message_id))
 
     def conversations(self, limit: int = 50) -> list[dict]:
@@ -521,13 +521,13 @@ class Store:
 
     def delete_conversation(self, conversation_id: str) -> bool:
         """Your data: the conversation and every message in it go. What its actions did stays in the audit trail."""
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             db.execute("DELETE FROM messages WHERE conversation_id=?", (conversation_id,))
             return db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,)).rowcount > 0
 
     def close_open_messages(self) -> int:
         """At start: a previous dashboard's unanswered approvals and unfinished tool calls can't finish now."""
-        with self._tx() as db:
+        with self._tx(write=True) as db:
             n = db.execute("UPDATE messages SET outcome='expired' WHERE role='approval' AND outcome='pending'").rowcount
             n += db.execute("UPDATE messages SET outcome='error', text='Bosun restarted before this finished' "
                             "WHERE role='tool' AND outcome='running'").rowcount

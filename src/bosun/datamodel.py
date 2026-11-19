@@ -186,8 +186,8 @@ def render() -> str:
                     out.append(f"| `{column}` | {kind} | {_cell(comments.get(column, ''))} |")
             out.append("")
         out += ["## Not readable", "",
-                "`settings`, `cache`, `peers` and `prefs` hold Bosun's own configuration, cached API answers and "
-                "what other machines sent; `query` refuses them, along with SQLite's own tables (`sqlite_master`). "
+                "`settings`, `cache`, `prefs`, `offers` and legacy `peers` hold Bosun's own configuration, cached API "
+                "answers and internal state; `query` refuses them, along with SQLite's own tables (`sqlite_master`). "
                 "An item's ignore and auto-upgrade preferences are in `v_current_items`; what you acknowledged or "
                 "snoozed is in `item_states` and `snapshot_items.state`. The session key is a "
                 "file, not in the database.", ""]

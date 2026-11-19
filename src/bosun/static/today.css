@@ -101,20 +101,6 @@ button.link.accent { color: var(--link); padding: 0; }
 .recent .dot.ok { background: var(--accent); } .recent .dot.busy { background: var(--ochre-text); } .recent .dot.bad { background: var(--brick-text); }
 .recent .tm { color: var(--ink-3); font-size: 12px; }
 
-.machines .mrow { display: flex; gap: 11px; align-items: center; padding: 9px 4px; color: inherit; text-decoration: none; border-radius: 10px; }
-.machines a.mrow:hover { background: var(--raise); }
-.machines .micon { width: 30px; height: 30px; border-radius: 9px; background: var(--raise); display: grid; place-items: center; color: var(--ink-2); flex: none; }
-.machines .micon svg { width: 16px; height: 16px; }
-.machines .mbody { flex: 1; min-width: 0; }
-.machines .mname { display: flex; gap: 6px; align-items: center; font-size: 13.5px; font-weight: 700; }
-.machines .msub { font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.machines .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-3); }
-.machines .dot.ok { background: var(--accent); } .machines .dot.busy { background: var(--ochre-text); } .machines .dot.bad { background: var(--brick-text); }
-.peerinfo .hint { margin: 0 0 4px; }
-.peerlines { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--ink-2); }
-.row.peer { cursor: default; }
-.panel.peerinfo { margin-bottom: 14px; }
-
 @media (max-width: 1180px) { .today { grid-template-columns: 1fr; } .rail { position: static; } .charts { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .need { align-items: flex-start; } .need .name { overflow-wrap: anywhere; }
   .need > button.quiet, .need > button.primary, .macrow button.quiet, .macrow .state { min-width: 0; } .macrow .d { white-space: normal; } }

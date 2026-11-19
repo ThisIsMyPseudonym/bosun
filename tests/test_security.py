@@ -391,12 +391,23 @@ def test_sandbox_settings_confine_writes_network_and_credentials(tmp_path, monke
     assert sb["network"]["allowedDomains"] == ["registry.npmjs.org", "registry.yarnpkg.com"]
     assert sb["filesystem"]["allowWrite"] == [str(wt), str(cache)]
     deny = sb["filesystem"]["denyRead"]
-    assert "~/.ssh" in deny and "~/.aws" in deny and str(data / "session.key") in deny and str(data / "bosun.db") in deny
+    assert "~/.ssh" in deny and "~/.aws" in deny and "~/.git-credentials" in deny and str(data) in deny
+    assert not fixer.worktrees_root(data).is_relative_to(data)
     monkeypatch.setenv("BOSUN_FIX_ALLOW_HOSTS", "npm.internal.example, ")
     assert "npm.internal.example" in fixer.sandbox_settings(wt, cache, [_dep(tmp_path)], data)["sandbox"]["network"]["allowedDomains"]
     argv = fixer.claude_fix_argv("claude", [_dep(tmp_path)], "sonnet", 3.0, {"sandbox": sb})
     assert json.loads(argv[argv.index("--settings") + 1])["sandbox"]["enabled"] is True
     assert all(str(cache) in v for k, v in fixer.cache_env(cache).items() if k != "npm_config_update_notifier")
+
+
+def test_permit_refuses_unknown_actors():
+    import pytest
+    from bosun.registry import ActionContext, Actions, Forbidden, SPECS
+
+    actions = Actions()
+    for actor in ("", "stranger", "admin", "root"):
+        with pytest.raises(Forbidden, match="unknown actor"):
+            actions.permit(SPECS["list_jobs"], ActionContext(actor=actor))
 
 
 def test_the_test_suite_cannot_reach_the_real_data_folder():

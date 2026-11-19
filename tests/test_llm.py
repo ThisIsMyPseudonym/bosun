@@ -125,7 +125,23 @@ def test_the_daily_budget_covers_explanations_too(store, monkeypatch):
     assert llm.over_budget(store, "explain") == ""
     monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "0.1")  # the environment wins
     assert "24-hour" in llm.over_budget(store, "explain")
-    assert llm.over_budget(store, "fix") == ""  # fixes have their own cap
+    assert "24-hour" in llm.over_budget(store, "fix")  # fixes share the 24-hour cap too
+    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "nan")
+    assert llm.budgets(store)["daily_usd"] == llm.DEFAULT_DAILY_BUDGET_USD
+    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "inf")
+    assert llm.budgets(store)["daily_usd"] == llm.DEFAULT_DAILY_BUDGET_USD
+
+
+def test_ok_reply_mentioning_not_logged_in_is_not_misclassified(store, monkeypatch):
+    monkeypatch.setattr(proc, "run", fake_run(envelope(result="Fixes the 'Not logged in' error in /login flow")))
+    call = llm.claude(["claude"], purpose="summarize")
+    assert call.ok and call.outcome == "ok"
+
+
+def test_large_attrs_stay_valid_json_in_llm_usage(store):
+    llm.record("fix", outcome="ok", usage=llm.Usage(cost_usd=0.05), huge="x" * 10000)
+    u = store.llm_usage(days=1)
+    assert u["totals"]["calls"] == 1 and "truncated" in u["top_calls"][0]["attrs"]
 
 
 def test_usage_report_adds_up(store):
@@ -146,7 +162,7 @@ def test_usage_report_adds_up(store):
     assert [o["item_key"] for o in u["outliers"]] == ["brew:mise"]  # 7× the summary median; the fix isn't compared to summaries
     assert u["cache"] == {"summaries_from_cache": 2, "summaries_asked": 7, "hit_rate": round(2 / 7, 3)}
     assert u["by_model"][0]["model"] == "claude-sonnet-5-5" and u["by_model"][0]["calls"] == 7
-    assert store.llm_spent(since=now - 86400, purposes=llm.BUDGETED) == pytest.approx(0.157)
+    assert store.llm_spent(since=now - 86400, purposes=llm.BUDGETED) == pytest.approx(1.357)
 
 
 def test_usage_endpoints(store, tmp_path):

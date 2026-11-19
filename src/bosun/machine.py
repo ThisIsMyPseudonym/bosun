@@ -99,3 +99,20 @@ def os_release(path: Path = Path("/etc/os-release")) -> dict[str, str]:
         return parse_os_release(path.read_text(encoding="utf-8"))
     except OSError:
         return {}
+
+
+def default_name() -> str:
+    """This machine's friendly name (macOS ComputerName, else hostname)."""
+    import platform
+    if IS_MAC:
+        from . import proc
+        r = proc.run(["scutil", "--get", "ComputerName"], timeout=10)
+        if r.ok and r.stdout.strip():
+            return r.stdout.strip()[:40]
+    return platform.node()[:40] or ("Mac" if IS_MAC else "PC")
+
+
+def display_name(store) -> str:
+    """This machine's display name: a saved override (e.g. demo mode), else default_name()."""
+    return store.setting("machine_name") or default_name()
+

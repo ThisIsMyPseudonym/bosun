@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from conftest import signed_in
 
-from bosun import attention, autopilot, migrations, peers
+from bosun import attention, autopilot, migrations
 from bosun.attention import standing
 from bosun.config import load_settings
 from bosun.models import Item, Source
@@ -185,13 +185,6 @@ def test_a_finished_update_clears_acknowledged_and_snoozed_but_not_ignored(tmp_p
         store.finish_job(store.create_job(key, ["brew", "upgrade"]), status, "")
     states = {k: v.get("state") for k, v in store.prefs().items()}
     assert states == {"brew:jq": None, "brew:fd": "ignored", "brew:uv": "snoozed"}
-
-
-def test_other_machines_are_not_told_about_what_you_put_away(tmp_path):
-    store = Store(tmp_path / "db")
-    store.save_snapshot([item("jq", lane="now"), item("fd", lane="now")], [])
-    store.set_state("brew:fd", "ack")
-    assert [i["key"] for i in peers.summary(store, pending=lambda: [])["items"]] == ["brew:jq"]
 
 
 # --- the dashboard's API -----------------------------------------------------------------------------------------

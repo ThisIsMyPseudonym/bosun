@@ -573,17 +573,21 @@ def test_the_page_context_is_identifiers_bosun_already_knows(panel):
 def test_no_credential_reaches_the_model_the_stream_or_the_database(panel, caplog):
     caplog.set_level("DEBUG")
     cookie = auth.cookie_value(SESSION_KEY)
+    stream_secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"
+    assert panel.assistant.busy() is False
 
     async def script(model):
         await model.call("status", {})
         await model.call("set_view", {"mode": "simple"})
-        await model.say("Done.")
+        await model.say(f"Done with token {stream_secret}.")
 
     panel.script(script)
     cid = panel.ask("simple view, and my key is ghp_abcdefghijklmnopqrstuvwxyz0123456789")["conversation_id"]
     approval = panel.wait(cid, "approval")[-1][1]
+    assert panel.assistant.busy() is True
     panel.decide(approval["id"], True)
     events = panel.wait(cid)
+    assert panel.assistant.busy() is False
     fake = panel.fakes[0]
     stored = json.dumps([panel.rows(f"SELECT * FROM {t}") for t in ("messages", "conversations", "audit", "runs", "spans", "llm_calls")], default=str)
     seen = "\n".join([fake.model.prompt, json.dumps(fake.model.results), json.dumps(events), stored, caplog.text,
@@ -592,6 +596,8 @@ def test_no_credential_reaches_the_model_the_stream_or_the_database(panel, caplo
         assert secret not in seen
     assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in stored  # what you typed is redacted where it is stored
     assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in json.dumps(events)
+    assert stream_secret not in json.dumps(events)
+    assert stream_secret not in stored
     assert INJECTION not in assistant_module.SYSTEM
 
 

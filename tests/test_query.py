@@ -29,7 +29,8 @@ def store(tmp_path):
     st.save_snapshot([item_to_dict(Item(Source.BREW, f"pkg{i}", f"pkg{i}", "1.0", "2.0", lane="batch")) for i in range(20)], [])
     st.set_setting("api_key", SECRET)
     st.cache_put("summary", "k", {"note": SECRET})
-    st.put_peer("p1", "MacBook", "mac", {"note": SECRET})
+    with st._tx(write=True) as db:
+        db.execute("INSERT INTO peers VALUES ('p1', 'MacBook', 'mac', ?, 0)", (json.dumps({"note": SECRET}),))
     st.finish_job(st.create_job("brew:pkg1", ["brew", "upgrade", "--password", SECRET]), "failed", f"output {SECRET}")
     st.update_fix(st.create_fix("brew:pkg1", "proj"), status="failed", result={"error": SECRET})
     return st

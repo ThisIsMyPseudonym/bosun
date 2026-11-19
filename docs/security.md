@@ -81,12 +81,11 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   A copy of the database in another folder, and a new database, are not affected. The database is copied to
   `bosun.db.bak-v<N>` before every migration.
 - A plain-http MCP server's address is kept as its host and port, never with a user name or password in it.
-  Migration 8 withholds the addresses older versions kept: in saved snapshots, in what other machines sent, and
+  Migration 8 withholds the addresses older versions kept: in saved snapshots, in legacy peer rows, and
   in the database backups. It then rebuilds those files so no freed page keeps one. If another program has the
   database open at that moment, its rebuild may not finish: Bosun logs that, and old text can stay in freed
   pages until the file is rebuilt (quit Bosun and run `sqlite3 bosun.db VACUUM` in the data folder).
-  Another machine's plain-http addresses are never kept, since one running an older version still sends them
-  whole. Two copies are left: an Ask
+  Two copies are left: an Ask
   Bosun conversation saved before then may still quote an old address, and going back to code from before this
   fix writes full addresses again at its next refresh.
 - Changelog pages named by a package's metadata are fetched over https only, never from an address on this
@@ -98,7 +97,7 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   hand unless that fails) and cached as small PNGs in the data folder. Bosun ships no third-party artwork
   and fetches none. `GET /api/icon?key=<item key>` serves one to the signed-in browser only: agents are
   refused, the file is chosen from the item in the current snapshot and never from the request, and icons
-  are not sent to other machines, put in a diagnostic bundle or a prompt, or readable by `bosun query`.
+  are not put in a diagnostic bundle or a prompt, or readable by `bosun query`.
   `BOSUN_NO_ICONS=1` turns the reading off.
 - Putting an item away (acknowledge, snooze, ignore) is yours alone, like every setting that hides a
   finding, and none of them can hide an attack: an item that becomes exploited or is reported as malware

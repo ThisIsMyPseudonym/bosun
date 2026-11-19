@@ -504,18 +504,24 @@ class Actions:
             why = ("it belongs to your own panels in the dashboard (Ask Bosun, the terminal)" if spec.panel else
                    "it sets a limit on what agents and automation may do")
             raise Forbidden(f"{spec.name} can only be done by you, in the Bosun dashboard: {why}")
-        if is_agent(ctx.actor) and spec.risk in AGENT_TIER_SETTINGS and not agent_policy(self.store)[spec.risk.name.lower()]:
-            raise Forbidden(f"{spec.name} is refused for agents: Bosun doesn't let agents {AGENT_TIER_WORDS[spec.risk]} "
-                            "until the user turns that on in the dashboard (AI usage, Agents). Ask the user to do "
-                            "this step themselves, or to turn the switch on")
-        if ctx.actor == ASSISTANT and spec.risk != Risk.READ:
+        if is_agent(ctx.actor):
+            if spec.risk in AGENT_TIER_SETTINGS and not agent_policy(self.store)[spec.risk.name.lower()]:
+                raise Forbidden(f"{spec.name} is refused for agents: Bosun doesn't let agents {AGENT_TIER_WORDS[spec.risk]} "
+                                "until the user turns that on in the dashboard (AI usage, Agents). Ask the user to do "
+                                "this step themselves, or to turn the switch on")
+            return None
+        if ctx.actor == ASSISTANT:
+            if spec.risk == Risk.READ:
+                return None
             granted = (self.approvals.consume(ctx.approval, spec.name, body)
                        if self.approvals is not None and ctx.approval and body is not None else None)
             if granted is None:
                 raise Forbidden(f"{spec.name} was not run: the assistant needs the user's approval in the Ask Bosun "
                                 "panel for exactly this action and input, and each approval covers one call")
             return granted
-        return None
+        if ctx.actor in ("autopilot", "schedule"):
+            return None
+        raise Forbidden(f"{spec.name} is refused for unknown actor {ctx.actor!r}")
 
     def run(self, name: str, body: BaseModel, ctx: ActionContext) -> Any:
         handler = self._handlers.get(name)

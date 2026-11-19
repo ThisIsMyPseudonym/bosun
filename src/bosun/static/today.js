@@ -285,14 +285,12 @@ MC.views.today = function today(S, scopes) {
   const hiddenProjects = MC.SIMPLE ? all.filter((n) => n.kind === "project").length : 0;
   const needs = MC.SIMPLE ? all.filter((n) => n.kind !== "project") : all;  // the simple view has no project pages to send you to
   const q = S.autopilot.on ? S.autopilot.queued.length : 0;
-  const elsewhere = scopes.peers.filter((sc) => sc.needs).map((sc) => `${sc.needs} on ${sc.name}`);
   const { pkgs } = MC.machineDigest(S, scopes);
   const can = pkgs.filter((p) => MC.bulkMode(S, p.members[0]) === "upgrade").length;
   const kev = needs.filter((n) => n.kev).length;
   const here = MC.MACHINE.label.replace(/^This/, "this");
   const sub = [needs.length ? `${plural(needs.length, "thing")} need${needs.length === 1 ? "s" : ""} you${kev ? `: ${kev === 1 ? "one is" : `${kev} are`} ${MC.words("under active attack", "being attacked")}` : ""}.` : "Nothing urgent.",
     pkgs.length ? `${here[0].toUpperCase()}${here.slice(1)} has ${plural(pkgs.length, "update")} waiting${can ? `; Bosun can install ${can === pkgs.length ? (can === 1 ? "it" : "all of them") : can} right now` : ""}.` : "",
-    elsewhere.length ? `Also ${elsewhere.join(", ")}.` : "",
     q ? `Autopilot installs ${q} ${runTime(S)}.` : ""].filter(Boolean).join(" ");
   const days = new Set((S.history || []).filter((h) => h.lanes).map((h) => new Date(h.ts * 1000).toDateString())).size;
   const trend = days >= 2 ? MC.views.trendChart(S) : null;  // one point is not a trend: no empty card
@@ -304,6 +302,6 @@ MC.views.today = function today(S, scopes) {
       hiddenProjects ? el("p", { class: "hint", text: `${plural(hiddenProjects, "code project")} ${hiddenProjects === 1 ? "has" : "have"} findings. Switch to developer view to see ${hiddenProjects === 1 ? "it" : "them"}.` }) : null,
       health(S, scopes),
       trend || project ? el("div", { class: `charts${trend && project ? "" : " one"}` }, trend, project) : null),
-    el("aside", { class: "rail" }, autopilotCard(S), MC.views.machinesCard(S, scopes), recentCard(S)));
+    el("aside", { class: "rail" }, autopilotCard(S), recentCard(S)));
 };
 })();

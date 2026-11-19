@@ -469,7 +469,7 @@ class Upgrader:
     def _still_autopilots(self, job: dict, listed: dict[str, dict]) -> bool:
         """A job parked for Autopilot, an agent or the assistant (the app was open) is for the version listed
         then. It runs only if that is still what the latest check lists, and that version's waiting period is over."""
-        from . import autopilot  # late: autopilot imports this module
+        from . import attention, autopilot  # late: autopilot imports this module
         from .serialize import item_from_dict
         now_listed = listed.get(job["item_key"])
         if now_listed is None or autopilot.held_until(now_listed) is not None:
@@ -477,8 +477,13 @@ class Upgrader:
         if job.get("actor") == AUTOPILOT:
             # Autopilot's own job also needs the person's settings to still say yes: switched off, snoozed,
             # ignored or put in hands-off since it was parked all mean "leave it".
-            if not autopilot.is_on(self.store) or not autopilot.eligible(
-                    now_listed, self.store.prefs(), autopilot.hands_off(self.store, list(listed.values()))):
+            prefs = self.store.prefs()
+            skip = autopilot.hands_off(self.store, list(listed.values()))
+            opted_in = (bool(prefs.get(job["item_key"], {}).get("auto_upgrade"))
+                        and bool(now_listed.get("upgradable"))
+                        and attention.autopilot_may(now_listed, prefs)
+                        and job["item_key"] not in skip)
+            if not opted_in and (not autopilot.is_on(self.store) or not autopilot.eligible(now_listed, prefs, skip)):
                 return False
         try:
             return self._argv(item_from_dict(now_listed), actor=job.get("actor") or AUTOPILOT) == job["argv"]
@@ -544,7 +549,11 @@ class Upgrader:
                         self.on_drained(changed)  # re-check what just changed so the UI reflects it
                     except Exception:
                         log.exception("post-upgrade re-check failed")
-                return  # idle: exit; the next start() spawns a fresh worker
+                with self._lock:
+                    if not self._queue.empty():
+                        continue  # a job arrived while re-checking or before exiting
+                    self._worker = None
+                    return  # idle: exit; the next start() spawns a fresh worker
             for j in job_id if isinstance(job_id, tuple) else (job_id,):
                 self.store.mark_job(j, "running")
             if self._run(job_id, argv, True) if in_terminal else self._run(job_id, argv):

@@ -173,7 +173,7 @@ Every refresh is stored twice: whole, for the dashboard (the last 60), and as on
 vulnerability, kept for a year (after a month, only each day's last snapshot), so history survives after the whole copies are gone.
 
 A query can only read. It runs on a read-only connection, as one `SELECT`, over the documented views and
-tables only: settings, cached API answers, what other machines sent, and jobs' raw command lines and output
+tables only: settings, cached API answers, and jobs' raw command lines and output
 are refused. It returns at most 500 rows (`--limit`, up to 5000) and is stopped after 2 seconds. The
 dashboard answers the same at `/api/query` for a signed-in browser.
 

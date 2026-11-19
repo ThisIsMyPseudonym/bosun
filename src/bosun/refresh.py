@@ -377,10 +377,10 @@ def _refresh(s: Settings, store: Store, only: set[str] | None, auto_upgrade: boo
         held = 0
         for it in items:
             as_dict = stamped.get(it.key) or item_to_dict(it)
-            # your own "update this one automatically" also waits while you have it snoozed, and while the
-            # release is too new: nobody is there to see that install either
-            opted_in = (prefs.get(it.key, {}).get("auto_upgrade") and it.upgradable
-                        and attention.standing(as_dict, prefs.get(it.key)).state != attention.SNOOZED)
+            # your own "update this one automatically" also respects ignore, snooze, hands-off (go-back / needs a
+            # person) and the waiting period: nobody is there to see that install either
+            opted_in = (bool(prefs.get(it.key, {}).get("auto_upgrade")) and it.upgradable
+                        and attention.autopilot_may(as_dict, prefs) and it.key not in skip)
             if opted_in and autopilot.held_until(as_dict) is not None:
                 opted_in = False
                 held += 1

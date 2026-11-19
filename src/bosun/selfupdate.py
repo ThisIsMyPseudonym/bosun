@@ -247,21 +247,24 @@ def _from_releases(store: Store, root: Path, check: Callable[[Path, bool], str])
             continue  # not a release: other names, pre-releases and malformed versions are never installed
         if name not in seen:  # the checkout's own tag of that name (from the clone) counts as seen first
             local = git(root, "rev-parse", "--verify", "--quiet", f"refs/tags/{name}", timeout=15)
-            seen[name] = local.stdout.strip() if local.ok and local.stdout.strip() else obj
+            if local.ok and local.stdout.strip():
+                seen[name] = local.stdout.strip()
         tags.append((release_key(name), name, kind, obj, peeled_kind, peeled if kind == "tag" else obj, inner))
-    store.set_setting(SEEN, json.dumps(seen, sort_keys=True))
     tags.sort(reverse=True)
     refused: list[str] = []
     target = at = None
     first_refused = ""
     for _, name, kind, obj, peeled_kind, commit, inner in tags:
         if commit == old:
+            if (name not in seen and kind == "tag" and inner == name and peeled_kind == "commit"
+                    and not verify(root, obj, signers_from=commit, what="tag")):
+                seen[name] = obj
             at = name
             break  # nothing newer passed: the checkout is on this release
         if not git(root, "merge-base", "--is-ancestor", old, commit).ok:
             continue  # older than this checkout, or on another line: never a downgrade or a sideways move
         why = ("is a lightweight tag, not a signed annotated one" if kind != "tag"
-               else f"was moved: it pointed at {seen[name][:7]} when this machine first saw it" if seen[name] != obj
+               else f"was moved: it pointed at {seen[name][:7]} when this machine first saw it" if name in seen and seen[name] != obj
                else f"is named {inner!r} inside" if inner != name
                else "does not point at a commit" if peeled_kind != "commit"
                else verify_chain(root, old, commit) or verify(root, obj, signers_from=commit, what="tag"))
@@ -269,8 +272,10 @@ def _from_releases(store: Store, root: Path, check: Callable[[Path, bool], str])
             refused.append(f"{name} {why}")
             first_refused = first_refused or commit
             continue
+        seen.setdefault(name, obj)  # pin only after verification so an unverified tag cannot squat a release name
         target = (name, commit)
         break
+    store.set_setting(SEEN, json.dumps(seen, sort_keys=True))
     newest = tags[0][1] if tags else ""
     refusal = "; ".join(refused)
     if refusal:  # say so on every refresh until it's resolved: this is either a mistake or an attack
@@ -330,6 +335,15 @@ def _roll_back(store: Store, root: Path, old: str, new: str, deps: bool, problem
     return Outcome("failed", f"{new[:7]} didn't start ({problem}); stayed on {old[:7]}{note}", old, new)
 
 
+def is_pending(store: Store) -> bool:
+    """True while another process has moved HEAD and not finished verifying or rolling back yet."""
+    try:
+        p = json.loads(store.setting(PENDING) or "null")
+    except ValueError:
+        return False
+    return bool(p) and (time.time() - p.get("at", 0) < PENDING_STALE_S)
+
+
 def _resume(store: Store, root: Path, check: Callable[[Path, bool], str]) -> Outcome | None:
     """A move that was cut off (the process killed, the machine slept) between moving HEAD and checking the new
     code: check it now, and go back if it doesn't install and import. None when there is nothing to resume."""
@@ -341,16 +355,18 @@ def _resume(store: Store, root: Path, check: Callable[[Path, bool], str]) -> Out
         return None
     if time.time() - p.get("at", 0) < PENDING_STALE_S:
         return Outcome("skipped", "another self-update is still being installed")
-    store.set_setting(PENDING, "")
     old, new, deps = p.get("old", ""), p.get("new", ""), bool(p.get("deps"))
     if not old or head(root) != new:
+        store.set_setting(PENDING, "")
         return None  # it never moved, or the checkout has moved since: nothing of ours to undo
     try:
         problem = check(root, deps)
     except Exception as exc:
         problem = f"{type(exc).__name__}: {exc}"[:300]
     if problem:
+        # _roll_back clears PENDING only when git reset --hard succeeds
         return _roll_back(store, root, old, new, deps, f"after an interrupted update: {problem}", check)
+    store.set_setting(PENDING, "")
     return None
 
 
@@ -409,6 +425,8 @@ def restart_when_idle(busy: Callable[[], bool], root: Path = PROJECT_ROOT, inter
             log.error("Bosun %s doesn't start (%s); the dashboard keeps running %s", now[:7], problem, started[:7])
             report(f"{now[:7]} doesn't start ({problem}); the dashboard keeps running {started[:7]}")
             continue
+        if busy():
+            continue  # work started while check() was running; wait until idle again
         log.info("Bosun moved %s → %s; restarting the dashboard", started[:7], now[:7])
         then()
         return

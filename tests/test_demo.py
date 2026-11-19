@@ -12,8 +12,7 @@ TOKEN = "t" * 32
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("BOSUN_NO_PEERS", "1")
+def client(tmp_path):
     s = load_settings()
     s = type(s)(**{**s.__dict__, "demo": True, "self_update": False, "data_dir": tmp_path})
     store = Store(tmp_path / "db.sqlite")

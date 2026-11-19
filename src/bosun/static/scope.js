@@ -1,4 +1,4 @@
-// One scope's page: a machine ("This PC", or another machine read-only), grouped by how each item gets updated
+// One scope's page: this machine, grouped by how each item gets updated
 // (or, one click away, by what kind of software it is); or a single project, with its own decision lanes.
 "use strict";
 (() => {
@@ -7,7 +7,7 @@ const { el, plural, LANES } = MC;
 function header(S, sc) {
   const p = sc.project;
   const parts = [];
-  const machine = sc.kind === "pc" || sc.kind === "peer";
+  const machine = sc.kind === "pc";
   if (!machine) {
     parts.push(p.dormant ? `dormant · ${p.age_days == null ? "no commits" : `${Math.round(p.age_days / 30)} months since last commit`}`
       : `active · last commit ${p.age_days} d ago`);
@@ -18,7 +18,7 @@ function header(S, sc) {
   const ignored = sc.kind === "project" && sc.ignored;
   return el("section", { class: "scopehead" },
     el("div", { class: "crumbs" }, el("a", { href: "#/", text: "Today" }), el("span", { text: " / " }),
-      el("span", { text: sc.kind === "pc" ? MC.MACHINE.label : sc.kind === "peer" ? "Machines" : "Projects" })),
+      el("span", { text: sc.kind === "pc" ? MC.MACHINE.label : "Projects" })),
     el("div", { class: "titlerow" }, el("h1", { class: "pagetitle", text: sc.name }),
       sc.kind === "project" ? el("button", { class: "quiet", text: "Recheck",
         title: "Scan this project again now (seconds), e.g. after your agent fixed something",
@@ -31,8 +31,6 @@ function header(S, sc) {
       el("ul", {}, ...p.checkouts.map((c) => el("li", { text: c })))) : null);
 }
 
-const machineKind = (sc) => (sc.kind === "peer" ? sc.peer.kind : MC.MACHINE.kind);
-const updatesName = (sc) => (sc.kind === "peer" ? "The system's own updater" : MC.MACHINE.updates);
 const HIGH = 7;
 const byRisk = (a, b) => (b.kev - a.kev) || b.risk - a.risk || a.name.localeCompare(b.name);
 const open = (sc) => MC.groupByPackage(sc.items.filter((i) => i.lane !== "dormant"));
@@ -45,11 +43,11 @@ function statusLine(S, sc) {
   const kev = pkgs.filter((p) => p.kev).length, high = pkgs.filter((p) => !p.kev && p.risk >= HIGH).length;
   const risk = kev ? `${kev} ${kev === 1 ? "is" : "are"} ${MC.words("exploited", "under attack")}${high ? `, ${high} more ${high === 1 ? "is" : "are"} high risk` : ""}.`
     : high ? `${high} ${high === 1 ? "is" : "are"} ${MC.words("high risk", "urgent")}.` : "Nothing risky.";
-  const jumps = sc.kind === "pc" ? pkgs.filter((p) => MC.bigJump(p.members[0])).length : 0;
-  const can = sc.kind === "pc" ? pkgs.filter((p) => MC.bulkMode(S, p.members[0]) === "upgrade").length : 0;
+  const jumps = pkgs.filter((p) => MC.bigJump(p.members[0])).length;
+  const can = pkgs.filter((p) => MC.bulkMode(S, p.members[0]) === "upgrade").length;
   return el("div", { class: "pagesub" }, el("b", { text: `${plural(pkgs.length, "update")} waiting.` }), ` ${risk}`,
     jumps ? ` ${jumps} ${jumps === 1 ? "is" : "are"} a big jump: read what changes first.` : "",
-    sc.kind === "peer" ? " Updates run on that machine." : can ? ` Bosun can install ${can === pkgs.length ? (can === 1 ? "it" : "all of them") : `${can} of them`} right now.` : "");
+    can ? ` Bosun can install ${can === pkgs.length ? (can === 1 ? "it" : "all of them") : `${can} of them`} right now.` : "");
 }
 
 // ---------- the groups a machine page shows: by how it updates (the default here), by what it is, by publisher,
@@ -63,13 +61,12 @@ const SORTS = {
 const matches = (p, q) => !q || [p.name, p.members[0].suite || "", p.package_id || ""].some((t) => t.toLowerCase().includes(q));
 
 function grouping(S, sc) {
-  const mine = sc.kind === "pc";
-  const mode = !mine ? "kind" : MC.SIMPLE ? "route" : S.list.group;
-  const q = mine ? (S.find || "").trim().toLowerCase() : "";
-  const pkgs = open(sc).filter((p) => matches(p, q)).sort(SORTS[mine && !MC.SIMPLE ? S.list.sort : "risk"] || byRisk);
+  const mode = MC.SIMPLE ? "route" : S.list.group;
+  const q = (S.find || "").trim().toLowerCase();
+  const pkgs = open(sc).filter((p) => matches(p, q)).sort(SORTS[!MC.SIMPLE ? S.list.sort : "risk"] || byRisk);
   if (mode === "kind") {
-    const m = machineKind(sc);
-    return MC.GROUPS.map((g) => ({ id: g.id, name: g.name(m), why: g.why(updatesName(sc), m), kind: g,
+    const m = MC.MACHINE.kind;
+    return MC.GROUPS.map((g) => ({ id: g.id, name: g.name(m), why: g.why(MC.MACHINE.updates, m), kind: g,
       pkgs: pkgs.filter((p) => MC.groupOf(p) === g) })).filter((g) => g.pkgs.length);
   }
   if (mode === "publisher") {
@@ -85,7 +82,6 @@ function grouping(S, sc) {
 
 // A group's one button, where one exists: everything in it that can go in one go.
 function groupButton(S, sc, g, filled) {
-  if (sc.kind === "peer") return null;  // read-only: updates run on that machine
   const members = g.pkgs.flatMap((p) => p.members);
   const stopFold = (fn) => (e) => { e.preventDefault(); fn(); };
   const pins = members.filter((m) => MC.pinnable(S, m));
@@ -281,9 +277,8 @@ function rejectedLines() {
 MC.views.scope = function scope(S, scopes, id) {
   const sc = scopes.byId.get(id);
   if (!sc) return el("p", { class: "hint", text: "That project isn't in the latest snapshot (it may have been ignored or cleaned up)." });
-  const machine = sc.kind === "pc" || sc.kind === "peer";
   const nothing = el("div", { class: "panel" }, el("p", { class: "hint", text: "Nothing to do here." }));
-  if (machine) {
+  if (sc.kind === "pc") {
     const groups = grouping(S, sc);
     // one filled button on the page: the first group that has one
     let filled = false;
@@ -294,13 +289,12 @@ MC.views.scope = function scope(S, scopes, id) {
     });
     return el("div", {}, header(S, sc), groups.length || (sc.aside || []).length ? groupStrip(S, sc, groups) : null,
       open(sc).length ? listBar(S, sc) : null,
-      sc.kind === "peer" ? MC.views.peerExtras(sc) : null,
-      ...(sections.length ? sections : [(S.find || "").trim() && sc.kind === "pc"
+      ...(sections.length ? sections : [(S.find || "").trim()
         ? el("div", { class: "panel" }, el("p", { class: "hint", text: `Nothing here matches "${S.find.trim()}".` })) : nothing]),
-      sc.kind === "pc" ? asideSection(S, sc) : null,
-      sc.kind === "pc" && !(S.find || "").trim() ? keptLines() : null,
-      sc.kind === "pc" && !(S.find || "").trim() ? rejectedLines() : null,
-      sc.kind === "pc" && !(S.find || "").trim() ? coverageLine() : null);
+      asideSection(S, sc),
+      !(S.find || "").trim() ? keptLines() : null,
+      !(S.find || "").trim() ? rejectedLines() : null,
+      !(S.find || "").trim() ? coverageLine() : null);
   }
   const lanes = sc.project?.dormant ? ["now", "dormant"] : MC.LANE_ORDER;
   const sections = lanes.map((l) => laneSection(S, sc, l)).filter(Boolean);

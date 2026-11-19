@@ -26,7 +26,7 @@ Every `bosun` command opens the database in the data folder and migrates it. Poi
 own port, with nothing that reaches out:
 
 ```sh
-BOSUN_DATA_DIR=$(mktemp -d) BOSUN_PORT=8794 BOSUN_NO_PEERS=1 BOSUN_SELF_UPDATE=0 uv run bosun serve
+BOSUN_DATA_DIR=$(mktemp -d) BOSUN_PORT=8794 BOSUN_SELF_UPDATE=0 uv run bosun serve
 ```
 
 `uv run bosun demo` shows the dashboard on made-up data, with every action that changes anything refused.

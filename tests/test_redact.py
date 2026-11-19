@@ -61,3 +61,29 @@ def test_this_processes_secret_env_values_are_masked(monkeypatch):
     redact.add_secrets(["askpass-channel-xyz"])
     assert "askpass-channel-xyz" not in redact.text("fd askpass-channel-xyz")
     monkeypatch.setattr(redact, "_env_values", None)
+
+
+def test_authorization_json_headers_curl_short_u_and_kv_key_preservation():
+    out = redact.text('{"Authorization": "Basic dXNlcjpwYXNz", "Proxy-Authorization": "Bearer supersecrettoken"}')
+    assert "dXNlcjpwYXNz" not in out and "supersecrettoken" not in out
+    assert '"Authorization": "[redacted]"' in out and '"Proxy-Authorization": "[redacted]"' in out
+    assert redact.text("Authorization: Bearer abcdef123456") == f"Authorization: {MASK}"
+    assert redact.value({"authorization": "Basic xyz", "proxy-authorization": "Bearer abc"}) == {
+        "authorization": MASK, "proxy-authorization": MASK}
+    masked = redact.argv(["curl", "-uadmin:hunter2", "--user=bob:secretpw", "-u", "carol:pw"])
+    assert "hunter2" not in " ".join(masked) and "secretpw" not in " ".join(masked) and "carol:pw" not in " ".join(masked)
+    assert masked[1] == f"-uadmin:{MASK}"
+
+
+def test_proc_timeout_log_honors_private_indices(monkeypatch, caplog):
+    import subprocess
+    from bosun import proc
+
+    def boom(*a, **kw):
+        raise subprocess.TimeoutExpired(a[0], 1)
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with caplog.at_level("WARNING", logger="bosun.proc"):
+        r = proc.run(["tool", "top-secret-config-blob", "--flag"], timeout=1, private=(1,))
+    assert r.returncode == 124
+    assert "top-secret-config-blob" not in caplog.text and "[not recorded]" in caplog.text

@@ -236,7 +236,7 @@ async function stop() {
 function currentContext() {
   const r = MC.route.parse(), c = { page: r.page };
   if (r.page === "trace") { c.page = "runs"; c.run = r.id; }
-  if (r.page === "scope" && r.id !== "pc" && !r.id.startsWith("peer:")) c.project = r.id;
+  if (r.page === "scope" && r.id !== "pc") c.project = r.id;
   const item = MC.openItem && MC.openItem();
   if (item) c.item = item;
   return c;

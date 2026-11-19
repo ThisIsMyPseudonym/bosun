@@ -1,4 +1,4 @@
-"""`bosun` command line: refresh | serve | doctor | open | install-tasks | install-launcher | peer | query | runs | mcp..."""
+"""`bosun` command line: refresh | serve | doctor | open | install-tasks | install-launcher | query | runs | mcp..."""
 
 from __future__ import annotations
 
@@ -159,65 +159,6 @@ def cmd_serve(args, s) -> int:
         migrations.claim(store._db)
     print(f"Bosun on http://{s.host}:{s.port}. Sign in with `uv run bosun open` (the address alone answers 401).", flush=True)
     uvicorn.run(create_app(s), host=s.host, port=s.port, log_level="warning")
-    return 0
-
-
-def cmd_peer(args, s) -> int:
-    from . import peers
-
-    store = Store(s.db_path)
-    if args.peer_cmd == "label":
-        store.set_setting("machine_name", args.label.strip()[:40])
-        print(f"This machine shows up elsewhere as {store.setting('machine_name')!r}")
-        return 0
-    links = peers.links(store)
-    if args.peer_cmd == "list":
-        status = json.loads(store.setting(peers.STATUS) or "{}")
-        print(f"This machine: {peers.identity(store)['name']}")
-        for link in links:
-            st = status.get(link.name, {})
-            print(f"  {link.name}: ssh {link.host} -> {st.get('error') or ('ok' if st.get('ok') else 'not tried')}")
-        for p in store.peers():
-            print(f"  heard from {p['name']} ({p['kind']}) at {time.strftime('%Y-%m-%d %H:%M', time.localtime(p['received']))}")
-        return 0
-    if args.peer_cmd == "remove":
-        status = json.loads(store.setting(peers.STATUS) or "{}")
-        gone = status.pop(args.name, {})
-        if gone.get("id"):
-            store.delete_peer(gone["id"])
-        store.set_setting(peers.STATUS, json.dumps(status))
-        peers.save_links(store, [x for x in links if x.name != args.name])
-        print(f"Removed {args.name}")
-        return 0
-    try:
-        link = peers.check_link(peers.Link(args.name, args.host, args.identity or "", args.command))
-    except ValueError as exc:
-        print(f"Not added: {exc}")
-        return 1
-    peers.save_links(store, [*[x for x in links if x.name != link.name], link])
-    print(f"Linked {link.name}. Trying it now...")
-    try:
-        data = peers.exchange(store, link)
-    except Exception as exc:
-        print(f"Couldn't reach it yet: {exc}\n(It stays linked; Bosun retries every 15 minutes.)")
-        return 1
-    peers._set_status(store, link.name, ok=time.time(), id=data["machine"]["id"], error="")
-    print(f"OK: {data['machine']['name']} ({data['machine']['kind']}), {len(data['items'])} machine findings")
-    return 0
-
-
-def cmd_peer_exchange(args, s) -> int:
-    """Run over SSH by another machine: read its summary on stdin, answer with ours on stdout."""
-    from . import peers
-
-    store = Store(s.db_path)
-    try:
-        peers.receive(store, peers.parse(sys.stdin.buffer.read(peers.MAX_BYTES + 1)))
-    except ValueError as exc:
-        log.warning("peer-exchange: rejected what was sent: %s", exc)
-        print(f"rejected: {exc}", file=sys.stderr)
-        return 2
-    sys.stdout.write(json.dumps(peers.summary(store)))
     return 0
 
 
@@ -676,20 +617,6 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("install-tasks", help="daily refresh + dashboard at login (per-user, no admin; launchd on macOS, "
                        "systemd --user on Linux)")
     t.add_argument("--time", default="08:30", help="daily refresh time (HH:MM)")
-    pe = sub.add_parser("peer", help="see your other machines here (read-only, over SSH)")
-    psub = pe.add_subparsers(dest="peer_cmd", required=True)
-    pa = psub.add_parser("add", help="link a machine you can already ssh into")
-    pa.add_argument("name", help="what to call it here, e.g. MacBook")
-    pa.add_argument("host", help="what you'd type after ssh, e.g. me@100.64.0.2")
-    pa.add_argument("--identity", help="private key file, if not your default one")
-    pa.add_argument("--command", default="bosun peer-exchange",
-                    help="how to run Bosun there, e.g. \"uv run --project ~/bosun bosun peer-exchange\"")
-    psub.add_parser("list", help="linked machines and when each was last heard from")
-    pr = psub.add_parser("remove", help="unlink a machine")
-    pr.add_argument("name")
-    pl = psub.add_parser("label", help="what other machines call this one")
-    pl.add_argument("label")
-    sub.add_parser("peer-exchange", help=argparse.SUPPRESS)
     mc = sub.add_parser("mcp", help="Bosun as an MCP server for Claude Code (stdio); `mcp install` adds it to Claude Code")
     mc.add_argument("mcp_cmd", nargs="?", choices=("install", "uninstall"),
                     help="install: add it to Claude Code for every project; uninstall: remove it")
@@ -733,7 +660,6 @@ def main(argv: list[str] | None = None) -> int:
     handler = {"refresh": cmd_refresh, "update-scanner": cmd_update_scanner, "self-update": cmd_self_update,
                "serve": cmd_serve, "demo": cmd_demo, "doctor": cmd_doctor, "open": cmd_open, "install-tasks": cmd_install_tasks,
                "install-launcher": cmd_install_launcher,
-               "peer": cmd_peer, "peer-exchange": cmd_peer_exchange,
                "mcp": cmd_mcp, "actions": cmd_actions, "db": cmd_db, "query": cmd_query, "runs": cmd_runs, "trace": cmd_trace, "diagnose": cmd_diagnose, "usage": cmd_usage}[args.cmd]
     from .migrations import MigrationRefused
     try:

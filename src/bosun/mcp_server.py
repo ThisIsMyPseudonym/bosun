@@ -199,7 +199,11 @@ class Dashboard:
             self.ensure_up()
         try:
             r = self._http.request(spec.method, path, auth=self._auth(), **kwargs)
-        except httpx.TransportError:  # it restarted (a self-update) or was stopped since the last call
+        except httpx.TransportError as exc:
+            # Auto-restart and retry only when the request never reached the dashboard (ConnectError) or is a
+            # read-only GET; retrying a timed-out POST could run a non-idempotent action twice.
+            if not isinstance(exc, httpx.ConnectError) and spec.method != "GET":
+                raise
             self._checked = False
             self.ensure_up()
             r = self._http.request(spec.method, path, auth=self._auth(), **kwargs)

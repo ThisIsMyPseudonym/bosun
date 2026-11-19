@@ -468,3 +468,31 @@ def test_the_doc_covers_every_view_and_readable_table(store):
         store.save_snapshot(dicts(JQ, LODASH), [])
         query.run(store.path, example)  # the example in the doc runs, through the guard
     assert "| `argv` | TEXT | Not readable through `query`. |" in doc
+
+
+def test_oversized_message_json_stays_readable_and_concurrent_snapshots_do_not_deadlock(tmp_path):
+    import threading
+
+    s1 = Store(tmp_path / "bosun.db")
+    s2 = Store(tmp_path / "bosun.db")
+    s1.create_conversation("c1", "big")
+    s1.add_message("c1", 1, "tool", tool="query", input={"payload": "a" * 30000}, context={"blob": "b" * 10000})
+    conv = s1.conversation("c1")
+    assert conv and "truncated" in conv["messages"][0]["input"] and "truncated" in conv["messages"][0]["context"]
+
+    # Two connections doing read-then-write save_snapshot concurrently must serialize cleanly via BEGIN IMMEDIATE.
+    errors: list[Exception] = []
+
+    def writer(st: Store, n: int) -> None:
+        try:
+            for i in range(8):
+                st.save_snapshot(dicts(JQ.with_(available=f"1.7.{n}.{i}")), [])
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(s1, 1)), threading.Thread(target=writer, args=(s2, 2))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []

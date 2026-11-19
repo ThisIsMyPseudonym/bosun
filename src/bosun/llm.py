@@ -10,9 +10,9 @@ The cost is what the CLI reports, at list price. On a Claude subscription nothin
 same number is a fair measure of how much of the plan's usage a feature takes.
 
 Budgets: a cap per refresh for release-note summaries, and a rolling 24-hour cap for everything Bosun starts
-on its own or on a click (summaries, "will this break?"). Branch + test fixes have their own per-run cap
-(--max-budget-usd) and only count toward the totals. The Ask Bosun assistant has a rolling 24-hour cap of its
-own: a long conversation never uses up the summaries' budget, and the other way round. 0 means no cap.
+on its own or on a click (summaries, "will this break?", and branch + test fixes, which also keep their own
+per-run cap via --max-budget-usd). The Ask Bosun assistant has a rolling 24-hour cap of its own: a long
+conversation never uses up the summaries' budget, and the other way round. 0 means no cap.
 
 The assistant runs through the Claude Agent SDK instead of `claude -p`; its final message carries the same
 report, and `record_report` writes the same row from it.
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Callable
@@ -33,7 +34,7 @@ from . import proc, trace
 log = logging.getLogger(__name__)
 
 PURPOSES = ("summarize", "explain", "fix", "assistant")
-BUDGETED = ("summarize", "explain")  # what the daily cap covers
+BUDGETED = ("summarize", "explain", "fix")  # what the daily cap covers
 DEFAULT_REFRESH_BUDGET_USD = 2.0
 DEFAULT_DAILY_BUDGET_USD = 10.0
 DEFAULT_ASSISTANT_BUDGET_USD = 5.0
@@ -107,7 +108,8 @@ def _classify(r: proc.Result) -> tuple[str, dict[str, Any] | None, str]:
         envelope = parsed if isinstance(parsed, dict) else None
     except json.JSONDecodeError:
         pass
-    if "Not logged in" in text or ("/login" in text and not envelope):
+    failed = not r.ok or envelope is None or bool(envelope.get("is_error")) or envelope.get("subtype") != "success"
+    if failed and ("Not logged in" in text or ("/login" in text and not envelope)):
         return "not_logged_in", envelope, "Claude Code isn't logged in"
     if r.returncode == 124:
         return "timeout", envelope, r.stderr[:300]
@@ -132,6 +134,9 @@ def record(purpose: str, *, outcome: str, usage: Usage | None = None, model: str
            project: str = "", duration_ms: float | None = None, api_ms: float | None = None, turns: int | None = None,
            prompt_chars: int | None = None, session_id: str = "", error: str = "", **attrs: Any) -> None:
     u = usage or Usage()
+    attrs_json = json.dumps(trace.redact.value(attrs), default=str)
+    if len(attrs_json) > 4000:  # keep valid JSON so llm_usage() never chokes on a truncated row
+        attrs_json = json.dumps({"truncated": f"{len(attrs_json)} chars dropped", "keys": sorted(map(str, attrs))[:50]})
     trace._write(
         "INSERT INTO llm_calls (ts, trace_id, span_id, purpose, item_key, project, model, models, input_tokens, "
         "output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, duration_ms, api_ms, turns, prompt_chars, "
@@ -139,7 +144,7 @@ def record(purpose: str, *, outcome: str, usage: Usage | None = None, model: str
         (time.time(), trace.current_trace_id(), trace.current_span_id(), purpose, item_key, project, model,
          json.dumps(u.models), u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
          round(u.cost_usd, 6), duration_ms, api_ms, turns, prompt_chars, outcome, trace.redact.text(error)[:500],
-         session_id, json.dumps(trace.redact.value(attrs), default=str)[:4000]))
+         session_id, attrs_json))
 
 
 def record_report(purpose: str, report: dict[str, Any] | None, *, outcome: str, model: str = "", error: str = "",
@@ -198,9 +203,10 @@ def structured(call: Call) -> Any:
 def _setting(store: Any, key: str, env: str, default: float) -> float:
     raw = os.environ.get(env) or (store.setting(key) if store is not None else None)
     try:
-        return max(0.0, float(raw)) if raw not in (None, "") else default
+        val = float(raw) if raw not in (None, "") else default
     except ValueError:
         return default
+    return max(0.0, val) if math.isfinite(val) else default
 
 
 def budgets(store: Any) -> dict[str, float]:
@@ -218,7 +224,7 @@ def assistant_left(store: Any) -> float | None:
 
 
 def over_budget(store: Any, purpose: str) -> str:
-    """Why this call shouldn't run ('' if it may). Checked before each summarize/explain call and each assistant turn."""
+    """Why this call shouldn't run ('' if it may). Checked before each summarize/explain/fix call and assistant turn."""
     if purpose == "assistant":
         left = assistant_left(store)
         if left is not None and left <= 0:

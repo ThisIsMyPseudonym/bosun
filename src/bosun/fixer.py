@@ -50,15 +50,17 @@ MALWARE_BASH = {
     "npm": ["npm install --ignore-scripts *", "npm install --package-lock-only *", "npm ci --ignore-scripts *",
             "npm ls *", "npm explain *", "pnpm install --ignore-scripts *", "pnpm install --lockfile-only *",
             "pnpm why *", "yarn install --mode=skip-build *", "yarn why *", "bun install --ignore-scripts *"],
-    "PyPI": ["uv lock *", "uv tree *", "poetry lock *", "poetry show *", "pip-compile *"],
+    "PyPI": ["uv lock *", "uv tree *", "poetry lock *", "poetry show *"],
     "docker": [],
 }
 # Where each ecosystem's packages come from: all the sandbox lets commands reach.
 REGISTRY_HOSTS = {"npm": ["registry.npmjs.org", "registry.yarnpkg.com"], "PyPI": ["pypi.org", "files.pythonhosted.org"]}
 # Credentials a package's install script or a test would love to read. Commands in the sandbox can't.
 SECRET_PATHS = ["~/.ssh", "~/.aws", "~/.azure", "~/.gnupg", "~/.kube", "~/.docker", "~/.netrc", "~/.npmrc", "~/.pypirc",
-                "~/.config/gh", "~/.config/gcloud", "~/.claude", "~/.claude.json", "~/Library/Keychains"]
-BOSUN_FILES = ["session.key", "bosun.db", "bosun.db-wal", "bosun.db-shm", "bosun.log", "bosun.jsonl", "askpass.sh"]
+                "~/.git-credentials", "~/.config/git/credentials", "~/.config/gh", "~/.config/gcloud", "~/.claude",
+                "~/.claude.json", "~/Library/Keychains"]
+MIN_CLAUDE_VERSION = (2, 1, 0)  # supports --restricted, --permission-prompts none, and --settings sandbox
+_VER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _SLUG = re.compile(r"[^a-z0-9.-]+")
 # how to apply a fix, by the manifest signal (manifests.py) behind it
 FIX_HOW = {
@@ -88,6 +90,33 @@ def slug(text: str) -> str:
     return _SLUG.sub("-", text.lower()).strip("-")[:40] or "dep"
 
 
+def worktrees_root(data_dir: Path) -> Path:
+    """Where fix worktrees and throwaway caches live: a sibling of `data_dir`, never inside it, so the sandbox
+    can deny reads on all of `data_dir` (DB backups, logs, session key) without blocking the worktree."""
+    return data_dir.parent / f"{data_dir.name}-worktrees"
+
+
+def parse_claude_version(text: str) -> tuple[int, int, int] | None:
+    m = _VER_RE.search(text or "")
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def claude_version_error(claude: str) -> str:
+    """'' when the claude CLI is new enough for --restricted and --settings sandbox; otherwise why not."""
+    r = proc.run([claude, "--version"], timeout=15)
+    if not r.ok:
+        detail = (r.stderr or r.stdout).strip()[:120] or f"exit {r.returncode}"
+        return f"Could not check Claude Code version ({detail})"
+    ver = parse_claude_version(f"{r.stdout}\n{r.stderr}")
+    if ver is None:
+        return f"Could not read Claude Code version from {r.stdout.strip()[:80]!r}"
+    if ver < MIN_CLAUDE_VERSION:
+        need = ".".join(map(str, MIN_CLAUDE_VERSION))
+        have = ".".join(map(str, ver))
+        return f"Claude Code {have} is too old for sandboxed fixes (need {need}+); run `claude update`"
+    return ""
+
+
 def patterns(items: list[Item]) -> list[str]:
     """What these items' fix may run. One malicious package in the group puts the whole run on the strict list."""
     table = MALWARE_BASH if any(i.malicious for i in items) else ECOSYSTEM_BASH
@@ -104,8 +133,9 @@ def sandbox_available() -> bool:
 
 def sandbox_settings(worktree: Path, cache: Path, items: list[Item], data_dir: Path) -> dict:
     """Settings for `claude --settings`: commands write only inside the worktree and a throwaway cache, reach only
-    the package registries, and cannot read credentials. This is what contains a dependency's install script or
-    a prompt-injected agent; the allow-list of commands alone does not, since running tests is running code."""
+    the package registries, and cannot read credentials or Bosun's data directory. This is what contains a
+    dependency's install script or a prompt-injected agent; the allow-list of commands alone does not, since
+    running tests is running code."""
     extra = [h.strip() for h in os.environ.get("BOSUN_FIX_ALLOW_HOSTS", "").split(",") if h.strip()]
     hosts = sorted({h for i in items for h in REGISTRY_HOSTS.get(i.ecosystem, [])} | set(extra))
     return {"sandbox": {
@@ -113,7 +143,7 @@ def sandbox_settings(worktree: Path, cache: Path, items: list[Item], data_dir: P
         "allowUnsandboxedCommands": False,  # no "retry outside the sandbox"
         "network": {"allowedDomains": hosts},
         "filesystem": {"allowWrite": [str(worktree), str(cache)],
-                       "denyRead": [*SECRET_PATHS, *(str(data_dir / name) for name in BOSUN_FILES)]},
+                       "denyRead": [*SECRET_PATHS, str(data_dir)]},
     }}
 
 
@@ -161,7 +191,7 @@ def fix_prompt(items: list[Item], subdir: str) -> str:
             f"- Allowed commands (with any further arguments): {', '.join(allowed) or 'none: this fix is file edits only'}. "
             "Anything else is denied automatically, git included: read files with Read and Grep. "
             "If a command is denied, retry with an allowed command instead of giving up.\n"
-            "- Commands run in an OS sandbox when the machine has one: they can write only in this worktree, reach only "
+            "- Commands run in an OS sandbox: they can write only in this worktree, reach only "
             "the package registry, and cannot read credentials. A command failing for that reason is not yours to work around.\n"
             + ("- A package here is malware. Never run its code: no install scripts (the allowed commands skip them), "
                "no tests, no builds. Edit the manifest, refresh the lockfile, and stop.\n" if malware else "") + "\n"
@@ -251,13 +281,22 @@ class Fixer:
             raise ValueError("No fixed version is published yet")
         if not self.claude:
             raise ValueError("Claude Code CLI ('claude') not found on PATH")
-        busy = [i.name for i in items if self.store.active_fix_for(i.key)]
-        if busy:
-            raise RuntimeError(f"A fix is already queued or running for: {', '.join(busy)}")
-        key = items[0].key if len(items) == 1 else f"batch:{items[0].project}"
-        fix_id = self.store.create_fix(key, items[0].project, keys=[i.key for i in items])
-        self._q.put((fix_id, items))
+        if not sandbox_available():
+            raise ValueError("Branch + test requires an OS sandbox (macOS Seatbelt, or bwrap and socat on Linux)")
+        ver_err = claude_version_error(self.claude)
+        if ver_err:
+            raise ValueError(ver_err)
+        reason = llm.over_budget(self.store, "fix")
+        if reason:
+            llm.record("fix", outcome="budget", project=items[0].project or "", error=reason)
+            raise RuntimeError(f"Fix stopped: {reason}")
         with self._lock:
+            busy = [i.name for i in items if self.store.active_fix_for(i.key)]
+            if busy:
+                raise RuntimeError(f"A fix is already queued or running for: {', '.join(busy)}")
+            key = items[0].key if len(items) == 1 else f"batch:{items[0].project}"
+            fix_id = self.store.create_fix(key, items[0].project, keys=[i.key for i in items])
+            self._q.put((fix_id, items))
             if self._worker is None or not self._worker.is_alive():
                 self._worker = threading.Thread(target=self._drain, daemon=True, name="fix-worker")
                 self._worker.start()
@@ -268,7 +307,11 @@ class Fixer:
             try:
                 fix_id, items = self._q.get(timeout=5)
             except queue.Empty:
-                return
+                with self._lock:
+                    if not self._q.empty():
+                        continue
+                    self._worker = None
+                    return
             fix = self.store.fix(fix_id) or {}
             try:
                 with trace.run("fix", subject=fix.get("project") or "", actor=fix.get("actor") or None,
@@ -286,12 +329,23 @@ class Fixer:
 
     def run(self, fix_id: int, items: Item | list[Item]) -> None:
         items = [items] if isinstance(items, Item) else list(items)
+        if not self.claude:
+            self.store.update_fix(fix_id, status="failed", result={"error": "Claude Code CLI ('claude') not found on PATH"})
+            return
+        if not sandbox_available():
+            self.store.update_fix(fix_id, status="failed", result={
+                "error": "Branch + test requires an OS sandbox (macOS Seatbelt, or bwrap and socat on Linux)"})
+            return
+        ver_err = claude_version_error(self.claude)
+        if ver_err:
+            self.store.update_fix(fix_id, status="failed", result={"error": ver_err})
+            return
         first = items[0]
         base = primary_checkout(first)
         what = (f"{slug(first.package_id)}-{slug(str(first.available).split(' + ')[0]) if first.available else 'remove'}" if len(items) == 1
                 else f"{len(items)}-deps")
         branch = f"bosun/fix-{what}-{fix_id}"
-        wt = self.settings.data_dir / "worktrees" / f"{slug(Path(base).name)}-{fix_id}"
+        wt = worktrees_root(self.settings.data_dir) / f"{slug(Path(base).name)}-{fix_id}"
         wt.parent.mkdir(parents=True, exist_ok=True)
         add = git(base, "worktree", "add", "-b", branch, str(wt), "HEAD")
         if not add.ok:
@@ -303,25 +357,37 @@ class Fixer:
         for it in items:
             by_dir.setdefault(subdir_of(it), []).append(it)
         reports, costs, denied, errors = [], [], [], []
-        sandboxed = sandbox_available()
         cache = wt.parent / f".cache-{fix_id}"  # thrown away afterwards: nothing a package wrote there outlives the run
-        for rel, group in by_dir.items():
-            cwd = wt / rel if rel else wt
-            settings = sandbox_settings(wt, cache, group, self.settings.data_dir) if sandboxed else None
-            call = llm.claude(claude_fix_argv(self.claude, group, self.settings.model, self.budget, settings), purpose="fix",
-                              timeout=1800, cwd=str(cwd), stdin=fix_prompt(group, rel), env=cache_env(cache) if sandboxed else None,
-                              sandboxed=sandboxed,
-                              item_key=group[0].key if len(group) == 1 else "", project=first.project or "",
-                              fix=fix_id, items=[i.key for i in group], subdir=rel)
-            r = call.result
-            report, cost, den = self._parse(r)
-            costs.append(cost or 0.0)
-            denied += den
-            if report:
-                reports.append(report)
-            else:
-                errors.append(f"[{rel or '.'}] {(r.stderr or r.stdout)[-800:]}")
-        shutil.rmtree(cache, ignore_errors=True)
+        remaining = self.budget
+        try:
+            for rel, group in by_dir.items():
+                over = llm.over_budget(self.store, "fix")
+                if over:
+                    llm.record("fix", outcome="budget", project=first.project or "", fix=fix_id, subdir=rel, error=over)
+                    errors.append(f"[{rel or '.'}] {over}")
+                    break
+                if remaining <= 0:
+                    errors.append(f"[{rel or '.'}] per-fix budget (${self.budget:.2f}) is used up")
+                    break
+                cwd = wt / rel if rel else wt
+                settings = sandbox_settings(wt, cache, group, self.settings.data_dir)
+                call = llm.claude(claude_fix_argv(self.claude, group, self.settings.model, remaining, settings), purpose="fix",
+                                  timeout=1800, cwd=str(cwd), stdin=fix_prompt(group, rel), env=cache_env(cache),
+                                  sandboxed=True,
+                                  item_key=group[0].key if len(group) == 1 else "", project=first.project or "",
+                                  fix=fix_id, items=[i.key for i in group], subdir=rel)
+                r = call.result
+                report, cost, den = self._parse(r)
+                spent = float(cost or 0.0)
+                costs.append(spent)
+                remaining = round(remaining - spent, 6)
+                denied += den
+                if report:
+                    reports.append(report)
+                else:
+                    errors.append(f"[{rel or '.'}] {(r.stderr or r.stdout)[-800:]}")
+        finally:
+            shutil.rmtree(cache, ignore_errors=True)
         report = merge_reports(reports) if reports else None
         changed = git(wt, "status", "--porcelain").stdout.strip()
         commit = ""
@@ -331,7 +397,7 @@ class Fixer:
                      else f"fix(deps): {first.package_id} {first.installed} -> {first.available}" if len(items) == 1
                      else f"fix(deps): upgrade {len(items)} vulnerable dependencies")
             body = "\n".join(f"- {i.package_id}: {i.installed} -> {i.available or 'removed'}" for i in items)
-            c = git(wt, "-c", "user.name=Bosun", "-c", "user.email=bosun@localhost",
+            c = git(wt, "-c", "user.name=Bosun", "-c", "user.email=bosun@localhost", "-c", "commit.gpgsign=false",
                     "commit", "-q", "-m", title, "-m", f"{body}\n\nVia Bosun + Claude Code.")
             commit = git(wt, "rev-parse", "--short", "HEAD").stdout.strip() if c.ok else ""
         diffstat = git(wt, "diff", "--stat", "HEAD~1", "HEAD").stdout.strip() if commit else ""
@@ -343,7 +409,7 @@ class Fixer:
             status = "partial" if errors and report.status == "fixed" else report.status
         self.store.update_fix(fix_id, status=status, result={
             "report": report.model_dump() if report else None, "commit": commit, "diffstat": diffstat,
-            "cost_usd": round(sum(costs), 4), "denied": denied, "sandboxed": sandboxed, "error": "\n".join(errors) or None})
+            "cost_usd": round(sum(costs), 4), "denied": denied, "sandboxed": True, "error": "\n".join(errors) or None})
 
     @staticmethod
     def _parse(r: proc.Result) -> tuple[FixReport | None, float | None, list[str]]:
@@ -363,7 +429,11 @@ class Fixer:
     # --- follow-up actions (user-triggered) ----------------------------------------
     def discard(self, fix_id: int) -> None:
         fix = self.store.fix(fix_id)
-        if not fix or not fix.get("worktree"):
+        if not fix:
+            raise ValueError("Unknown fix")
+        if fix.get("status") in ("queued", "running"):
+            raise RuntimeError("Cannot discard a fix while it is queued or running")
+        if not fix.get("worktree"):
             raise ValueError("Unknown fix")
         wt = fix["worktree"]
         common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()

@@ -196,7 +196,13 @@ def test_open_app_only_opens_self_updating_mac_apps(client, monkeypatch, tmp_pat
     cursor = Item(Source.MAC_APP, "com.todesktop.cursor", "Cursor", "1.0", "1.2", location=str(apps / "Cursor.app"),
                   self_updates=True, manual="Open Cursor and accept its update.")
     sneaky = cursor.with_(package_id="evil", location="/tmp/evil.app")
-    store.save_snapshot([item_to_dict(i) for i in (cursor, sneaky)], [])
+    outside = tmp_path / "Outside.app"
+    outside.mkdir()
+    link = apps / "Link.app"
+    link.symlink_to(outside)
+    symlinked = cursor.with_(package_id="link", location=str(link))
+    traversed = cursor.with_(package_id="trav", location=f"{apps}/../Outside.app")
+    store.save_snapshot([item_to_dict(i) for i in (cursor, sneaky, symlinked, traversed)], [])
     monkeypatch.setattr("bosun.server.machine.IS_MAC", True)
     monkeypatch.setattr("bosun.server.Path.home", lambda: tmp_path)
     monkeypatch.setattr("bosun.server.subprocess.Popen", lambda argv, **kw: opened.append(argv))
@@ -204,3 +210,25 @@ def test_open_app_only_opens_self_updating_mac_apps(client, monkeypatch, tmp_pat
     assert client.post("/api/open-app", json={"key": cursor.key}, headers=h).json() == {"opened": "Cursor.app"}
     assert opened == [["/usr/bin/open", str(apps / "Cursor.app")]]
     assert client.post("/api/open-app", json={"key": sneaky.key}, headers=h).status_code == 404  # not in an Applications folder
+    assert client.post("/api/open-app", json={"key": symlinked.key}, headers=h).status_code == 404  # symlink refused
+    assert client.post("/api/open-app", json={"key": traversed.key}, headers=h).status_code == 404  # traversal refused
+
+
+def test_restore_app_clears_auto_upgrade_for_restored_item(client, monkeypatch):
+    store = client.app_store
+    app_item = Item(Source.BREW_CASK, "cursor", "Cursor", "1.2", "1.3", location="/Applications/Cursor.app")
+    other = Item(Source.BREW_CASK, "vlc", "VLC", "3.0", "3.1", location="/Applications/VLC.app")
+    store.save_snapshot([item_to_dict(app_item), item_to_dict(other)], [])
+    store.set_pref(app_item.key, auto_upgrade=True)
+    store.set_pref(other.key, auto_upgrade=True)
+    monkeypatch.setattr("bosun.server.machine.IS_MAC", True)
+    monkeypatch.setattr("bosun.server.recheck", lambda *a, **kw: {})
+    monkeypatch.setattr("bosun.server.goback.restore", lambda root, bid: {
+        "bundle_id": bid, "name": "Cursor", "path": "/Applications/Cursor.app", "version": "1.1", "left": "1.2",
+    })
+    r = client.post("/api/restore-app", json={"bundle_id": "com.todesktop.cursor"}, headers={"x-bosun-token": TOKEN})
+    assert r.status_code == 200
+    prefs = store.prefs()
+    assert prefs[app_item.key]["auto_upgrade"] is False
+    assert prefs[other.key]["auto_upgrade"] is True
+

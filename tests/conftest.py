@@ -7,7 +7,6 @@ import tempfile
 # Tests never touch the real data folder: several build Settings from the environment, and opening the real
 # database with newer code would migrate it under a running dashboard.
 os.environ["BOSUN_DATA_DIR"] = tempfile.mkdtemp(prefix="bosun-tests-")
-os.environ.setdefault("BOSUN_NO_PEERS", "1")  # the dashboard under test never dials other machines
 os.environ.setdefault("BOSUN_OSV_AUTO_UPDATE", "0")  # a test refresh never downloads into bin/
 os.environ.setdefault("BOSUN_SELF_UPDATE", "0")  # never git-pull the checkout under test
 os.environ.setdefault("BOSUN_NO_ICONS", "1")  # never read this machine's app bundles (tests/test_icons.py passes its own reader)

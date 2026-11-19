@@ -5,7 +5,7 @@ const { el, api, plural } = MC;
 const $ = (s) => document.querySelector(s);
 const S = { raw: false, prefs: {}, items: [], allItems: [], projects: [], history: [], openKey: null,
             list: { group: "route", sort: "risk" }, find: "", jobs: [], fixes: [], trayOpen: false, dormantOpen: false, showIgnored: false, needsAll: false,
-            autopilot: { on: false, time: null, queued: [] }, relaunch: [], notify: { on: true }, peers: [], agents: { system: false, external: false } };
+            autopilot: { on: false, time: null, queued: [] }, relaunch: [], notify: { on: true }, agents: { system: false, external: false } };
 
 // What you said about an item, and whether it is back: worked out by the server (attention.py), never here.
 MC.standing = (i) => i.standing || { state: "", back: "", said: "" };
@@ -63,7 +63,7 @@ async function load() {
     S.claude = st.claude_enabled; S.view = st.view || "auto";
     S.agents = st.agents || S.agents;
     MC.assistantInfo = st.assistant || null;  // the Ask Bosun panel's model and what is left of its budget
-    S.prefs = st.prefs; S.history = st.history || []; S.peers = st.peers || []; S.autopilot = st.autopilot || S.autopilot; S.relaunch = st.relaunch || [];
+    S.prefs = st.prefs; S.history = st.history || []; S.autopilot = st.autopilot || S.autopilot; S.relaunch = st.relaunch || [];
     if (st.machine) MC.MACHINE = st.machine;
     S.watches = st.watches || {}; announceWatches();
     if (st.list_prefs) { MC.fold.seed(st.list_prefs.folds); if (!S.listTouched) S.list = st.list_prefs.pc || S.list; }

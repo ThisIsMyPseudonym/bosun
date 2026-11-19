@@ -14,7 +14,7 @@ records it as its parent: an upgrade queued by a dashboard action links back to 
 
 Writes go to the same SQLite database (see migrations v2) through a separate connection. Tracing must never
 break the work it watches: if the database is unavailable, spans are dropped and the work carries on.
-Without configure() (most tests, the peer-exchange subcommand), spans are not stored, but the context
+Without configure() (most tests), spans are not stored, but the context
 still works.
 """
 

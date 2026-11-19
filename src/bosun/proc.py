@@ -36,7 +36,7 @@ def run(argv: list[str] | tuple[str, ...], timeout: float = 300, cwd: str | None
     shown = ["[not recorded]" if i in private else a for i, a in enumerate(argv)]
     with trace.span("subprocess", name, argv=trace.redact.argv(shown), cwd=cwd, timeout=timeout,
                     stdin_chars=len(stdin) if stdin is not None else None) as sp:
-        r = _run(argv, timeout, cwd, stdin, env)
+        r = _run(argv, timeout, cwd, stdin, env, shown=shown)
         sp.set(returncode=r.returncode, stdout_chars=len(r.stdout), stderr_chars=len(r.stderr))
         if r.returncode not in ok_codes:
             sp.status = "error"
@@ -59,7 +59,7 @@ def git(path: str | os.PathLike, *args: str, timeout: float = 120) -> Result:
 
 
 def _run(argv: list[str] | tuple[str, ...], timeout: float, cwd: str | None, stdin: str | None,
-         env: dict[str, str] | None) -> Result:
+         env: dict[str, str] | None, shown: list[str] | tuple[str, ...] | None = None) -> Result:
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1", **(env or {})}
     try:
         cp = subprocess.run(
@@ -79,7 +79,7 @@ def _run(argv: list[str] | tuple[str, ...], timeout: float, cwd: str | None, std
         return Result(tuple(argv), 127, "", f"command not found: {argv[0]}")
     except subprocess.TimeoutExpired as exc:
         from . import redact
-        log.warning("timeout after %ss: %s", timeout, " ".join(redact.argv(argv)))
+        log.warning("timeout after %ss: %s", timeout, " ".join(redact.argv(shown if shown is not None else argv)))
         partial = exc.stdout or ""  # bytes here even with text=True
         if isinstance(partial, bytes):
             partial = partial.decode("utf-8", errors="replace")

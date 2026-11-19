@@ -153,11 +153,23 @@ def test_dashboard_restarts_only_once_idle(repos, monkeypatch):
     dev, here, store = repos
     commits = iter(["aaa", "aaa", "bbb", "bbb", "bbb"])
     monkeypatch.setattr(selfupdate, "head", lambda root: next(commits))
-    busy = iter([True, False])
+    busy = iter([True, False, False])
     restarted = []
     selfupdate.restart_when_idle(lambda: next(busy), here, then=lambda: restarted.append(True), sleep=lambda s: None,
                                  check=ok)
     assert restarted == [True]  # new code seen twice; waited out the busy check once
+
+
+def test_dashboard_waits_if_work_starts_during_smoke_check(repos, monkeypatch):
+    dev, here, store = repos
+    commits = iter(["aaa", "bbb", "bbb"])
+    monkeypatch.setattr(selfupdate, "head", lambda root: next(commits))
+    # First check: idle before smoke check, busy right after; second check: idle before and after.
+    busy = iter([False, True, False, False])
+    checked, restarted = [], []
+    selfupdate.restart_when_idle(lambda: next(busy), here, then=lambda: restarted.append(True), sleep=lambda s: None,
+                                 check=lambda root, deps: checked.append(1) or "")
+    assert restarted == [True] and len(checked) == 2
 
 
 def test_dashboard_never_restarts_onto_code_that_does_not_start(repos, monkeypatch):
@@ -471,3 +483,39 @@ def test_only_an_ssh_signature_counts_never_one_the_persons_own_keyring_would_ac
     checked = next(a for a in seen if any(str(x).startswith("verify-") for x in a))
     for name in ("gpg.openpgp.program", "gpg.x509.program", "gpg.program"):
         assert any(str(x).startswith(f"{name}=/nonexistent/") for x in checked), name
+
+
+def test_unverified_tag_does_not_squat_release_name(repos):
+    dev, here, store = repos
+    v2 = commit(dev, "app.py", "v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    tag(dev, "v2.0.0", how="lightweight")
+    assert release(store, here).status == "failed"
+    # Maintainer replaces the accidental lightweight tag with a properly signed release tag: it must succeed.
+    tag(dev, "v2.0.0", how="signed")
+    out = release(store, here)
+    assert out.status == "updated" and out.new == v2 and selfupdate.head(here) == v2
+
+
+def test_resume_keeps_pending_when_rollback_fails_and_is_pending_tracks_live_journal(repos, monkeypatch):
+    dev, here, store = repos
+    old = selfupdate.head(here)
+    new = commit(dev, "app.py", "broken\n")
+    git(dev, "push", "-q", "origin", "main")
+    git(here, "fetch", "-q")
+    git(here, "merge", "--ff-only", "-q", new)
+    store.set_setting(selfupdate.PENDING, json.dumps({"old": old, "new": new, "deps": False, "at": time.time()}))
+    assert selfupdate.is_pending(store) is True
+    store.set_setting(selfupdate.PENDING, json.dumps({"old": old, "new": new, "deps": False, "at": 0}))
+    assert selfupdate.is_pending(store) is False
+    real_git = selfupdate.git
+
+    def fail_reset(root, *args, **kw):
+        if args and args[0] == "reset":
+            return selfupdate.proc.Result(("git", *args), 1, "", "index.lock exists")
+        return real_git(root, *args, **kw)
+
+    monkeypatch.setattr(selfupdate, "git", fail_reset)
+    out = selfupdate.update(store, here, check=lambda root, deps: "ImportError")
+    assert out.status == "failed" and "going back" in out.detail
+    assert store.setting(selfupdate.PENDING)  # journal kept so the next update retries the rollback

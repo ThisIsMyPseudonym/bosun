@@ -557,3 +557,58 @@ def test_the_installed_dashboard_claims_its_database_before_it_is_opened(tmp_pat
     migrations.claim_file(path)
     owner = sqlite3.connect(path).execute("SELECT value FROM settings WHERE key=?", (migrations.OWNER,)).fetchone()[0]
     assert owner == str(migrations._checkout().resolve())
+
+
+def test_per_item_auto_upgrade_respects_ignored_and_goback_and_runs_parked_when_autopilot_off(tmp_path, monkeypatch):
+    from bosun import actions, goback, refresh as R
+    from bosun.actions import Upgrader
+    from bosun.config import load_settings
+    from bosun.models import Summary
+
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(autopilot, "WAIT_DAYS", 0)
+    s = load_settings()
+    store = Store(s.db_path)
+    app = Item(Source.BREW_CASK, "cursor", "Cursor", "1.0", "1.1", location="/Applications/Cursor.app", lane="batch")
+    store.set_pref(app.key, auto_upgrade=True)
+    store.set_pref(app.key, ignored=True)
+    ran = []
+    real_run_or_wait = Upgrader.run_or_wait
+    monkeypatch.setattr(R, "collect_all", lambda s, only: ([app], []))
+    monkeypatch.setattr(R, "_enrich_system", lambda items, *a: items)
+    monkeypatch.setattr(R, "_finish", lambda items, *a: [i.with_(summary=Summary(headline="h"), lane="batch") for i in items])
+    monkeypatch.setattr(Upgrader, "run_or_wait", lambda self, it: ran.append(it.key) or "ok")
+    R.refresh(s, store, auto_upgrade=True)
+    assert ran == []  # ignored wins over auto_upgrade
+
+    store.set_pref(app.key, ignored=False)
+    goback.remember(store, "/Applications/Cursor.app", left="1.1", back="1.0")
+    R.refresh(s, store, auto_upgrade=True)
+    assert ran == []  # went back from 1.1: auto_upgrade must not reinstall it
+
+    # With a newer version (1.2) than what we went back from (1.1), auto_upgrade runs again
+    app_newer = app.with_(available="1.2")
+    monkeypatch.setattr(R, "collect_all", lambda s, only: ([app_newer], []))
+    R.refresh(s, store, auto_upgrade=True)
+    assert ran == [app.key]
+
+    # With global Autopilot OFF, a parked per-item auto_upgrade job still runs once the app closes
+    monkeypatch.setattr(Upgrader, "run_or_wait", real_run_or_wait)
+    monkeypatch.setattr(actions, "running_processes", lambda: {"git"})
+    monkeypatch.setattr(Upgrader, "_run", lambda self, job_id, argv: (self.store.finish_job(job_id, "succeeded", ""), True)[1])
+    git = Item(Source.WINGET, "Git.Git", "Git", "2.50.0", "2.55.0", lane="batch")
+    store.set_pref(git.key, auto_upgrade=True)
+    autopilot.set_on(store, False)
+    store.save_snapshot([{**item_to_dict(git), "lane": "batch", "offered": time.time() - 30 * 86400}], [])
+    up = Upgrader(store, s)
+    assert up.run_or_wait(git) == "waiting"
+    job = store.jobs()[0]["id"]
+    assert up.release_waiting(running=set()) == [job]
+    if up._worker:
+        up._worker.join(timeout=5)
+
+    # But if ignored while waiting, it is cancelled
+    assert up.run_or_wait(git) == "waiting"
+    job2 = store.jobs()[0]["id"]
+    store.set_pref(git.key, ignored=True)
+    assert up.release_waiting(running=set()) == [] and store.job(job2)["status"] == "cancelled"

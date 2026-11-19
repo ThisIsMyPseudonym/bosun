@@ -45,8 +45,9 @@ def test_run_commits_on_branch_and_leaves_main_untouched(tmp_path, monkeypatch):
     def fake_run(argv, timeout=300, cwd=None, stdin=None, env=None):
         if argv[0] != "claude":
             return real_run(argv, timeout=timeout, cwd=cwd, stdin=stdin)
+        if argv[1:2] == ["--version"]:
+            return proc.Result(tuple(argv), 0, "2.1.328 (Claude Code)\n", "")
         seen.update(cwd=cwd, stdin=stdin)
-        (tmp_path / "data" / "worktrees").exists()
         pkg = __import__("pathlib").Path(cwd) / "package.json"
         pkg.write_text(pkg.read_text().replace("1.2.5", "1.2.6"))
         report = {"status": "fixed", "summary": "bumped", "files_changed": ["package.json"], "tests": "npm test",
@@ -64,6 +65,7 @@ def test_run_commits_on_branch_and_leaves_main_untouched(tmp_path, monkeypatch):
     fix = store.fix(fid)
     assert fix["status"] == "fixed" and fix["result"]["commit"]
     assert "worktrees" in seen["cwd"] and "minimist" in seen["stdin"]
+    assert not __import__("pathlib").Path(seen["cwd"]).is_relative_to(s.data_dir)
     assert '"1.2.5"' in (repo / "package.json").read_text()  # main checkout untouched
     log = subprocess.run(["git", "-C", str(repo), "log", "--oneline", fix["branch"]], capture_output=True, text=True).stdout
     assert "fix(deps): minimist 1.2.5 -> 1.2.6" in log
@@ -83,12 +85,15 @@ def test_batch_one_branch_one_commit_one_pass_per_directory(tmp_path, monkeypatc
     for args in (["init", "-q", "-b", "main"], ["add", "-A"],
                  ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]):
         subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-    real_run, calls = proc.run, []
+    real_run, calls, budgets = proc.run, [], []
 
     def fake_run(argv, timeout=300, cwd=None, stdin=None, env=None):
         if argv[0] != "claude":
             return real_run(argv, timeout=timeout, cwd=cwd, stdin=stdin)
+        if argv[1:2] == ["--version"]:
+            return proc.Result(tuple(argv), 0, "2.1.328 (Claude Code)\n", "")
         calls.append(cwd)
+        budgets.append(float(argv[argv.index("--max-budget-usd") + 1]))
         pkg = pathlib.Path(cwd) / "package.json"
         pkg.write_text(pkg.read_text().replace("1.0.0", "1.0.1"))
         rep = {"status": "fixed", "summary": f"bumped in {pathlib.Path(cwd).name}.", "files_changed": ["package.json"],
@@ -109,6 +114,7 @@ def test_batch_one_branch_one_commit_one_pass_per_directory(tmp_path, monkeypatc
     fixer.run(fid, items)
     fix = store.fix(fid)
     assert len(calls) == 2 and sorted(pathlib.Path(c).name for c in calls) == ["api", "web"]
+    assert budgets == [3.0, 2.99]  # per-fix budget decrements across subdirs
     assert fix["status"] == "fixed" and fix["result"]["keys"] == [i.key for i in items]
     assert fix["result"]["report"]["tests_passed"] is True and fix["result"]["cost_usd"] == 0.02
     assert fix["branch"].startswith("bosun/fix-3-deps-")
@@ -135,3 +141,89 @@ def test_merge_reports_worst_status_wins():
     no = FixReport(status="needs_human", summary="b", files_changed=[], tests="t2", tests_passed=None, follow_ups=["do y"])
     m = merge_reports([ok, no])
     assert m.status == "partial" and m.files_changed == ["x"] and m.follow_ups == ["do y"] and m.tests_passed is None
+
+
+def test_fixer_refuses_unsandboxed_old_cli_and_over_budget(tmp_path, monkeypatch):
+    import pytest
+    from bosun import fixer as fixer_mod
+    from bosun import llm, trace
+
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path / "data"))
+    s = load_settings()
+    store = Store(s.db_path)
+    trace.configure(store.path)
+    try:
+        item = item_for(tmp_path / "r")
+        f = Fixer(store, s, claude="claude")
+        monkeypatch.setattr(fixer_mod, "sandbox_available", lambda: False)
+        with pytest.raises(ValueError, match="OS sandbox"):
+            f.start(item)
+        fid = store.create_fix(item.key, item.project)
+        f.run(fid, item)
+        assert store.fix(fid)["status"] == "failed" and "OS sandbox" in store.fix(fid)["result"]["error"]
+
+        monkeypatch.setattr(fixer_mod, "sandbox_available", lambda: True)
+        monkeypatch.setattr("bosun.fixer.proc.run", lambda argv, **kw: proc.Result(tuple(argv), 0, "1.0.9 (Claude Code)", ""))
+        with pytest.raises(ValueError, match="too old"):
+            f.start(item)
+
+        monkeypatch.setattr("bosun.fixer.proc.run", lambda argv, **kw: proc.Result(tuple(argv), 0, "2.1.328 (Claude Code)", ""))
+        store.set_setting(llm.SETTING_DAILY, "0.5")
+        llm.record("fix", outcome="ok", usage=llm.Usage(cost_usd=0.6))
+        with pytest.raises(RuntimeError, match="24-hour budget"):
+            f.start(item)
+    finally:
+        trace.configure(None)
+
+
+def test_fixer_commits_even_with_gpgsign_and_cleans_cache_and_guards_discard(tmp_path, monkeypatch):
+    import pytest
+    from bosun import fixer as fixer_mod
+
+    repo = tmp_path / "signed"
+    repo.mkdir()
+    (repo / "package.json").write_text('{"dependencies": {"minimist": "1.2.5"}}\n')
+    for args in (["init", "-q", "-b", "main"], ["add", "-A"],
+                 ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"],
+                 ["config", "commit.gpgsign", "true"], ["config", "gpg.program", "/nonexistent-gpg"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    real_run = proc.run
+
+    def fake_run(argv, timeout=300, cwd=None, stdin=None, env=None):
+        if argv[0] != "claude":
+            return real_run(argv, timeout=timeout, cwd=cwd, stdin=stdin)
+        if argv[1:2] == ["--version"]:
+            return proc.Result(tuple(argv), 0, "2.1.328 (Claude Code)\n", "")
+        pkg = __import__("pathlib").Path(cwd) / "package.json"
+        pkg.write_text(pkg.read_text().replace("1.2.5", "1.2.6"))
+        rep = {"status": "fixed", "summary": "ok", "files_changed": ["package.json"], "tests": "t", "tests_passed": True, "follow_ups": []}
+        return proc.Result(tuple(argv), 0, json.dumps({"subtype": "success", "is_error": False,
+                           "structured_output": rep, "total_cost_usd": 0.01}), "")
+
+    monkeypatch.setattr("bosun.fixer.proc.run", fake_run)
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path / "data"))
+    s = load_settings()
+    store = Store(s.db_path)
+    f = Fixer(store, s, claude="claude")
+    fid = store.create_fix("k", "p")
+    with pytest.raises(RuntimeError, match="queued or running"):
+        f.discard(fid)
+    f.run(fid, item_for(repo))
+    assert store.fix(fid)["status"] == "fixed" and store.fix(fid)["result"]["commit"]
+    assert not (fixer_mod.worktrees_root(s.data_dir) / f".cache-{fid}").exists()
+
+    # cache cleanup also runs when llm.claude raises mid-run
+    fid2 = store.create_fix("k2", "p")
+    cache2 = fixer_mod.worktrees_root(s.data_dir) / f".cache-{fid2}"
+
+    def exploding_claude(*a, **kw):
+        cache2.mkdir(parents=True, exist_ok=True)
+        (cache2 / "junk").write_text("x")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("bosun.fixer.llm.claude", exploding_claude)
+    with pytest.raises(RuntimeError, match="boom"):
+        f.run(fid2, item_for(repo))
+    assert not cache2.exists()
+    assert "pip-compile *" not in fixer_mod.MALWARE_BASH["PyPI"]

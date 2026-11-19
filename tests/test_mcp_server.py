@@ -245,6 +245,28 @@ def test_a_dashboard_that_restarted_is_found_again():
     assert started == [1]
 
 
+def test_post_timeout_is_not_retried_while_get_timeout_is():
+    from bosun.registry import KeysIn, SPECS
+
+    seen = []
+
+    def handler(request):
+        seen.append(request.method)
+        if len(seen) == 1:
+            raise httpx.ReadTimeout("slow")
+        return httpx.Response(200, json=[])
+
+    d = Dashboard(load_settings(), http=httpx.Client(base_url=BASE, transport=httpx.MockTransport(handler)),
+                  up=lambda: True, start=lambda: "launchd", sleep=lambda s: None)
+    with pytest.raises(httpx.ReadTimeout):
+        d.call(SPECS["upgrade"], KeysIn(keys=["brew:jq"]))
+    assert seen == ["POST"]  # never re-run a timed-out mutation
+
+    seen.clear()
+    assert d.call(SPECS["list_jobs"], SPECS["list_jobs"].input()).ok
+    assert seen == ["GET", "GET"]  # read-only GET still retries
+
+
 # --- resources -------------------------------------------------------------------------------------------------
 RUNBOOKS = {"homebrew-permissions", "cask-needs-password", "winget-installer-failed", "apt-lock", "claude-not-logged-in",
             "osv-scanner-download", "update-not-signed", "not-signed-in"}

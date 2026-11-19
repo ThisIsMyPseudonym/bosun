@@ -301,9 +301,10 @@ def test_what_another_machine_sent_loses_the_http_addresses_too(tmp_path):
     con.commit()
     con.close()
     store = Store(path)
-    (peer,) = store.peers()
-    assert [d["installed"] for d in peer["data"]["items"]] == ["(address withheld)", "1.7"]
-    assert peer["data"]["machine"] == sent["machine"]
+    (raw,) = store._db.execute("SELECT data FROM peers WHERE id='m2'").fetchone()
+    data = json.loads(raw)
+    assert [d["installed"] for d in data["items"]] == ["(address withheld)", "1.7"]
+    assert data["machine"] == sent["machine"]
     assert not any(f.read_bytes().count(b"s3cretpw") for f in tmp_path.iterdir() if f.is_file())
     store._db.close()
 

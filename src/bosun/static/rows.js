@@ -140,13 +140,12 @@ function standIn(S, lead, route) {
   return [el("button", { class: "quiet", text: "Details", onclick: stop(() => MC.actions.open(lead.key)) })];
 }
 
-// A machine item: tile, name, version, one line, one button, "⋯". `ctx.scope` "peer" is another machine's
-// finding: read-only, so no button and no menu.
+// A machine item: tile, name, version, one line, one button, "⋯".
 function machineRow(S, p, ctx) {
-  const lead = p.members[0], peer = ctx.scope === "peer";
-  const route = peer ? "" : MC.routeOf(S, lead);
-  const job = peer ? null : MC.jobFor(S, lead.key);
-  const action = peer ? null : MC.itemAction(S, lead);
+  const lead = p.members[0];
+  const route = MC.routeOf(S, lead);
+  const job = MC.jobFor(S, lead.key);
+  const action = MC.itemAction(S, lead);
   const failed = job && job.status === "failed";
   const pref = S.prefs[lead.key] || {};
   const acts = el("div", { class: "acts" });
@@ -156,19 +155,18 @@ function machineRow(S, p, ctx) {
         onclick: stop(() => MC.actions.setState(lead.key, "open")) }),
       el("button", { class: "morebtn", "aria-label": `More for ${p.name}`, "aria-haspopup": "menu", "aria-expanded": "false",
         "data-fk": `more:${lead.key}`, onclick: stop((e) => MC.menu(e.currentTarget, MC.itemMenu(S, lead))) }, MC.icon("more", "currentColor", 2.6)));
-  } else if (!peer) {
+  } else {
     acts.append(...(action ? [el("button", { class: "quiet", text: action.short, title: action.title, onclick: stop(action.act) })]
       : standIn(S, lead, route)).filter(Boolean),
       el("button", { class: "morebtn", "aria-label": `More for ${p.name}`, "aria-haspopup": "menu", "aria-expanded": "false",
         "data-fk": `more:${lead.key}`, onclick: stop((e) => MC.menu(e.currentTarget, MC.itemMenu(S, lead))) }, MC.icon("more", "currentColor", 2.6)));
   }
-  const name = peer ? el("span", { class: "pkgname", text: p.name })
-    : el("button", { class: "pkgname", "data-fk": `row:${lead.key}`, title: "Details", text: p.name, onclick: stop(() => MC.actions.open(lead.key)) });
-  return el("div", { class: `row mach${peer ? " peer" : ""}`, onclick: peer ? null : () => MC.actions.open(lead.key) },
+  const name = el("button", { class: "pkgname", "data-fk": `row:${lead.key}`, title: "Details", text: p.name, onclick: stop(() => MC.actions.open(lead.key)) });
+  return el("div", { class: "row mach", onclick: () => MC.actions.open(lead.key) },
     MC.tile(lead),
     el("div", { class: "nm" },
-      el("div", { class: "pkg" }, name, p.risk >= 4 ? sev(p.risk) : null, peer ? null : MC.backChip(lead), ...chips(p, true),
-        !peer && pref.auto_upgrade ? el("span", { class: "chip", title: "Updates automatically on each daily check", text: "auto" }) : null),
+      el("div", { class: "pkg" }, name, p.risk >= 4 ? sev(p.risk) : null, MC.backChip(lead), ...chips(p, true),
+        pref.auto_upgrade ? el("span", { class: "chip", title: "Updates automatically on each daily check", text: "auto" }) : null),
       el("div", { class: "eco", text: whatItIs(p) })),
     el("div", { class: "ver" }, ...versionCell(p)),
     away ? whenCell(away) : el("div", { class: `head${failed ? " bad" : ""}`, title: failed ? job.hint || "" : headline(p),
@@ -224,7 +222,7 @@ function versionCell(p) {
   return [el("s", { text: `${p.installed} → ` }), p.available || "no fix yet"];
 }
 
-// One row. `ctx.scope` = "pc" | "peer" | "project" | "packages" decides the action and the "where" line.
+// One row. `ctx.scope` = "pc" | "project" | "packages" decides the action and the "where" line.
 MC.row = function row(S, p, ctx) {
   if (ctx.aside || (!p.project && ctx.scope !== "packages")) return machineRow(S, p, ctx);
   const lead = p.members[0];

@@ -33,14 +33,11 @@ MC.views.nav = function nav(S, scopes, route) {
   const viewSwitch = el("button", { class: "viewswitch",
     title: MC.SIMPLE ? "Show projects, packages and the technical detail" : "Hide developer screens and use plain words",
     onclick: () => MC.actions.setView(MC.SIMPLE ? "developer" : "simple") }, MC.SIMPLE ? "Switch to developer view" : "Switch to simple view");
-  if (MC.SIMPLE) {  // a computer, not a codebase: Today, this machine, other machines
+  if (MC.SIMPLE) {  // a computer, not a codebase: Today and this machine
     return [
       link("#/", "Today", needs ? el("span", { class: "badge", text: String(needs) }) : null, route.page === "today", "today"),
-      el("div", { class: "navgroup", text: scopes.peers.length ? "Machines" : "Machine" }),
+      el("div", { class: "navgroup", text: "Machine" }),
       link(MC.route.href("scope", "pc"), MC.MACHINE.label, badge(scopes.pc), isCur("pc"), MC.MACHINE.kind === "mac" ? "laptop" : "machine"),
-      ...scopes.peers.map((sc) => link(MC.route.href("scope", sc.id), sc.name,
-        sc.needs ? el("span", { class: `badge${sc.kevs ? " hot" : ""}`, text: String(sc.needs) }) : null,
-        isCur(sc.id), sc.peer.kind === "mac" ? "laptop" : "machine")),
       viewSwitch,
       version(),
     ];
@@ -50,11 +47,8 @@ MC.views.nav = function nav(S, scopes, route) {
     link("#/packages", "Packages", null, route.page === "packages", "packages"),
     link("#/runs", "Runs", null, route.page === "runs" || route.page === "trace", "runs"),
     link("#/usage", "AI usage", null, route.page === "usage", "usage"),
-    el("div", { class: "navgroup", text: scopes.peers.length ? "Machines" : "Machine" }),
+    el("div", { class: "navgroup", text: "Machine" }),
     link(MC.route.href("scope", "pc"), MC.MACHINE.label, badge(scopes.pc), isCur("pc"), MC.MACHINE.kind === "mac" ? "laptop" : "machine"),
-    ...scopes.peers.map((sc) => link(MC.route.href("scope", sc.id), sc.name,
-      sc.needs ? el("span", { class: `badge${sc.kevs ? " hot" : ""}`, text: String(sc.needs) }) : null,
-      isCur(sc.id), sc.peer.kind === "mac" ? "laptop" : "machine")),
     el("div", { class: "navgroup", text: `Projects · ${scopes.active.length}` }),
     ...scopes.active.map((sc) => link(MC.route.href("scope", sc.id), sc.name, badge(sc), isCur(sc.id))),
     scopes.dormant.length ? el("button", { class: "navgroup toggle", "aria-expanded": String(!!dormantOpen),

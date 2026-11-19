@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff, icons, kinds, listprefs, llm, machine, mcp_pin, notify, peers, ptyrun, query, recipes,
+from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff, icons, kinds, listprefs, llm, machine, mcp_pin, notify, ptyrun, query, recipes,
                registry, relaunch, selfupdate, takeover, terminal, trace)
 from . import appguard, goback  # noqa: E402
 from . import approvals as approving
@@ -104,15 +104,18 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     threading.Thread(target=upgrader.watch_waiting, daemon=True, name="wait-until-free").start()
     notifier = notify.Notifier(store, f"http://{s.host}:{s.port}/")
     threading.Thread(target=notifier.run, daemon=True, name="notify").start()
-    if not os.environ.get("BOSUN_NO_PEERS") and not s.demo:  # tests: never dial out
-        threading.Thread(target=peers.watch, args=(store,), daemon=True, name="peers").start()
     running = selfupdate.version()
+    assistant: Assistant | None = None
     if s.self_update:  # once the daily refresh pulls new code, move onto it when nothing is running
         def _not_started(why: str) -> None:
             store.set_setting(selfupdate.STATUS, json.dumps({"status": "failed", "detail": why, "at": time.time(),
                                                              "channel": s.update_channel}))
 
-        threading.Thread(target=selfupdate.restart_when_idle, args=(lambda: refresh_state["running"] or store.busy(),),
+        def _selfupdate_busy() -> bool:
+            return (refresh_state["running"] or store.busy() or selfupdate.is_pending(store)
+                    or (assistant is not None and assistant.busy()))
+
+        threading.Thread(target=selfupdate.restart_when_idle, args=(_selfupdate_busy,),
                          kwargs={"report": _not_started},
                          daemon=True, name="self-update").start()
     if store.abandon_stale_fixes():
@@ -259,10 +262,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                             "terminal": ptyrun.AVAILABLE,
                             "updates": machine.UPDATES_LABEL,
                             "bosun": {**running, "update": selfupdate.last_status(store) if s.self_update else None},
-                            "name": peers.identity(store)["name"],
+                            "name": machine.display_name(store),
                             "coverage": _coverage(), "kept": _kept(), "rejected": _rejected()},
                 "history": store.history(), "autopilot": _autopilot(snap), "relaunch": _pending_relaunch(),
-                "notify": {"on": notify.is_on(store)}, "peers": peers.view(store),
+                "notify": {"on": notify.is_on(store)},
                 "agents": registry.agent_policy(store),
                 "assistant": {"model": assistant.model, "budget_usd": llm.budgets(store)["assistant_usd"],
                               "left_usd": llm.assistant_left(store)},
@@ -552,7 +555,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         urgent = sorted((i for i in items if i.get("kev") or i.get("malicious")), key=lambda i: -i.get("risk", 0.0))
         now = sorted((i for i in items if i.get("lane") == "now"), key=lambda i: -i.get("risk", 0.0))
         failed = store.runs(limit=20, status="problems", since=time.time() - 86400)
-        return {"machine": {"name": peers.identity(store)["name"], "kind": machine.KIND, "bosun": running},
+        return {"machine": {"name": machine.display_name(store), "kind": machine.KIND, "bosun": running},
                 "snapshot": {"ts": snap["ts"], "age_hours": round((time.time() - snap["ts"]) / 3600, 1),
                              "items": len(items), "errors": snap["errors"][:10]} if snap else None,
                 "by_lane": lanes,
@@ -672,13 +675,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             refresh_lock.release()
 
     def _app_bundle(item: dict) -> Path | None:
-        """A self-updating Mac app's bundle, only inside an Applications folder (never an arbitrary path)."""
-        path = Path(item.get("location") or "")
-        roots = (Path("/Applications"), Path.home() / "Applications")
-        if (item["source"] not in ("mac-app", "brew-cask") or not item.get("self_updates") or path.suffix != ".app"
-                or not any(path.parent == r or r in path.parents for r in roots)):
+        """A self-updating Mac app's bundle, only directly inside an Applications folder (never a symlink or traversal)."""
+        if item["source"] not in ("mac-app", "brew-cask") or not item.get("self_updates"):
             return None
-        return path
+        return appguard.bundle(item.get("location") or "", home=Path.home())
 
     @actions.bind("open_app")
     def open_app(ctx: ActionContext, body: KeyIn):
@@ -744,6 +744,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         except goback.GoBackError as exc:
             raise Failed(str(exc))
         goback.remember(store, out["path"], out["left"], out["version"])
+        prefs = store.prefs()
+        for item in _items_by_key().values():
+            if item.get("location") == out["path"] and prefs.get(item["key"], {}).get("auto_upgrade"):
+                store.set_pref(item["key"], auto_upgrade=False)
         trace.thread(lambda: _recheck_after_upgrades({"mac-app", "brew-cask"}), name="recheck-went-back")
         return {"name": out["name"], "version": out["version"], "left": out["left"]}
 
@@ -860,6 +864,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             fixer.discard(body.fix_id)
         except ValueError as exc:
             raise NotFound(str(exc))
+        except RuntimeError as exc:
+            raise Conflict(str(exc))
         return store.fix(body.fix_id)
 
     @actions.bind("open_pr")
