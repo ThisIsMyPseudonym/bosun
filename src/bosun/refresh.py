@@ -11,7 +11,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from . import attention, autopilot, icons, llm, machine, outages, scanner, selfupdate, trace
-from .actions import UnsafeItem, Upgrader
+from .actions import AUTOPILOT, UnsafeItem, Upgrader
 from .collectors.containers import collect_dockerfiles, collect_images, dockerfile_items
 from .collectors.linux import collect_apt, collect_linux_runtimes, collect_linuxbrew, collect_snap
 from .collectors.mac import collect_brew, collect_mac_apps, collect_macos_status, collect_runtimes, collect_softwareupdate
@@ -321,11 +321,15 @@ def _traced(r: trace.Run, out: dict, what: str) -> dict:
 
 
 def refresh(s: Settings, store: Store, only: set[str] | None = None, auto_upgrade: bool = True,
-            actor: str | None = None) -> dict:
+            actor: str | None = None, upgrader: Upgrader | None = None,
+            trace_id: str | None = None) -> dict:
     """Collect, enrich, score, save a snapshot. With `only`, re-collect just those collectors and keep
-    everything else from the latest snapshot (a collector that fails keeps its old findings too)."""
-    with trace.run("refresh", subject=",".join(sorted(only)) if only else "everything", actor=actor) as r:
-        out = _traced(r, _refresh(s, store, only, auto_upgrade), "refresh")
+    everything else from the latest snapshot (a collector that fails keeps its old findings too).
+    When `upgrader` is provided (the running dashboard), auto-upgrades are queued on that single FIFO
+    worker instead of running synchronously in parallel with it."""
+    with trace.run("refresh", subject=",".join(sorted(only)) if only else "everything",
+                   actor=actor, trace_id=trace_id) as r:
+        out = _traced(r, _refresh(s, store, only, auto_upgrade, upgrader=upgrader), "refresh")
     if not only:
         try:
             store.prune_traces()  # daily: spans for a month, runs for a year
@@ -335,7 +339,8 @@ def refresh(s: Settings, store: Store, only: set[str] | None = None, auto_upgrad
     return out
 
 
-def _refresh(s: Settings, store: Store, only: set[str] | None, auto_upgrade: bool) -> dict:
+def _refresh(s: Settings, store: Store, only: set[str] | None, auto_upgrade: bool,
+             upgrader: Upgrader | None = None) -> dict:
     started = time.time()
     outages.clear()
     prev = store.latest_snapshot() if only else None
@@ -372,7 +377,7 @@ def _refresh(s: Settings, store: Store, only: set[str] | None, auto_upgrade: boo
         trace.event("autopilot", on=autopilot.is_on(store))
         prefs = store.prefs()
         pilot, skip = autopilot.is_on(store), autopilot.hands_off(store, saved)
-        upgrader = Upgrader(store, s)
+        local_upgrader = Upgrader(store, s) if upgrader is None else None
         stamped = {d["key"]: d for d in saved}  # as saved: with the date each version was first seen on offer
         held = 0
         for it in items:
@@ -388,7 +393,13 @@ def _refresh(s: Settings, store: Store, only: set[str] | None, auto_upgrade: boo
                 held += 1
             if opted_in or (pilot and autopilot.eligible(as_dict, prefs, skip)):
                 try:
-                    upgraded.append(f"{it.key}: {upgrader.run_or_wait(it)}")
+                    if upgrader is not None:
+                        job_id = upgrader.start(it, actor=AUTOPILOT)
+                        job = store.job(job_id) or {}
+                        upgraded.append(f"{it.key}: {job.get('status', 'queued')}")
+                    else:
+                        assert local_upgrader is not None
+                        upgraded.append(f"{it.key}: {local_upgrader.run_or_wait(it)}")
                 except (UnsafeItem, RuntimeError) as exc:  # RuntimeError: already queued
                     errors.append(str(exc))
         undated = sum(1 for d in saved if d.get("available") and autopilot.first_offered(d, time.time()) is None)

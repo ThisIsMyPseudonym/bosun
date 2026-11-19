@@ -35,8 +35,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff, icons, kinds, listprefs, llm, machine, mcp_pin, notify, ptyrun, query, recipes,
-               registry, relaunch, selfupdate, takeover, terminal, trace)
+from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff, icons, kinds, listprefs, llm, lock, machine, mcp_pin, notify, ptyrun, query, recipes,
+               registry, relaunch, selfupdate, status as status_mod, takeover, terminal, trace)
 from . import appguard, goback  # noqa: E402
 from . import approvals as approving
 from .assistant import Assistant
@@ -45,10 +45,10 @@ from .enrich.explain import Explainer
 from .enrich.exposure import REACH_EXPLAIN, REACH_LABEL, impact, profile, reach
 from .fixer import Fixer
 from .config import Settings
-from .refresh import recheck, recheck_project, refresh
+from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
-                       NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RelaunchIn, QueryIn, Risk, RunIn, RunManyIn, RunsIn,
+                       NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunIn, RunManyIn, RunsIn,
                        TraceIn, TypeIn, ViewIn, UsageIn, BudgetIn)
 from .serialize import compact, item_from_dict
 from .store import Store
@@ -76,16 +76,21 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     icon_dir = store.path.parent  # app icons read from this machine are cached beside the database
     sessions = auth.Sessions(session_key or auth.load_key(s.data_dir))
     cookie = auth.cookie_name(s.port)
-    stale = store.abandon_stale_jobs()
-    if stale:
-        log.info("marked %d jobs from a previous run as abandoned", stale)
+    refresh_file_lock = lock.FileLock(store.path.parent / "refresh.lock")
+    if not lock.is_locked(refresh_file_lock.path):
+        stale = store.abandon_stale_jobs()
+        if stale:
+            log.info("marked %d jobs from a previous run as abandoned", stale)
     token = token or secrets.token_urlsafe(32)
-    refresh_state = {"running": False, "last_result": None, "error": None, "rechecking": []}
+    refresh_state: dict = {"running": False, "last_result": None, "error": None, "rechecking": [], "trace_id": None}
     refresh_lock = threading.Lock()
 
     def _recheck_after_upgrades(sources: set[str]) -> None:
         if not refresh_lock.acquire(blocking=False):
             return  # a full refresh is running and will pick the changes up
+        if not refresh_file_lock.acquire():
+            refresh_lock.release()
+            return
         refresh_state.update(running=True, rechecking=sorted(sources))
         try:
             refresh_state["last_result"] = recheck(s, store, sources)
@@ -93,6 +98,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             log.exception("re-check after upgrades failed")
         finally:
             refresh_state.update(running=False, rechecking=[])
+            refresh_file_lock.release()
             refresh_lock.release()
 
     if own_store and not s.demo:  # icons for what the last snapshot lists, without waiting for the next refresh
@@ -544,33 +550,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     @actions.bind("status")
     def status(ctx: ActionContext, body: Empty):
         """The short answer to "what needs me today", for an agent's first call and for a script."""
-        snap = store.latest_snapshot()
-        prefs = store.prefs()
-        items = [i for i in (snap or {}).get("items", []) if attention.in_front(i, prefs)]
-        lanes: dict[str, int] = {}
-        for i in items:
-            lanes[i.get("lane") or "none"] = lanes.get(i.get("lane") or "none", 0) + 1
-        brief = lambda i: {"key": i["key"], "name": i["name"], "installed": i["installed"],  # noqa: E731
-                           "available": i.get("available"), "lane": i.get("lane", ""), "risk": i.get("risk", 0.0)}
-        urgent = sorted((i for i in items if i.get("kev") or i.get("malicious")), key=lambda i: -i.get("risk", 0.0))
-        now = sorted((i for i in items if i.get("lane") == "now"), key=lambda i: -i.get("risk", 0.0))
-        failed = store.runs(limit=20, status="problems", since=time.time() - 86400)
-        return {"machine": {"name": machine.display_name(store), "kind": machine.KIND, "bosun": running},
-                "snapshot": {"ts": snap["ts"], "age_hours": round((time.time() - snap["ts"]) / 3600, 1),
-                             "items": len(items), "errors": snap["errors"][:10]} if snap else None,
-                "by_lane": lanes,
-                "exploited_or_malicious": [{**brief(i), "kev": bool(i.get("kev")), "malicious": bool(i.get("malicious"))}
-                                           for i in urgent[:20]],
-                "do_now": [brief(i) for i in now[:10]],
-                "failed_runs_24h": [{"trace_id": r["trace_id"], "kind": r["kind"], "subject": r["subject"][:200],
-                                     "status": r["status"], "started": r["started"], "actor": r["actor"],
-                                     "error": (r["error"] or "").strip().splitlines()[0][:300] if r["error"] else ""}
-                                    for r in failed],
-                "refresh": {"running": refresh_state["running"], "rechecking": refresh_state["rechecking"],
-                            "error": refresh_state["error"]},
-                "busy": store.busy(),
-                "autopilot": autopilot.is_on(store),
-                "agents_may": {"read": True, "local": True, "install": True, **registry.agent_policy(store)}}
+        return status_mod.build_status(store, refresh_state=refresh_state, running=running)
 
     @actions.bind("set_view")
     def set_view(ctx: ActionContext, body: ViewIn):
@@ -636,29 +616,55 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             raise Conflict("Only an upgrade that is still waiting can be cancelled")
         return {"cancelled": body.job_id}
 
-    def _run_refresh():
+    def _run_refresh(only: set[str] | None, auto_upgrade: bool, trace_id: str) -> None:
         try:
-            refresh_state["last_result"] = refresh(s, store)
+            refresh_state["last_result"] = refresh(
+                s, store, only=only, auto_upgrade=auto_upgrade, upgrader=upgrader, trace_id=trace_id,
+            )
             refresh_state["error"] = None
         except Exception as exc:  # surface in UI, keep details in the log
             log.exception("refresh failed")
+            refresh_state["last_result"] = None
             refresh_state["error"] = f"Refresh failed: {exc.__class__.__name__}. See server log."
         finally:
             refresh_state["running"] = False
+            refresh_file_lock.release()
             refresh_lock.release()
 
     @actions.bind("refresh")
-    def start_refresh(ctx: ActionContext, body: Empty):
+    def start_refresh(ctx: ActionContext, body: RefreshIn):
+        only: set[str] | None = None
+        if body.only is not None:
+            only = {name.strip() for name in body.only if name.strip()}
+            unknown = sorted(only - set(COLLECTORS))
+            if unknown:
+                raise Invalid(f"Unknown collector(s): {', '.join(unknown)}. "
+                              f"Known on this machine: {', '.join(sorted(COLLECTORS))}")
+            if not only:
+                only = None
         if not refresh_lock.acquire(blocking=False):
             raise Conflict("A refresh is already running")
-        refresh_state["running"] = True
-        trace.thread(_run_refresh, name="refresh")
-        return {"started": True}
+        if not refresh_file_lock.acquire():
+            refresh_lock.release()
+            raise Conflict("A refresh is already running")
+        tid = trace.new_id()
+        refresh_state.update(running=True, last_result=None, error=None, rechecking=[], trace_id=tid)
+        try:
+            trace.thread(_run_refresh, (only, body.auto_upgrade, tid), name="refresh")
+        except BaseException:
+            refresh_state["running"] = False
+            refresh_file_lock.release()
+            refresh_lock.release()
+            raise
+        return {"started": True, "trace_id": tid}
 
     @actions.bind("recheck_project")
     def recheck_one_project(ctx: ActionContext, body: ProjectIn):
         """Re-scan one project now (seconds, not a full refresh): did my agent's fix land?"""
         if not refresh_lock.acquire(blocking=False):
+            raise Conflict("A refresh is already running")
+        if not refresh_file_lock.acquire():
+            refresh_lock.release()
             raise Conflict("A refresh is already running")
         snap = store.latest_snapshot() or {}
         name = next((p["name"] for p in (snap.get("meta") or {}).get("projects", []) if p["key"] == body.project), "project")
@@ -672,6 +678,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             raise Failed(f"Re-check failed: {exc}")
         finally:
             refresh_state.update(running=False, rechecking=[])
+            refresh_file_lock.release()
             refresh_lock.release()
 
     def _app_bundle(item: dict) -> Path | None:

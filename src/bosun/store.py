@@ -47,18 +47,45 @@ def _json_capped(value: Any, limit: int) -> str:
 
 
 class Store:
-    def __init__(self, path: Path):
-        machine.private_dir(path.parent)
+    def __init__(self, path: Path, *, read_only: bool = False):
         self._lock = threading.Lock()
-        self.path = path
-        # 30 s: the dashboard, a refresh and its collectors can all open the database at once
-        self._db = sqlite3.connect(path, check_same_thread=False, timeout=30)
-        self._db.row_factory = sqlite3.Row
-        _wal(self._db)
-        migrations.migrate(self._db, path)
+        self.path = Path(path)
+        self.read_only = read_only
+        if read_only:
+            if not self.path.is_file():
+                raise FileNotFoundError(f"no database at {self.path}")
+            self._db = sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro",
+                uri=True, check_same_thread=False, timeout=30,
+            )
+            self._db.row_factory = sqlite3.Row
+            self._db.execute("PRAGMA query_only=ON")
+        else:
+            machine.private_dir(self.path.parent)
+            # 30 s: the dashboard, a refresh and its collectors can all open the database at once
+            self._db = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
+            self._db.row_factory = sqlite3.Row
+            _wal(self._db)
+            migrations.migrate(self._db, self.path)
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    def __enter__(self) -> Store:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     @contextmanager
     def _tx(self, *, write: bool = False):
+        if write and self.read_only:
+            raise RuntimeError("Store is read-only")
+        if self.read_only:
+            with self._lock:
+                yield self._db
+            return
         with self._lock, self._db:
             if write and not self._db.in_transaction:
                 # Claim the write lock up front so a read-then-write transaction waits on busy_timeout
@@ -420,17 +447,23 @@ class Store:
                 "children": children, "parent": dict(parent) if parent else None}
 
     def mark_interrupted_runs(self, process: str | None = None) -> int:
+        if self.read_only:
+            raise RuntimeError("Store is read-only")
         with self._lock:
             return trace.mark_interrupted(self._db, process)
 
     def prune_traces(self) -> dict[str, int]:
         """Spans for a month; runs, and the rows of old snapshots, for a year; the rest in prune_records."""
+        if self.read_only:
+            raise RuntimeError("Store is read-only")
         with self._lock:
             return {**trace.prune(self._db), **normalize.prune(self._db), **self._prune_records()}
 
     def _prune_records(self, now: float | None = None) -> dict[str, int]:
         """What has no other limit: cached answers, finished jobs and fixes, LLM usage, audit rows, old
         conversations. A job still queued or running, and a fix still working, are never dropped."""
+        if self.read_only:
+            raise RuntimeError("Store is read-only")
         day = 86400
         with self._db:
             if not self._db.in_transaction:

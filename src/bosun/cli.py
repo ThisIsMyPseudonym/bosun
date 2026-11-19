@@ -1,4 +1,4 @@
-"""`bosun` command line: refresh | serve | doctor | open | install-tasks | install-launcher | query | runs | mcp..."""
+"""`bosun` command line: status | refresh | serve | doctor | open | install-tasks | query | runs | mcp..."""
 
 from __future__ import annotations
 
@@ -7,10 +7,13 @@ import os
 import json
 import re
 import logging
+import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from . import machine, proc
 from .config import PROJECT_ROOT, load_settings
@@ -19,7 +22,7 @@ from .store import Store
 log = logging.getLogger("bosun")
 
 
-def _setup_logging(s, process: str = "cli") -> None:
+def _setup_logging(s, process: str = "cli", *, open_db: bool = True) -> None:
     """bosun.log for people (each line tagged with its run's short trace id), bosun.jsonl for tools and agents,
     and warnings stored next to their run's spans in the database."""
     from . import migrations, trace
@@ -39,8 +42,11 @@ def _setup_logging(s, process: str = "cli") -> None:
         h.addFilter(context)
     logging.basicConfig(level=logging.INFO, handlers=handlers)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    if not open_db:
+        return
     try:
-        Store(s.db_path)  # migrate before the tracer writes to the new tables
+        with Store(s.db_path):  # migrate before the tracer writes to the new tables
+            pass
         trace.configure(s.db_path, process)
     except migrations.MigrationRefused:
         pass  # the command itself will say so, once
@@ -48,15 +54,133 @@ def _setup_logging(s, process: str = "cli") -> None:
         log.exception("tracing is off: the database could not be opened")
 
 
+def _http_error(resp) -> str:
+    try:
+        data = resp.json()
+    except ValueError:
+        return (resp.text or f"HTTP {resp.status_code}")[:2000]
+    if isinstance(data, dict):
+        detail = data.get("detail", data.get("error", data))
+        return detail if isinstance(detail, str) else json.dumps(detail, default=str)[:2000]
+    return str(data)[:2000]
+
+
+def _refresh_via_dashboard(
+    args, s, *,
+    http: Any = None,
+    up: Callable[[], bool] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    poll_s: float = 1.0,
+) -> int | None:
+    """If the dashboard for this data_dir is answering on its loopback port, trigger the refresh through it
+    so `bosun serve` stays the single SQLite writer and single Upgrader queue owner. Returns the CLI exit
+    code if the dashboard handled or refused the request, or None to fall back to running in-process."""
+    import httpx
+
+    from . import auth, launcher
+
+    url = f"http://{s.host}:{s.port}"
+    if http is None:
+        if not (s.data_dir / auth.KEY_FILE).is_file():
+            return None  # no session key for this data_dir: never talk to a dashboard owned by another data_dir
+        if not (up or (lambda: launcher.dashboard_up(url)))():
+            return None
+
+    agent_name = "cli" if sys.stdin.isatty() else "schedule"
+    agent_auth = auth.AgentAuth(lambda: auth.load_key(s.data_dir), agent_name)
+    payload: dict[str, Any] = {"auto_upgrade": not args.no_auto}
+    if args.only:
+        only = [x.strip() for x in args.only.split(",") if x.strip()]
+        if only:
+            payload["only"] = only
+
+    client = http or httpx.Client(base_url=url, timeout=httpx.Timeout(30.0, connect=5.0),
+                                  follow_redirects=False, trust_env=False)
+    try:
+        try:
+            r = client.post("/api/refresh", json=payload, auth=agent_auth)
+        except httpx.ConnectError:
+            return None  # dashboard stopped between /health and POST: fall back to in-process
+        except httpx.TransportError as exc:
+            print(f"Could not reach the Bosun dashboard: {exc}", file=sys.stderr)
+            return 1
+        if r.status_code == 401:
+            return None  # a different Bosun instance (different session.key) is on this port
+        if r.status_code >= 400:
+            print(_http_error(r), file=sys.stderr)
+            return 1
+        try:
+            started = r.json()
+        except ValueError:
+            started = {}
+        tid = started.get("trace_id") if isinstance(started, dict) else None
+        while True:
+            try:
+                sr = client.get("/api/status", auth=agent_auth)
+            except httpx.TransportError:
+                print("Lost connection to the Bosun dashboard while waiting for refresh to finish.", file=sys.stderr)
+                return 1
+            if sr.status_code >= 400:
+                print(_http_error(sr), file=sys.stderr)
+                return 1
+            rf = (sr.json() or {}).get("refresh") or {}
+            if tid is None or rf.get("trace_id") == tid:
+                if rf.get("running"):
+                    sleep(poll_s)
+                    continue
+                if rf.get("error"):
+                    print(rf["error"], file=sys.stderr)
+                    return 1
+                result = rf.get("last_result")
+                if isinstance(result, dict):
+                    print(json.dumps(result, indent=2))
+                    return 0 if not result.get("errors") else 1
+                print(json.dumps({"trace_id": tid, "errors": []}, indent=2))
+                return 0
+            # Another refresh started right after ours finished: read our own run's outcome.
+            try:
+                rr = client.get(f"/api/runs/{tid}", auth=agent_auth)
+            except httpx.TransportError:
+                print("Lost connection to the Bosun dashboard while checking refresh result.", file=sys.stderr)
+                return 1
+            if rr.status_code == 200:
+                run = (rr.json() or {}).get("run") or {}
+                ok = run.get("status") == "ok"
+                if not ok and run.get("error"):
+                    print(run["error"], file=sys.stderr)
+                print(json.dumps({"trace_id": tid, "status": run.get("status", "unknown"),
+                                  "summary": run.get("summary", ""),
+                                  "errors": [run["error"]] if run.get("error") else []}, indent=2))
+                return 0 if ok else 1
+            print(json.dumps({"trace_id": tid, "errors": []}, indent=2))
+            return 0
+    finally:
+        if http is None:
+            client.close()
+
+
 def cmd_refresh(args, s) -> int:
+    from . import lock
     from .refresh import refresh
 
-    only = set(args.only.split(",")) if args.only else None
-    # launchd, systemd and Task Scheduler run it with no terminal; a person typing it has one
-    result = refresh(s, Store(s.db_path), only=only, auto_upgrade=not args.no_auto,
-                     actor="cli" if sys.stdin.isatty() else "schedule")
-    print(json.dumps(result, indent=2))
-    return 0 if not result["errors"] else 1
+    routed = _refresh_via_dashboard(args, s)
+    if routed is not None:
+        return routed
+    refresh_lock = lock.FileLock(s.db_path.parent / "refresh.lock")
+    if not refresh_lock.acquire():
+        print("A refresh is already running.", file=sys.stderr)
+        return 1
+    try:
+        _setup_logging(s, "cli")
+        only = {x.strip() for x in args.only.split(",") if x.strip()} if args.only else None
+        # launchd, systemd and Task Scheduler run it with no terminal; a person typing it has one
+        with Store(s.db_path) as store:
+            result = refresh(s, store, only=only, auto_upgrade=not args.no_auto,
+                             actor="cli" if sys.stdin.isatty() else "schedule")
+        print(json.dumps(result, indent=2))
+        return 0 if not result["errors"] else 1
+    finally:
+        refresh_lock.release()
 
 
 def cmd_update_scanner(args, s) -> int:
@@ -390,6 +514,20 @@ def cmd_actions(args, s) -> int:
     return 0
 
 
+def _print_db_info(store: Store, db_path: Path) -> int:
+    from . import migrations
+
+    version = migrations.current_version(store._db)
+    try:
+        applied = store._db.execute("SELECT version, name, applied FROM schema_migrations ORDER BY version").fetchall()
+    except sqlite3.OperationalError:
+        applied = []
+    print(f"{db_path}\nschema v{version} (this code knows up to v{migrations.latest_version()})")
+    for row in applied:
+        print(f"  v{row['version']} {row['name']}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(row['applied']))}")
+    return 0
+
+
 def cmd_db(args, s) -> int:
     from . import migrations
 
@@ -398,12 +536,31 @@ def cmd_db(args, s) -> int:
 
         sys.stdout.write(datamodel.render())
         return 0
-    store = Store(s.db_path)  # opening migrates
-    version = migrations.current_version(store._db)
-    applied = store._db.execute("SELECT version, name, applied FROM schema_migrations ORDER BY version").fetchall()
-    print(f"{s.db_path}\nschema v{version} (this code knows up to v{migrations.latest_version()})")
-    for row in applied:
-        print(f"  v{row['version']} {row['name']}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(row['applied']))}")
+    if args.migrate:
+        with Store(s.db_path) as store:
+            return _print_db_info(store, s.db_path)
+    try:
+        with Store(s.db_path, read_only=True) as store:
+            return _print_db_info(store, s.db_path)
+    except FileNotFoundError:
+        print(f"{s.db_path}\nno database yet (this code knows up to v{migrations.latest_version()})")
+        return 0
+
+
+def cmd_status(args, s) -> int:
+    """Short summary of what needs attention today (opens the database read-only, never migrates)."""
+    from . import lock, status as status_mod
+
+    rf = {"running": True} if lock.is_locked(s.db_path.parent / "refresh.lock") else None
+    try:
+        with Store(s.db_path, read_only=True) as store:
+            data = status_mod.build_status(store, refresh_state=rf)
+    except FileNotFoundError:
+        data = status_mod.build_status(None, refresh_state=rf)
+    if args.json:
+        print(json.dumps(data, indent=2))
+    else:
+        print(status_mod.format_status(data))
     return 0
 
 
@@ -461,7 +618,11 @@ def _took(ms: float | None) -> str:
 
 def cmd_runs(args, s) -> int:
     """Recent runs, newest first: what Bosun did and what went wrong."""
-    rows = Store(s.db_path).runs(limit=args.n, kind=args.kind, status="problems" if args.problems else None)
+    try:
+        with Store(s.db_path, read_only=True) as store:
+            rows = store.runs(limit=args.n, kind=args.kind, status="problems" if args.problems else None)
+    except FileNotFoundError:
+        rows = []
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -504,7 +665,11 @@ def cmd_trace(args, s) -> int:
     """One run's timeline: every step, command and HTTP request, failures marked with their output."""
     from . import diagnose
 
-    t = Store(s.db_path).trace(args.id)
+    try:
+        with Store(s.db_path, read_only=True) as store:
+            t = store.trace(args.id)
+    except FileNotFoundError:
+        t = None
     if t is None:
         print(f"No run matches {args.id!r} (or the prefix matches more than one).", file=sys.stderr)
         return 1
@@ -531,15 +696,22 @@ def cmd_diagnose(args, s) -> int:
     """Write a redacted troubleshooting bundle for one run (default: the latest that failed)."""
     from . import diagnose
 
-    store = Store(s.db_path)
-    trace_id = args.id
-    if not trace_id:
-        latest = store.runs(limit=1, status="problems")
-        if not latest:
+    try:
+        with Store(s.db_path, read_only=True) as store:
+            trace_id = args.id
+            if not trace_id:
+                latest = store.runs(limit=1, status="problems")
+                if not latest:
+                    print("Nothing has failed recently.")
+                    return 0
+                trace_id = latest[0]["trace_id"]
+            data = diagnose.bundle(store, s, trace_id)
+    except FileNotFoundError:
+        if not args.id:
             print("Nothing has failed recently.")
             return 0
-        trace_id = latest[0]["trace_id"]
-    data = diagnose.bundle(store, s, trace_id)
+        print(f"No run matches {args.id!r}.", file=sys.stderr)
+        return 1
     if data is None:
         print(f"No run matches {trace_id!r}.", file=sys.stderr)
         return 1
@@ -557,10 +729,19 @@ def cmd_usage(args, s) -> int:
     """Where Claude tokens went, and what Bosun's cache and budgets saved."""
     from . import llm
 
-    store = Store(s.db_path)
-    u = store.llm_usage(days=args.days)
+    try:
+        with Store(s.db_path, read_only=True) as store:
+            u = store.llm_usage(days=args.days)
+            b = llm.budgets(store)
+    except FileNotFoundError:
+        if args.json:
+            print(json.dumps({"days": args.days, "totals": {"calls": 0, "cost_usd": 0},
+                              "budgets": llm.budgets(None)}, indent=2))
+        else:
+            print(f"No Claude calls recorded in the last {args.days:g} days.")
+        return 0
     if args.json:
-        print(json.dumps({**u, "budgets": llm.budgets(store)}, indent=2, default=str))
+        print(json.dumps({**u, "budgets": b}, indent=2, default=str))
         return 0
     t = u["totals"]
     if not t["calls"]:
@@ -573,7 +754,6 @@ def cmd_usage(args, s) -> int:
     c = u["cache"]
     if c["summaries_asked"]:
         print(f"Summaries from Bosun's cache: {c['summaries_from_cache']} of {c['summaries_asked']} ({c['hit_rate']:.0%})")
-    b = llm.budgets(store)
     print(f"Budgets: ${b['refresh_usd']:.2f} per refresh for summaries, ${b['daily_usd']:.2f} per 24 h (0 = none)\n")
     print("By purpose")
     for p in u["by_purpose"]:
@@ -595,9 +775,15 @@ def cmd_usage(args, s) -> int:
     return 0
 
 
+_READ_ONLY_CMDS = frozenset({"actions", "doctor", "query", "runs", "trace", "usage", "diagnose", "status"})
+_NO_DB_LOG_CMDS = frozenset({"open", "install-launcher", "mcp"})
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bosun", description="Bosun: updates + security for this machine")
     sub = p.add_subparsers(dest="cmd", required=True)
+    st = sub.add_parser("status", help="what needs attention today (read-only: never migrates the database)")
+    st.add_argument("--json", action="store_true", help="machine-readable JSON (same schema as /api/status)")
     r = sub.add_parser("refresh", help="collect, enrich, score; save a snapshot")
     r.add_argument("--only", help="re-collect just these (the rest of the latest snapshot is kept): comma list, "
                    "e.g. winget,choco,npm-global,pip-global,wsl-apt,windows,repos,secrets "
@@ -622,8 +808,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="install: add it to Claude Code for every project; uninstall: remove it")
     a = sub.add_parser("actions", help="everything Bosun can do, with its risk tier")
     a.add_argument("--json", action="store_true", help="with input schemas, as JSON")
-    db = sub.add_parser("db", help="where the database is and which schema migrations it has")
+    db = sub.add_parser("db", help="where the database is and which schema migrations it has (read-only unless --migrate)")
     db.add_argument("--doc", action="store_true", help="print docs/data-model.md, generated from the schema")
+    db.add_argument("--migrate", action="store_true", help="create or apply any pending schema migrations now")
     q = sub.add_parser("query", help="ask the database a question: one read-only SELECT (see docs/data-model.md)")
     q.add_argument("sql", nargs="?", help='e.g. "SELECT item_key, lane, risk FROM v_current_items ORDER BY risk DESC"')
     q.add_argument("--limit", type=int, default=500, help="most rows to return (default 500, at most 5000)")
@@ -654,13 +841,16 @@ def main(argv: list[str] | None = None) -> int:
         s = dataclasses.replace(s, data_dir=Path(demo_folder.name), demo=True, self_update=False, osv_auto_update=False)
         if not os.environ.get("BOSUN_PORT"):  # never the real dashboard's port: that one may be running right now
             s = dataclasses.replace(s, port=_free_port(s.host))
-    if not (args.cmd == "db" and args.doc) and args.cmd != "doctor":  # the doc comes from the schema in the code: it must
-        _setup_logging(s, "serve" if args.cmd == "serve" else "cli")  # not open (and so migrate) the database of a running
-        # dashboard; and doctor must work on a machine Bosun was never set up on, so it creates nothing
-    handler = {"refresh": cmd_refresh, "update-scanner": cmd_update_scanner, "self-update": cmd_self_update,
-               "serve": cmd_serve, "demo": cmd_demo, "doctor": cmd_doctor, "open": cmd_open, "install-tasks": cmd_install_tasks,
-               "install-launcher": cmd_install_launcher,
-               "mcp": cmd_mcp, "actions": cmd_actions, "db": cmd_db, "query": cmd_query, "runs": cmd_runs, "trace": cmd_trace, "diagnose": cmd_diagnose, "usage": cmd_usage}[args.cmd]
+    read_only = args.cmd in _READ_ONLY_CMDS or (args.cmd == "db" and not args.migrate)
+    # Read-only commands must never create directories, write logs, or open/migrate the database.
+    # `refresh` defers logging/DB setup until it knows the dashboard is not running (offline fallback).
+    if not read_only and args.cmd != "refresh":
+        _setup_logging(s, "serve" if args.cmd == "serve" else "cli", open_db=args.cmd not in _NO_DB_LOG_CMDS)
+    handler = {"status": cmd_status, "refresh": cmd_refresh, "update-scanner": cmd_update_scanner,
+               "self-update": cmd_self_update, "serve": cmd_serve, "demo": cmd_demo, "doctor": cmd_doctor,
+               "open": cmd_open, "install-tasks": cmd_install_tasks, "install-launcher": cmd_install_launcher,
+               "mcp": cmd_mcp, "actions": cmd_actions, "db": cmd_db, "query": cmd_query, "runs": cmd_runs,
+               "trace": cmd_trace, "diagnose": cmd_diagnose, "usage": cmd_usage}[args.cmd]
     from .migrations import MigrationRefused
     try:
         return handler(args, s)

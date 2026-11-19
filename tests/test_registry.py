@@ -123,13 +123,19 @@ def test_binding_is_checked():
 
 
 def test_cli_lists_the_registry(capsys, tmp_path, monkeypatch):
-    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path))  # the CLI sets up logging in the data dir
+    data = tmp_path / "data"
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(data))
     assert main(["actions"]) == 0
     out = capsys.readouterr().out
     assert all(name in out for name in SPECS)
     assert main(["actions", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)
     assert {r["name"] for r in rows} == set(SPECS) and rows[0]["input"]["type"] == "object"
+    assert main(["db"]) == 0
+    assert "no database yet" in capsys.readouterr().out
+    assert not data.exists()  # read-only commands must not create the data directory or database
+    assert main(["db", "--migrate"]) == 0
+    assert f"schema v{migrations.latest_version()}" in capsys.readouterr().out
     assert main(["db"]) == 0
     assert f"schema v{migrations.latest_version()}" in capsys.readouterr().out
 

@@ -192,6 +192,13 @@ def test_a_refused_command_says_so_once_and_exits(tmp_path, monkeypatch, capsys)
     path = _installed(tmp_path, monkeypatch, tmp_path / "bosun")
     monkeypatch.setattr(migrations, "_checkout", lambda: tmp_path / "worktrees" / "feature")
     monkeypatch.setenv("BOSUN_DATA_DIR", str(path.parent))
-    assert cli.main(["runs"]) == 2
+    # Read-only commands open the database mode=ro and never try to migrate it.
+    assert cli.main(["runs"]) == 0
+    assert cli.main(["status", "--json"]) == 0
+    assert cli.main(["db"]) == 0
+    capsys.readouterr()
+    assert migrations.current_version(sqlite3.connect(path)) == migrations.latest_version() - 1
+    # A write command (like `db --migrate`) still refuses once and exits 2.
+    assert cli.main(["db", "--migrate"]) == 2
     err = capsys.readouterr().err
     assert err.count("Not migrating") == 1 and "BOSUN_DATA_DIR=$(mktemp -d)" in err

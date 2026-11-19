@@ -254,6 +254,17 @@ class TypeIn(_In):
     data: str = Field(min_length=1, max_length=4096, exclude=True, description="What was typed")
 
 
+class RefreshIn(_In):
+    only: list[str] | None = Field(
+        default=None, max_length=30,
+        description="Re-collect only these collectors (omit to re-scan everything)",
+    )
+    auto_upgrade: bool = Field(
+        default=True,
+        description="Run opted-in and Autopilot upgrades after the scan (false skips auto-upgrades)",
+    )
+
+
 # --- specs ---------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ActionSpec:
@@ -321,7 +332,7 @@ SPECS: dict[str, ActionSpec] = _specs(
     ActionSpec("set_agent_policy", "Choose whether agents (Claude Code over MCP) may quit and reopen apps and open "
                "system updaters, and whether they may push branches and open pull requests",
                Risk.LOCAL, AgentPolicyIn, "POST", "/api/agents/policy", user_only=True),
-    ActionSpec("refresh", "Re-scan everything (2-4 minutes)", Risk.LOCAL, Empty, "POST", "/api/refresh", 202),
+    ActionSpec("refresh", "Re-scan everything (2-4 minutes)", Risk.LOCAL, RefreshIn, "POST", "/api/refresh", 202),
     ActionSpec("recheck_project", "Re-scan one project now (seconds)",
                Risk.LOCAL, ProjectIn, "POST", "/api/projects/recheck"),
     ActionSpec("cancel_job", "Cancel an upgrade that is still waiting for an app to close",
