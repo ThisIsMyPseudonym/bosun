@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import shutil
+import tempfile
 import threading
 from pathlib import Path
 from typing import Literal
@@ -221,6 +222,59 @@ def git(path: str | Path, *args: str, timeout: float = 120) -> proc.Result:
     return proc.git(path, *args, timeout=timeout)
 
 
+def worktree_git_dir(wt: str | Path) -> str:
+    """The git folder of a fix's new worktree (in the main checkout's .git), read before anything runs in it."""
+    r = git(wt, "rev-parse", "--path-format=absolute", "--git-dir")
+    gitdir = r.stdout.strip() if r.ok else ""
+    if not gitdir or Path(gitdir).resolve().is_relative_to(Path(wt).resolve()):
+        return ""
+    return gitdir
+
+
+def wt_git(wt: str | Path, gitdir: str, *args: str, timeout: float = 120) -> proc.Result:
+    """git on a fix's worktree, told where its git folder is rather than reading the worktree's `.git` file.
+    The sandboxed run may write anything in the worktree, that file included: followed, it could name a git
+    folder the run made, whose config git would act on outside the sandbox (a filter that runs a command on
+    `git add`, an ssh command on push). Attributes come from the commit the fix started on, not from a
+    `.gitattributes` the run wrote, which could hand any file to a filter some config defines (git 2.40+)."""
+    return git(wt, f"--git-dir={gitdir}", f"--work-tree={wt}", "--attr-source=HEAD", *NO_SUBMODULES, *args,
+               timeout=timeout)
+
+
+# a repository the run made inside the worktree is never looked into: git would use its config, outside the sandbox
+NO_SUBMODULES = ("-c", "submodule.recurse=false", "-c", "diff.ignoreSubmodules=all", "-c", "push.recurseSubmodules=no",
+                 "-c", "status.submoduleSummary=false", "-c", "fetch.recurseSubmodules=false")
+
+
+def _is_git_name(name: str) -> bool:
+    """`.git`, as a file system that ignores case, trailing dots and spaces, or some invisible characters reads it."""
+    return "".join(c for c in name if c.isascii()).lower().rstrip(". ") == ".git"
+
+
+def nested_git(wt: str | Path) -> list[str]:
+    """Every `.git` in the worktree other than its own (links not followed). A dependency bump never makes one, and
+    git run on the worktree would treat one as a repository and act on its config."""
+    root, found = Path(wt), []
+    for here, dirs, files in os.walk(root, followlinks=False):
+        top = Path(here) == root
+        for name in [*dirs, *files]:
+            if _is_git_name(name) and not (top and name == ".git"):
+                found.append(str((Path(here) / name).relative_to(root)))
+        dirs[:] = [d for d in dirs if not (top and d == ".git")]
+    return found
+
+
+def github_repo(url: str) -> str:
+    """HOST/OWNER/REPO of a remote URL (scp-style `git@host:owner/repo.git` or `scheme://[user@]host[:port]/owner/repo`),
+    so `gh` is told which repository and never asks git."""
+    m = (re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]+@)?([^/:]+)(?::\d+)?/([^/]+)/([^/]+?)(?:\.git)?/?", url)
+         or re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):/?([^/]+)/([^/]+?)(?:\.git)?/?", url))
+    if not m or not all(re.fullmatch(r"[A-Za-z0-9._-]+", part) for part in m.groups()):
+        shown = re.sub(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^@/]*@", r"\1", url)[:120]  # never a token in the URL
+        raise RuntimeError(f"can't tell which GitHub repository the remote {shown!r} is")
+    return "/".join(m.groups())
+
+
 def primary_checkout(item: Item) -> str:
     """The main working tree among the project's checkouts (worktrees share its .git)."""
     for c in item.checkouts or (item.location,):
@@ -351,7 +405,16 @@ class Fixer:
         if not add.ok:
             self.store.update_fix(fix_id, status="failed", result={"error": f"git worktree add failed: {add.stderr[:400]}"})
             return
-        self.store.update_fix(fix_id, status="running", branch=branch, worktree=str(wt))
+        self.store.update_fix(fix_id, branch=branch, worktree=str(wt))  # recorded first, so discard can clean up
+        gitdir = worktree_git_dir(wt)
+        if not gitdir:
+            self.store.update_fix(fix_id, status="failed", result={"error": "could not read the new worktree's git folder"})
+            return
+        self.store.update_fix(fix_id, status="running", result={"gitdir": gitdir})
+        if not wt_git(wt, gitdir, "rev-parse", "--verify", "HEAD").ok:  # also: this git predates --attr-source
+            self.store.update_fix(fix_id, status="failed", result={"error": "git could not read the new worktree; "
+                                                                             "making fixes needs git 2.40 or later"})
+            return
         # one sandboxed pass per directory (the sandbox forbids cd), all in the same worktree
         by_dir: dict[str, list[Item]] = {}
         for it in items:
@@ -389,18 +452,32 @@ class Fixer:
         finally:
             shutil.rmtree(cache, ignore_errors=True)
         report = merge_reports(reports) if reports else None
-        changed = git(wt, "status", "--porcelain").stdout.strip()
+        nested = nested_git(wt)
+        if nested:  # before any git call: one that looked inside would use that repository's config
+            self.store.update_fix(fix_id, status="failed", result={
+                "report": report.model_dump() if report else None, "cost_usd": round(sum(costs), 4), "denied": denied,
+                "sandboxed": True, "error": "the run left a git repository inside the worktree, so nothing was "
+                                            f"committed: {', '.join(nested[:5])}"})
+            return
+        changed = wt_git(wt, gitdir, "status", "--porcelain", "--ignore-submodules=all").stdout.strip()
         commit = ""
         if changed:
-            git(wt, "add", "-A")
+            wt_git(wt, gitdir, "add", "-A")
+            staged = wt_git(wt, gitdir, "diff", "--cached", "--raw", "--no-abbrev", "--ignore-submodules=none").stdout.splitlines()
+            if any(line.split()[1:2] == ["160000"] for line in staged):  # a submodule added or re-pointed
+                self.store.update_fix(fix_id, status="failed", result={
+                    "report": report.model_dump() if report else None, "cost_usd": round(sum(costs), 4),
+                    "denied": denied, "sandboxed": True,
+                    "error": "the run added or changed a submodule, so nothing was committed"})
+                return
             title = (f"fix(deps): remove malicious {first.package_id}" if len(items) == 1 and first.malicious
                      else f"fix(deps): {first.package_id} {first.installed} -> {first.available}" if len(items) == 1
                      else f"fix(deps): upgrade {len(items)} vulnerable dependencies")
             body = "\n".join(f"- {i.package_id}: {i.installed} -> {i.available or 'removed'}" for i in items)
-            c = git(wt, "-c", "user.name=Bosun", "-c", "user.email=bosun@localhost", "-c", "commit.gpgsign=false",
+            c = wt_git(wt, gitdir, "-c", "user.name=Bosun", "-c", "user.email=bosun@localhost", "-c", "commit.gpgsign=false",
                     "commit", "-q", "-m", title, "-m", f"{body}\n\nVia Bosun + Claude Code.")
-            commit = git(wt, "rev-parse", "--short", "HEAD").stdout.strip() if c.ok else ""
-        diffstat = git(wt, "diff", "--stat", "HEAD~1", "HEAD").stdout.strip() if commit else ""
+            commit = wt_git(wt, gitdir, "rev-parse", "--short", "HEAD").stdout.strip() if c.ok else ""
+        diffstat = wt_git(wt, gitdir, "diff", "--stat", "HEAD~1", "HEAD").stdout.strip() if commit else ""
         if report is None:
             status = "failed"
         elif not commit:
@@ -435,10 +512,19 @@ class Fixer:
             raise RuntimeError("Cannot discard a fix while it is queued or running")
         if not fix.get("worktree"):
             raise ValueError("Unknown fix")
-        wt = fix["worktree"]
-        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        wt, gitdir = fix["worktree"], (fix.get("result") or {}).get("gitdir")
+        # a fix from before Bosun recorded the git folder: only its own branch is deleted, wherever .git points
+        common = (wt_git(wt, gitdir, "rev-parse", "--path-format=absolute", "--git-common-dir") if gitdir
+                  else git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")).stdout.strip()
         repo = str(Path(common).parent) if common else None
-        if repo:
+        if repo and gitdir:
+            # nothing is written into the worktree (a link the run left there would be followed): it is deleted
+            # without following links, then git forgets it, whatever its .git file now says
+            if Path(wt).is_dir() and not Path(wt).is_symlink():
+                shutil.rmtree(wt, ignore_errors=True)
+            git(repo, "worktree", "prune")
+            git(repo, "branch", "-D", fix["branch"])
+        elif repo:
             git(repo, "worktree", "remove", "--force", wt)
             git(repo, "branch", "-D", fix["branch"])
         self.store.update_fix(fix_id, status="discarded")
@@ -447,15 +533,23 @@ class Fixer:
         fix = self.store.fix(fix_id)
         if not fix or fix["status"] not in ("fixed", "partial"):
             raise ValueError("Only completed fixes can become pull requests")
-        wt, branch = fix["worktree"], fix["branch"]
-        push = git(wt, "push", "-u", "origin", branch, timeout=300)
+        wt, branch, gitdir = fix["worktree"], fix["branch"], (fix.get("result") or {}).get("gitdir")
+        if not gitdir:
+            raise RuntimeError("This fix was made by an older Bosun that didn't record its git folder: "
+                               "discard it and run it again")
+        push = wt_git(wt, gitdir, "push", "-u", "origin", branch, timeout=300)
         if not push.ok:
             raise RuntimeError(f"git push failed: {push.stderr[:300]}")
         report = (fix.get("result") or {}).get("report") or {}
         body = (f"{report.get('summary', '')}\n\nTests: {report.get('tests', 'n/a')}\n\n"
                 + "".join(f"- [ ] {f}\n" for f in report.get("follow_ups", []))
                 + "\nOpened from Bosun; changes made by Claude Code in a sandboxed worktree.")
-        pr = proc.run(["gh", "pr", "create", "--head", branch, "--fill-first", "--body", body], timeout=120, cwd=wt)
+        url = wt_git(wt, gitdir, "config", "--get", "remote.origin.url").stdout.strip()
+        title = wt_git(wt, gitdir, "log", "-1", "--format=%s", branch).stdout.strip() or branch
+        repo = github_repo(url)
+        with tempfile.TemporaryDirectory() as away:  # gh runs from an empty folder: it is told everything, git nothing
+            pr = proc.run(["gh", "pr", "create", "--repo", repo, "--head", branch, "--title", title, "--body", body],
+                          timeout=120, cwd=away)
         if not pr.ok:
             raise RuntimeError(f"gh pr create failed: {pr.stderr[:300]}")
         url = pr.stdout.strip().splitlines()[-1]

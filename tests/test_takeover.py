@@ -1,6 +1,5 @@
 """Homebrew takes over a hand-installed app: who qualifies, the one command, and the checks around it."""
 
-import os
 import sys
 from pathlib import Path
 

@@ -18,6 +18,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var web: WKWebView!
     var status: NSTextField!
     var home: URL?
+    var signingIn = false
+    var retryCount = 0
+    var retryWork: DispatchWorkItem?
+    var downloadDestinations: [ObjectIdentifier: URL] = [:]
+    var signedOut = false  // the page showing is the dashboard's 401: ⌘R signs in again rather than reloading it
+    let maxRetries = 10
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMenu()
@@ -61,11 +67,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         signIn()
     }
 
+    func emitJSON(_ payload: [String: Any]) {
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+           let text = String(data: data, encoding: .utf8) {
+            print(text)
+        } else {
+            print("{\"ok\": false}")
+        }
+        fflush(stdout)
+    }
+
     // Ask Bosun for a one-time sign-in address (this also starts the dashboard if it isn't running).
     func signIn() {
+        retryWork?.cancel()
+        retryWork = nil
+        if signingIn { return }
+        signingIn = true
         status.stringValue = "Starting Bosun…"
         status.isHidden = false
         guard let helper = Bundle.main.url(forResource: "login-url", withExtension: nil) else {
+            signingIn = false
             return fail("This copy of the Bosun app is incomplete. Run `uv run bosun install-launcher` in Bosun's folder.")
         }
         DispatchQueue.global().async {
@@ -75,13 +96,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             task.standardOutput = out
             task.standardError = FileHandle.nullDevice
             do { try task.run() } catch {
-                return DispatchQueue.main.async { self.fail("Bosun could not be started: \(error.localizedDescription)") }
+                return DispatchQueue.main.async {
+                    self.signingIn = false
+                    self.fail("Bosun could not be started: \(error.localizedDescription)")
+                }
             }
             let data = out.fileHandleForReading.readDataToEndOfFile()
             task.waitUntilExit()
             let line = String(data: data, encoding: .utf8)?
                 .split(separator: "\n").last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
             DispatchQueue.main.async {
+                self.signingIn = false
                 guard task.terminationStatus == 0, let url = URL(string: line), self.isLocal(url) else {
                     return self.fail("Bosun didn't start. Details are in its log: ~/Library/Application Support/bosun/bosun.log")
                 }
@@ -91,43 +116,116 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
+    func scheduleRetry() {
+        if selfTest { return fail("Bosun dashboard did not respond.") }
+        guard retryCount < maxRetries else {
+            status.stringValue = "Bosun is not responding. Press ⌘R to try again."
+            status.isHidden = false
+            return
+        }
+        retryWork?.cancel()
+        let delay = min(30.0, 2.0 * pow(1.5, Double(retryCount)))
+        retryCount += 1
+        status.stringValue = "Reconnecting to Bosun…"
+        status.isHidden = false
+        let work = DispatchWorkItem { [weak self] in self?.signIn() }
+        retryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
     func fail(_ message: String) {
         status.stringValue = message
         status.isHidden = false
-        if selfTest { print("{\"ok\": false, \"error\": \"\(message)\"}"); exit(1) }
+        if selfTest {
+            emitJSON(["ok": false, "error": message])
+            exit(1)
+        }
     }
 
     func isLocal(_ url: URL) -> Bool {
         return url.scheme == "http" && (url.host == "127.0.0.1" || url.host == "localhost")
     }
 
+    func isHome(_ url: URL) -> Bool {
+        guard let home = home, isLocal(url) else { return false }
+        return url.port == home.port
+    }
+
+    func isHomeOrigin(_ origin: WKSecurityOrigin) -> Bool {
+        guard let home = home else { return false }
+        let expectedPort = home.port ?? 80
+        let localHost = origin.host == "127.0.0.1" || origin.host == "localhost"
+        return origin.protocol == "http" && localHost && origin.port == expectedPort
+    }
+
+    func safeFilename(_ raw: String) -> String {
+        let leaf = (raw as NSString).lastPathComponent
+        let cleaned = leaf.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7f }.map(String.init).joined()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = cleaned
+        while trimmed.hasPrefix(".") { trimmed.removeFirst() }
+        if trimmed.isEmpty || trimmed == "." || trimmed == ".." { return "bosun-download.json" }
+        return trimmed
+    }
+
     // --- navigation: the dashboard stays here, everything else goes to the browser -------------------------
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { return decisionHandler(.cancel) }
-        if action.shouldPerformDownload { return decisionHandler(.download) }
-        if url.scheme == "blob" || url.scheme == "about" { return decisionHandler(.allow) }
-        if isLocal(url), url.port == home?.port { return decisionHandler(.allow) }
+        let homeBlob = url.scheme == "blob"
+            && (URL(string: String(url.absoluteString.dropFirst("blob:".count))).map(isHome) ?? false)
+        // only the dashboard's own files are saved: a link elsewhere never lands in Downloads and in Finder
+        if action.shouldPerformDownload { return decisionHandler(homeBlob || isHome(url) ? .download : .cancel) }
+        if url.absoluteString == "about:blank" { return decisionHandler(.allow) }
+        if homeBlob { return decisionHandler(.allow) }
+        if isHome(url) { return decisionHandler(.allow) }
         if url.scheme == "https" || url.scheme == "http" { NSWorkspace.shared.open(url) }
         decisionHandler(.cancel)
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if navigationResponse.isForMainFrame {
+            signedOut = (navigationResponse.response as? HTTPURLResponse)?.statusCode == 401
+        }
+        decisionHandler(.allow)
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if let url = action.request.url, url.scheme == "https" || url.scheme == "http" {  // target=_blank
-            if isLocal(url), url.port == home?.port { web.load(action.request) } else { NSWorkspace.shared.open(url) }
+            if isHome(url) { web.load(action.request) } else { NSWorkspace.shared.open(url) }
         }
         return nil
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        retryCount = 0
+        retryWork?.cancel()
+        retryWork = nil
         status.isHidden = true
         if selfTest { runSelfTest() }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        // the dashboard restarts when it updates itself: sign in again shortly, don't show an error page
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.signIn() }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled { return }
+        // the dashboard restarts when it updates itself: sign in again with backoff, don't show an error page
+        scheduleRetry()
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled { return }
+        scheduleRetry()
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        retryCount = 0
+        signIn()
     }
 
     // --- dialogs the page uses (confirm before a restart or a push, alerts) --------------------------------
@@ -150,7 +248,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // --- clipboard and downloads ---------------------------------------------------------------------------
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "bosunCopy", let text = message.body as? String else { return }
+        guard message.name == "bosunCopy",
+              message.frameInfo.isMainFrame,
+              isHomeOrigin(message.frameInfo.securityOrigin),
+              let url = message.frameInfo.request.url ?? web.url,
+              isHome(url),
+              let text = message.body as? String else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
@@ -161,8 +264,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String,
                   completionHandler: @escaping (URL?) -> Void) {
-        let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-        let safe = suggestedFilename.replacingOccurrences(of: "/", with: "_")
+        guard let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
+            return completionHandler(nil)
+        }
+        let safe = safeFilename(suggestedFilename)
+        let root = folder.standardizedFileURL.path
         var dest = folder.appendingPathComponent(safe)
         var n = 1
         while FileManager.default.fileExists(atPath: dest.path) {
@@ -170,19 +276,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             let base = (safe as NSString).deletingPathExtension, ext = (safe as NSString).pathExtension
             dest = folder.appendingPathComponent("\(base) \(n)" + (ext.isEmpty ? "" : ".\(ext)"))
         }
+        guard dest.standardizedFileURL.path.hasPrefix(root + "/") else {
+            return completionHandler(nil)
+        }
+        downloadDestinations[ObjectIdentifier(download)] = dest
         completionHandler(dest)
     }
 
     func downloadDidFinish(_ download: WKDownload) {
-        if let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first {
+        let key = ObjectIdentifier(download)
+        if let dest = downloadDestinations.removeValue(forKey: key),
+           FileManager.default.fileExists(atPath: dest.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([dest])
+        } else if let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first {
             NSWorkspace.shared.open(folder)
         }
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        downloadDestinations.removeValue(forKey: ObjectIdentifier(download))
     }
 
     // --- app behaviour --------------------------------------------------------------------------------------
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { return true }
 
-    @objc func reload(_ sender: Any?) { signIn() }
+    @objc func reload(_ sender: Any?) {
+        retryCount = 0
+        if let current = web.url, isHome(current), !signedOut {
+            web.reload()
+        } else {
+            signIn()
+        }
+    }
+
+    @objc func zoomIn(_ sender: Any?) { web.pageZoom = min(2.0, web.pageZoom + 0.1) }
+    @objc func zoomOut(_ sender: Any?) { web.pageZoom = max(0.6, web.pageZoom - 0.1) }
+    @objc func zoomReset(_ sender: Any?) { web.pageZoom = 1.0 }
 
     func buildMenu() {
         let main = NSMenu()
@@ -194,6 +323,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         app.submenu = appMenu
         let edit = NSMenuItem(); main.addItem(edit)
         let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
@@ -204,6 +336,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let reloadItem = NSMenuItem(title: "Reload", action: #selector(reload(_:)), keyEquivalent: "r")
         reloadItem.target = self
         viewMenu.addItem(reloadItem)
+        viewMenu.addItem(.separator())
+        for (title, sel, key) in [("Actual Size", #selector(zoomReset(_:)), "0"),
+                                  ("Zoom In", #selector(zoomIn(_:)), "+"),
+                                  ("Zoom Out", #selector(zoomOut(_:)), "-")] {
+            let item = NSMenuItem(title: title, action: sel, keyEquivalent: key)
+            item.target = self
+            viewMenu.addItem(item)
+        }
         view.submenu = viewMenu
         let win = NSMenuItem(); main.addItem(win)
         let winMenu = NSMenu(title: "Window")
@@ -223,10 +363,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         """
         web.callAsyncJavaScript("return await \(js)", arguments: [:], in: nil, in: .page) { result in
             switch result {
-            case .success(let value): print(value as? String ?? "{\"ok\": false}")
-            case .failure(let error): print("{\"ok\": false, \"error\": \"\(error.localizedDescription)\"}")
+            case .success(let value):
+                guard let text = value as? String,
+                      let data = text.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    self.emitJSON(["ok": false, "error": "unexpected self-test output"])
+                    exit(1)
+                }
+                print(text)
+                fflush(stdout)
+                exit((obj["ok"] as? Bool) == true ? 0 : 1)
+            case .failure(let error):
+                self.emitJSON(["ok": false, "error": error.localizedDescription])
+                exit(1)
             }
-            exit(0)
         }
     }
 }

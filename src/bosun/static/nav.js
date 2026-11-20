@@ -18,9 +18,19 @@ function version() {  // which Bosun this dashboard runs, and how its last self-
   const when = Date.parse(v.date);
   const u = v.update;  // {status, detail, at, channel}; a refused or failed update stays visible until resolved
   const stopped = u && u.status === "failed";
-  return el("div", { class: `version${stopped ? " warn" : ""}`,
-    title: `Bosun ${v.commit}${v.date ? `, committed ${v.date}` : ""}${u ? `\nSelf-update (${u.channel}): ${u.detail}` : ""}`,
-    text: `Bosun ${v.commit}${when ? ` · ${MC.ago(when / 1000)}` : ""}${stopped ? " · update stopped" : ""}` });
+  // the daily refresh checks at least once a day: three days with no check means nothing is running it (the
+  // dashboard always on, but refresh turned off or failing before it gets that far), and updates have stopped too
+  const stale = !stopped && u && typeof u.at === "number" && u.at > 0 && Date.now() / 1000 - u.at > 3 * 86400;
+  // a new release waits a day after this machine first sees it: not a problem, so no warning colour.
+  // Once that time has passed, the next refresh installs it.
+  const until = u && u.status === "waiting" && typeof u.until === "number" ? u.until * 1000 : 0;
+  const waiting = !until ? "" : until <= Date.now() ? " · update at the next refresh"
+    : ` · update waits until ${new Date(until).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+  return el("div", { class: `version${stopped || stale ? " warn" : ""}`,
+    title: `Bosun ${v.commit}${v.date ? `, committed ${v.date}` : ""}${u ? `\nSelf-update (${u.channel}): ${u.detail}` : ""}`
+      + (stale ? `\nLast checked for a new Bosun ${MC.ago(u.at)}: is the daily refresh running?` : ""),
+    text: `Bosun ${v.commit}${when ? ` · ${MC.ago(when / 1000)}` : ""}`
+      + (stopped ? " · update stopped" : stale ? ` · update last checked ${MC.ago(u.at)}` : waiting) });
 }
 
 MC.views.nav = function nav(S, scopes, route) {

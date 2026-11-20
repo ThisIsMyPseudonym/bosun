@@ -10,7 +10,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.request
@@ -260,22 +259,27 @@ WIN_SHORTCUT = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:
                 "$s.WindowStyle = 7; $s.Description = $env:BOSUN_DESC; $s.IconLocation = $env:BOSUN_ICON; $s.Save()")
 
 
-def windows_command(uv_exe: str, command: str, channel: str = "") -> str:
-    """What conhost runs, with no console window: `bosun <command>`. With a `channel`, cmd sets
-    BOSUN_UPDATE_CHANNEL first, because a shortcut and a scheduled task cannot carry an environment of their own.
-    The channel is a word the caller has already checked (cli.service_env), so it is safe inside the cmd line."""
+def windows_command(uv_exe: str, command: str, env: dict[str, str] | None = None) -> str:
+    """What conhost runs, with no console window: `bosun <command>`. With an `env` (the update channel, the wait
+    for a release), cmd sets it first, because a shortcut and a scheduled task cannot carry an environment of
+    their own. The values are words and numbers the caller has already checked (cli.service_env), so they are
+    safe inside the cmd line."""
     run = f'"{uv_exe}" run --project "{PROJECT_ROOT}" bosun {command}'
-    if not channel:
+    if not env:
         return f"--headless {run}"
-    return f'--headless cmd.exe /d /c "set BOSUN_UPDATE_CHANNEL={channel}&& {run}"'
+    sets = "".join(f"set {k}={v}&& " for k, v in env.items())
+    return f'--headless cmd.exe /d /c "{sets}{run}"'
 
 
-def windows_shortcut(lnk: Path, uv_exe: str, command: str, description: str, channel: str = "") -> proc.Result:
+def windows_shortcut(lnk: Path, uv_exe: str, command: str, description: str,
+                     env: dict[str, str] | None = None) -> proc.Result:
     """A shortcut running `bosun <command>` with no console window, with Bosun's icon (not conhost's)."""
-    env = {"BOSUN_LNK": str(lnk), "BOSUN_ARGS": windows_command(uv_exe, command, channel),
-           "BOSUN_ROOT": str(PROJECT_ROOT), "BOSUN_DESC": description, "BOSUN_ICON": f"{STATIC / 'favicon.ico'},0"}
+    script_env = {"BOSUN_LNK": str(lnk), "BOSUN_ARGS": windows_command(uv_exe, command, env),
+                  "BOSUN_ROOT": str(PROJECT_ROOT), "BOSUN_DESC": description,
+                  "BOSUN_ICON": f"{STATIC / 'favicon.ico'},0"}
     # passed via env so paths with quotes/spaces can't break the script
-    return proc.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WIN_SHORTCUT], timeout=60, env=env)
+    return proc.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WIN_SHORTCUT], timeout=60,
+                    env=script_env)
 
 
 def start_menu() -> Path:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ class Settings:
     osv_auto_update: bool = True  # keep bin/osv-scanner installed and current (never a Homebrew or PATH copy)
     self_update: bool = True  # fast-forward this git checkout daily; the dashboard restarts onto it
     update_channel: str = "releases"  # signed release tags; "main" follows the branch (for the maintainer)
+    # how long a release waits after this machine first sees it, before self-update installs it. Set by the
+    # owner (environment, service files) only: no action or tool changes it, so an agent can't shorten it
+    self_update_delay_hours: float = 24.0
     summary_model: str = "haiku"  # routine release-note summaries: structured extraction, a small model does it
     assistant_model: str = ""  # the Ask Bosun assistant; empty means the same as `model`
     demo: bool = False  # `bosun demo`: made-up data, and every action that changes or opens anything is refused
@@ -50,6 +54,16 @@ class Settings:
 def _osv_scanner_default() -> Path:
     found = shutil.which("osv-scanner")
     return BUNDLED_OSV_SCANNER if BUNDLED_OSV_SCANNER.exists() or not found else Path(found)
+
+
+def _delay_hours(raw: str | None) -> float:
+    """BOSUN_SELF_UPDATE_DELAY_HOURS: hours, 0 or more, and at most a year. Anything else is the default: a typo
+    must not turn the wait off."""
+    try:
+        hours = float(raw) if raw is not None and raw.strip() else 24.0
+    except ValueError:
+        return 24.0
+    return min(hours, 8760.0) if math.isfinite(hours) and hours >= 0 else 24.0
 
 
 def load_settings() -> Settings:
@@ -70,6 +84,7 @@ def load_settings() -> Settings:
         osv_auto_update=os.environ.get("BOSUN_OSV_AUTO_UPDATE", "1") != "0",
         self_update=os.environ.get("BOSUN_SELF_UPDATE", "1") != "0",
         update_channel=os.environ.get("BOSUN_UPDATE_CHANNEL", "releases").strip().lower() or "releases",
+        self_update_delay_hours=_delay_hours(os.environ.get("BOSUN_SELF_UPDATE_DELAY_HOURS")),
         summary_model=os.environ.get("BOSUN_MODEL_SUMMARIZE", "haiku"),
         assistant_model=os.environ.get("BOSUN_MODEL_ASSISTANT", ""),
     )

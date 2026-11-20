@@ -46,7 +46,11 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   the same key file, different from the cookie, so again only your account can make it. Such a request is
   refused if it carries anything a browser adds by itself (`Origin`, `Sec-Fetch-Site`), reaches actions only
   (not the page), and is recorded as `agent:<name>`. The key and what is made from it are never logged, never
-  returned by any tool, and never put on a command line.
+  returned by any tool, and never put on a command line. The dashboard's answer to such a request carries a
+  value made from the key and that request's own signature. `bosun refresh` checks it on every answer, so a
+  program that took the dashboard's port while it was down can't report a refresh as done when none ran: the
+  command refreshes on its own instead. `bosun mcp` checks it too, and tells the agent that the answer was not
+  used, so a program on the port can't hand an agent made-up results as Bosun's.
 - What an agent may do is decided in the dashboard: read, change Bosun's own state, install. Quitting apps,
   opening system updaters, pushing branches and opening pull requests are refused until you turn each on, and
   no agent or automation can change those switches, the Claude budgets or Autopilot. Refused attempts are
@@ -64,7 +68,16 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   (`gpg.program`) that `git log` starts when `log.showSignature` is on. Every git call switches those off.
   Fix branches are a known exception, being hardened: to prepare a fix, Bosun runs `status`, `add`, `commit`
   and `worktree add` in the repository, and those can still run filter and diff programs that the
-  repository's config and `.gitattributes` name. `commit` also runs the signing program the repository's config
+  repository's config and `.gitattributes` name. That config is the repository's own, never one the fix's
+  run wrote: the sandboxed run can write anything in the fix's worktree, including the `.git` file that says
+  where its git folder is, so Bosun reads that folder before the run and tells every later git call (and
+  `gh`) where it is, rather than following the file. A run that leaves another git repository or `.git` file
+  anywhere in the worktree, or adds or re-points a submodule, commits nothing, because git would look inside it;
+  submodule recursion is off for every later git call, and `gh` is told the repository by name and runs from an
+  empty folder. Those git calls take file attributes from the commit the fix started on, so a `.gitattributes`
+  the run wrote can't hand files to a filter some config defines (this needs git 2.40 or later; with an older
+  git, Bosun refuses to make fixes). Discarding a fix deletes its worktree without following links and writes
+  nothing into it. `commit` also runs the signing program the repository's config
   names (`gpg.program`, `gpg.ssh.program`, `gpg.x509.program`) when that config turns on `commit.gpgsign`. To
   open its pull request, Bosun runs `git push` and
   `gh pr create`, which can still run a program the repository's config names (`remote.<name>.receivepack`,
@@ -72,8 +85,40 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   request needs a person's click: the dashboard's button, or your approval of the assistant's request. An agent
   can do it only once you turn that on.
 - Updates to Bosun itself come from signed release tags, every commit in them signed by a trusted key, and
-  never move it to an older version (see [Staying current](operating.md#staying-current-in-full)). An update that doesn't install and import is undone,
-  and the dashboard never restarts onto code that doesn't start. osv-scanner must match a hash written in
+  never move it to an older version (see [Staying current](operating.md#staying-current-in-full)). A new release
+  is installed automatically only after this machine has known it for about a day (22 hours at least, so a daily
+  refresh that runs a little early doesn't add a second day), counted from when Bosun first fetched the tag, not
+  from the date the signer wrote in it, so a bad release or one signed with a stolen key can be replaced first. A
+  tag that is withdrawn and published again waits again. While a newer release waits, an older one is held too,
+  for up to three days beyond the wait. Only the owner sets the wait (`BOSUN_SELF_UPDATE_DELAY_HOURS`); no agent
+  tool or API action can change it or install a release early, and only `bosun self-update`, run by a person,
+  skips it. That holds back agents that act through Bosun; an agent that can run commands as you can run
+  `bosun self-update` or edit the variable in your service files too.
+- Before an update that changes Bosun's `uv.lock` moves anything, osv-scanner checks the new lockfile, copied
+  alone into an empty folder so no scanner config the release ships is read. A package reported as malicious
+  (an OSV `MAL-` advisory) refuses the update, by hand or not. Other advisories are only noted in the update's
+  result. A commit refused this way is remembered, and stays refused until a later scan finds it clean, so a
+  check where osv-scanner is gone or can't reach OSV.dev doesn't install it. When osv-scanner is installed but
+  fails, the update waits for a check where it works (`bosun self-update` installs it unchecked, and says so).
+  When it isn't installed, the update goes ahead and its result says the lockfile was not checked: the
+  signatures and the wait are the guard, and this check is a second one that a release signed with a stolen key
+  would have to get past.
+- An update that doesn't install and import is undone, and is tried again at the next two daily checks (a
+  download can fail for a while) before Bosun stops trying it until a newer one comes. The dashboard never
+  restarts onto code that doesn't import. New code that imports but doesn't serve (three failed starts, or 10
+  minutes without answering `/health`) is undone too, back to the commit it came from, and the automatic update
+  doesn't take that commit again. The record of the update, `restart.json`, sits in the data folder, so it is
+  not trusted on its own: Bosun goes back only when it names this checkout, the checkout is clean and still on
+  the new commit, and HEAD's reflog shows that commit was reached by a fast-forward straight from the old one.
+  So a forged `restart.json` can at most undo the checkout's last fast-forward, while HEAD is still where that
+  put it; it can't move the checkout anywhere else or discard anyone's changes. Anything else is refused and
+  logged. The list of commits that didn't serve, kept in the same file, isn't checked against git: like the
+  database, whoever can write the file can keep the automatic update from taking a release, but never make it
+  install one, and `bosun self-update` run by hand still takes it. After an update, Bosun doesn't move again until
+  the dashboard has served on the new commit (or two days pass), so the commit it would go back to is one that
+  served. This guards updates from the release after the one that
+  introduces it (see [Staying current](operating.md#staying-current-in-full)). osv-scanner must match a hash
+  written in
   this repository.
 - A checkout never migrates a database another checkout owns. The database records the checkout that last
   migrated it (or runs it as the installed dashboard); another checkout, such as a development worktree with

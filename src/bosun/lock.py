@@ -8,14 +8,19 @@ on release: unlinking while another process opens or holds the same path breaks 
 from __future__ import annotations
 
 import os
+import sys
+import time
 from pathlib import Path
 
 from . import machine
 
-if machine.IS_WINDOWS:
+if sys.platform == "win32":
     import msvcrt
 else:
     import fcntl
+
+
+PROBE_WAIT_S = 0.5
 
 
 class FileLock:
@@ -25,14 +30,24 @@ class FileLock:
         self.path = Path(path)
         self._fd: int | None = None
 
-    def acquire(self) -> bool:
-        """Try to claim the lock without blocking. Returns True if acquired, False if held elsewhere."""
+    def acquire(self, wait: float = PROBE_WAIT_S) -> bool:
+        """Try to claim the lock, for up to `wait` seconds. Returns True if acquired, False if held elsewhere.
+        The short default wait is for is_locked: a probe (`bosun status`, a dashboard starting) holds the lock
+        for an instant, and a refresh starting then must not be told one is already running."""
+        deadline = time.monotonic() + wait
+        while not self._try():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
+
+    def _try(self) -> bool:
         if self._fd is not None:
             return True
         machine.private_dir(self.path.parent)
         fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            if machine.IS_WINDOWS:
+            if sys.platform == "win32":
                 if os.fstat(fd).st_size == 0:
                     os.write(fd, b"\0")
                 os.lseek(fd, 0, os.SEEK_SET)
@@ -50,7 +65,7 @@ class FileLock:
         if fd is None:
             return
         try:
-            if machine.IS_WINDOWS:
+            if sys.platform == "win32":
                 os.lseek(fd, 0, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
             else:
@@ -82,7 +97,7 @@ def is_locked(path: Path) -> bool:
     if not path.is_file():
         return False
     lock = FileLock(path)
-    if lock.acquire():
+    if lock.acquire(wait=0):
         lock.release()
         return False
     return True

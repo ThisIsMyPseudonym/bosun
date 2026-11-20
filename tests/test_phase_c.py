@@ -348,3 +348,97 @@ def test_all_readonly_cli_commands_leave_missing_data_dir_untouched(tmp_path, mo
     assert cli.main(["trace", "deadbeef"]) == 1
     capsys.readouterr()
     assert not data.exists()
+
+
+# --- Review fixes: the dashboard proves itself, stale jobs, probes, old schemas ---------------------------------
+def _impostor(status_body: dict, prove_post: bool = False, prove_status: bool = False):
+    """An httpx client whose 'dashboard' answers like Bosun; it proves it holds the key only where told to."""
+    import httpx
+
+    from conftest import SESSION_KEY
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prove = prove_post if request.method == "POST" else prove_status
+        headers = {auth.REPLY_HEADER: auth.reply_proof(SESSION_KEY, request.headers["authorization"])} if prove else {}
+        if request.method == "POST":
+            return httpx.Response(202, json={"started": True, "trace_id": "t1"}, headers=headers)
+        return httpx.Response(200, json=status_body, headers=headers)
+
+    return httpx.Client(transport=httpx.MockTransport(handler), base_url=BASE)
+
+
+def test_a_program_on_the_port_that_cannot_prove_the_key_is_not_believed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path))
+    s = load_settings()
+    done = {"refresh": {"running": False, "trace_id": "t1", "last_result": {"errors": []}}}
+    assert cli._refresh_via_dashboard(_refresh_args(), s, http=_impostor(done)) is None  # the refresh runs here
+    assert "couldn't show it is this machine's dashboard" in capsys.readouterr().err
+    # proved itself at first, then something else answers: the result is not taken as done
+    rc = cli._refresh_via_dashboard(_refresh_args(), s, http=_impostor(done, prove_post=True))
+    assert rc == 1 and "result is unknown" in capsys.readouterr().err
+
+
+def test_the_real_dashboard_proves_it_holds_the_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path))
+    s = load_settings()
+    store = Store(s.db_path)
+    from conftest import SESSION_KEY
+
+    client = TestClient(create_app(s, store, TOKEN), base_url=BASE)
+    r = client.get("/api/status", auth=auth.AgentAuth(SESSION_KEY, "cli"))
+    assert auth.valid_reply(SESSION_KEY, r.request.headers["authorization"], r.headers.get(auth.REPLY_HEADER))
+    assert not auth.valid_reply(SESSION_KEY, auth.agent_signature(SESSION_KEY, "GET", "/api/status"),
+                                r.headers.get(auth.REPLY_HEADER))  # bound to its own request: no reuse
+    assert auth.REPLY_HEADER not in client.get("/health").headers  # only a signed request gets one
+    store.close()
+
+
+def test_waiting_on_a_refresh_ends_and_dashboard_text_cannot_drive_the_terminal(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path))
+    s = load_settings()
+    forever = {"refresh": {"running": True, "trace_id": "t1"}}
+    ticks = iter(range(0, 10**9, 3600))
+    rc = cli._refresh_via_dashboard(_refresh_args(), s, http=_impostor(forever, True, True),
+                                    sleep=lambda _: None, clock=lambda: next(ticks))
+    assert rc == 1 and "still running after 2 hours" in capsys.readouterr().err
+    failed = {"refresh": {"running": False, "trace_id": "t1", "error": "boom\x1b]0;owned\x07\x1b[2J"}}
+    assert cli._refresh_via_dashboard(_refresh_args(), s, http=_impostor(failed, True, True)) == 1
+    err = capsys.readouterr().err
+    assert "\x1b" not in err and "\x07" not in err and "boom" in err
+
+
+def test_a_starting_dashboard_clears_only_dead_jobs_while_a_refresh_runs_alone(tmp_path):
+    store = Store(tmp_path / "bosun.db")
+    dead, live = store.create_job("brew:a", ["brew"], trace_id="dead"), store.create_job("brew:b", ["brew"], trace_id="live")
+    child = __import__("subprocess").Popen(["git", "--version"])
+    child.wait()
+    with store._tx(write=True) as db:
+        for tid, pid in (("dead", child.pid), ("live", __import__("os").getpid())):
+            db.execute("INSERT INTO runs (trace_id, kind, status, started, pid) VALUES (?, 'upgrade', 'running', 0, ?)",
+                       (tid, pid))
+    assert store.abandon_stale_jobs(keep_live=True) == 1
+    assert store.job(dead)["status"] == "abandoned" and store.job(live)["status"] == "queued"
+    assert store.abandon_stale_jobs() == 1 and store.job(live)["status"] == "abandoned"
+    store.close()
+
+
+def test_a_refresh_starting_during_a_probe_is_not_told_one_is_running(tmp_path):
+    path = tmp_path / "refresh.lock"
+    probe = lock.FileLock(path)
+    assert probe.acquire()
+    threading.Timer(0.1, probe.release).start()  # what is_locked does, for an instant
+    mine = lock.FileLock(path)
+    assert mine.acquire() is True
+    other = lock.FileLock(path)
+    assert other.acquire(wait=0) is False and lock.is_locked(path)
+    mine.release()
+
+
+def test_a_read_only_command_on_a_database_it_cannot_read_says_so(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path))
+    s = load_settings()
+    s.db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cli, "cmd_runs", lambda args, s: (_ for _ in ()).throw(sqlite3.OperationalError("no such column: x")))
+    assert cli.main(["runs"]) == 2
+    err = capsys.readouterr().err
+    assert "could not read the database" in err and "no such column" in err and "Traceback" not in err

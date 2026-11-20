@@ -60,6 +60,21 @@ def _no_waiting_period(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_lock_scan(monkeypatch, tmp_path):
+    """A self-update test never runs this machine's osv-scanner (which asks OSV.dev) on the uv.lock it commits:
+    the scanner is missing unless a test puts one in (tests/test_selfupdate.py)."""
+    monkeypatch.setattr("bosun.selfupdate._scanner", lambda: tmp_path / "no-osv-scanner")
+
+
+@pytest.fixture(autouse=True)
+def _no_notification_loop(monkeypatch):
+    """Every dashboard a test builds would start the notifier's loop, a daemon thread that outlives the test and
+    ticks every two minutes: listing processes and reading apps while a later test has swapped proc.run for a
+    recorder. Tests call Notifier.tick themselves (tests/test_notify.py)."""
+    monkeypatch.setattr("bosun.notify.Notifier.run", lambda self, interval=0: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_store_apps(monkeypatch, tmp_path):
     """The check for an App Store copy before a cask install looks in an empty folder, never this Mac's
     /Applications (tests/test_storeguard.py gives it its own)."""

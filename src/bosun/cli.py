@@ -9,13 +9,14 @@ import re
 import logging
 import sqlite3
 import sys
+import threading
 import time
 from collections.abc import Callable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from . import machine, proc
+from . import machine, proc, startguard
 from .config import PROJECT_ROOT, load_settings
 from .store import Store
 
@@ -54,15 +55,26 @@ def _setup_logging(s, process: str = "cli", *, open_db: bool = True) -> None:
         log.exception("tracing is off: the database could not be opened")
 
 
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _printable(text: object) -> str:
+    """Text from the dashboard, safe to print: no escape sequences or other control characters for the terminal."""
+    return _CONTROL.sub("", str(text))
+
+
 def _http_error(resp) -> str:
     try:
         data = resp.json()
     except ValueError:
-        return (resp.text or f"HTTP {resp.status_code}")[:2000]
+        return _printable((resp.text or f"HTTP {resp.status_code}")[:2000])
     if isinstance(data, dict):
         detail = data.get("detail", data.get("error", data))
-        return detail if isinstance(detail, str) else json.dumps(detail, default=str)[:2000]
-    return str(data)[:2000]
+        return _printable(detail if isinstance(detail, str) else json.dumps(detail, default=str)[:2000])
+    return _printable(str(data)[:2000])
+
+
+REFRESH_WAIT_S = 2 * 3600  # a refresh through the dashboard is scans only (upgrades are queued): hours means stuck
 
 
 def _refresh_via_dashboard(
@@ -71,10 +83,16 @@ def _refresh_via_dashboard(
     up: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     poll_s: float = 1.0,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int | None:
     """If the dashboard for this data_dir is answering on its loopback port, trigger the refresh through it
     so `bosun serve` stays the single SQLite writer and single Upgrader queue owner. Returns the CLI exit
-    code if the dashboard handled or refused the request, or None to fall back to running in-process."""
+    code if the dashboard handled or refused the request, or None to fall back to running in-process.
+
+    Every answer must carry the dashboard's proof that it holds this data_dir's key (auth.reply_proof): a
+    program that took the port while the dashboard was down could otherwise answer "done, nothing found" every
+    day, and no scan would run. An answer to the first request without it means it isn't this dashboard, and
+    the refresh runs here instead."""
     import httpx
 
     from . import auth, launcher
@@ -94,6 +112,15 @@ def _refresh_via_dashboard(
         if only:
             payload["only"] = only
 
+    def genuine(resp) -> bool:
+        return auth.valid_reply(auth.load_key(s.data_dir), resp.request.headers.get("authorization"),
+                                resp.headers.get(auth.REPLY_HEADER))
+
+    def not_genuine() -> int:
+        print(f"Something on port {s.port} stopped answering as this Bosun dashboard; the refresh's result is unknown.",
+              file=sys.stderr)
+        return 1
+
     client = http or httpx.Client(base_url=url, timeout=httpx.Timeout(30.0, connect=5.0),
                                   follow_redirects=False, trust_env=False)
     try:
@@ -102,10 +129,14 @@ def _refresh_via_dashboard(
         except httpx.ConnectError:
             return None  # dashboard stopped between /health and POST: fall back to in-process
         except httpx.TransportError as exc:
-            print(f"Could not reach the Bosun dashboard: {exc}", file=sys.stderr)
+            print(f"Could not reach the Bosun dashboard: {_printable(exc)}", file=sys.stderr)
             return 1
         if r.status_code == 401:
             return None  # a different Bosun instance (different session.key) is on this port
+        if not genuine(r):
+            print(f"Something on port {s.port} answered as Bosun but couldn't show it is this machine's dashboard; "
+                  "refreshing here instead.", file=sys.stderr)
+            return None
         if r.status_code >= 400:
             print(_http_error(r), file=sys.stderr)
             return 1
@@ -114,22 +145,32 @@ def _refresh_via_dashboard(
         except ValueError:
             started = {}
         tid = started.get("trace_id") if isinstance(started, dict) else None
+        deadline = clock() + REFRESH_WAIT_S
         while True:
             try:
                 sr = client.get("/api/status", auth=agent_auth)
             except httpx.TransportError:
                 print("Lost connection to the Bosun dashboard while waiting for refresh to finish.", file=sys.stderr)
                 return 1
+            if not genuine(sr):
+                return not_genuine()
             if sr.status_code >= 400:
                 print(_http_error(sr), file=sys.stderr)
                 return 1
-            rf = (sr.json() or {}).get("refresh") or {}
+            try:
+                rf = (sr.json() or {}).get("refresh") or {}
+            except (ValueError, AttributeError):
+                rf = {}
             if tid is None or rf.get("trace_id") == tid:
                 if rf.get("running"):
+                    if clock() > deadline:
+                        print(f"The refresh is still running after {REFRESH_WAIT_S // 3600} hours; "
+                              "see the dashboard for how it ends.", file=sys.stderr)
+                        return 1
                     sleep(poll_s)
                     continue
                 if rf.get("error"):
-                    print(rf["error"], file=sys.stderr)
+                    print(_printable(rf["error"]), file=sys.stderr)
                     return 1
                 result = rf.get("last_result")
                 if isinstance(result, dict):
@@ -137,17 +178,19 @@ def _refresh_via_dashboard(
                     return 0 if not result.get("errors") else 1
                 print(json.dumps({"trace_id": tid, "errors": []}, indent=2))
                 return 0
-            # Another refresh started right after ours finished: read our own run's outcome.
+            # Another refresh or a recheck started right after ours finished: read our own run's outcome.
             try:
                 rr = client.get(f"/api/runs/{tid}", auth=agent_auth)
             except httpx.TransportError:
                 print("Lost connection to the Bosun dashboard while checking refresh result.", file=sys.stderr)
                 return 1
+            if not genuine(rr):
+                return not_genuine()
             if rr.status_code == 200:
                 run = (rr.json() or {}).get("run") or {}
                 ok = run.get("status") == "ok"
                 if not ok and run.get("error"):
-                    print(run["error"], file=sys.stderr)
+                    print(_printable(run["error"]), file=sys.stderr)
                 print(json.dumps({"trace_id": tid, "status": run.get("status", "unknown"),
                                   "summary": run.get("summary", ""),
                                   "errors": [run["error"]] if run.get("error") else []}, indent=2))
@@ -198,7 +241,15 @@ def cmd_update_scanner(args, s) -> int:
 def cmd_self_update(args, s) -> int:
     from . import selfupdate
 
-    out = selfupdate.update(Store(s.db_path), force=True, channel=s.update_channel)
+    if getattr(args, "repin", None):
+        try:
+            print(selfupdate.repin(Store(s.db_path), args.repin))
+        except (ValueError, RuntimeError) as exc:
+            print(f"bosun: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    out = selfupdate.update(Store(s.db_path), force=True, channel=s.update_channel,
+                            delay_hours=s.self_update_delay_hours)
     print(out)
     if out.status == "updated":
         print("The dashboard moves onto it within a minute, once nothing is running.")
@@ -274,7 +325,13 @@ def cmd_serve(args, s) -> int:
 
     from . import migrations, selfupdate
 
-    wait_for_port(s.host, s.port)
+    on_probation = getattr(args, "on_probation", False)
+    if not wait_for_port(s.host, s.port) and on_probation:
+        # Another program holds the port. Not the new code's fault: not counted, and never a reason to go back.
+        startguard.port_busy(s.data_dir, f"port {s.port} on {s.host} is in use by another program")
+        on_probation = args.on_probation = False
+    if on_probation:
+        startguard.restart_clock()  # waiting for the port doesn't count against serving
     if selfupdate.supervised():  # the installed dashboard (launchd, systemd): this checkout owns the data
         # Claimed before the database is opened for use: opening migrates, and a checkout that was moved since it
         # last migrated would be refused by the owner guard and restarted in a loop.
@@ -282,8 +339,50 @@ def cmd_serve(args, s) -> int:
         store = Store(s.db_path)
         migrations.claim(store._db)
     print(f"Bosun on http://{s.host}:{s.port}. Sign in with `uv run bosun open` (the address alone answers 401).", flush=True)
-    uvicorn.run(create_app(s), host=s.host, port=s.port, log_level="warning")
+    server = uvicorn.Server(uvicorn.Config(create_app(s), host=s.host, port=s.port, log_level="warning"))
+    if (watcher := startguard.watcher_pid()) is not None:  # run by `bosun serve`'s watcher: stop when it is gone
+        threading.Thread(target=startguard.stop_with_watcher, args=(server, watcher), daemon=True,
+                         name="watcher-gone").start()
+    if on_probation:  # the first start on new code: it counts once it answers on its port
+        startguard.restart_clock()  # nor do the migrations (opening the database, above)
+        threading.Thread(target=confirm_when_serving, args=(server, s), daemon=True, name="confirm-start").start()
+    try:
+        server.run()
+    except SystemExit:  # uvicorn exits this way when it can't bind the port
+        if server.started:
+            raise
+    if not server.started:  # as uvicorn.run does: the port could not be bound, or the app did not start
+        if getattr(args, "on_probation", False) and not port_free(s.host, s.port):
+            startguard.port_busy(s.data_dir, f"port {s.port} on {s.host} is in use by another program")
+            args.on_probation = False
+        return 3
     return 0
+
+
+def port_free(host: str, port: int) -> bool:
+    return wait_for_port(host, port, seconds=0)
+
+
+def confirm_when_serving(server, s, seconds: float = startguard.SERVE_WITHIN_S) -> bool:
+    """Wait until uvicorn has bound the port and the app answers /health, then tell startguard the new code is good.
+    Asked of this very process (server.started), so another program answering on the port can't confirm it."""
+    import http.client
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if server.started:
+            try:
+                conn = http.client.HTTPConnection(s.host, s.port, timeout=5)
+                conn.request("GET", "/health")
+                r = conn.getresponse()
+                answered = r.status == 200 and json.loads(r.read() or b"null") == {"bosun": True}
+                conn.close()
+            except (OSError, ValueError, http.client.HTTPException):
+                answered = False
+            if answered:
+                return startguard.confirm(s.data_dir)
+        time.sleep(0.5)
+    return False
 
 
 def cmd_install_tasks(args, s) -> int:
@@ -302,13 +401,18 @@ def cmd_install_tasks(args, s) -> int:
 
 
 def service_env(s) -> dict[str, str]:
-    """What the background services must carry to behave as this install does: the update channel, when it is not
-    the default. A service starts with a bare environment, so a person who chose `main` would lose it at the next
-    login. The value goes into plists, unit files and a cmd line, so only a plain word is passed on."""
+    """What the background services must carry to behave as this install does: the update channel and the wait
+    for a new release, when they are not the defaults. A service starts with a bare environment, so a person who
+    chose `main` would lose it at the next login. The values go into plists, unit files and a cmd line, so only a
+    plain word and a plain number are passed on."""
+    env = {}
     channel = s.update_channel
-    if channel == "releases" or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", channel):
-        return {}
-    return {"BOSUN_UPDATE_CHANNEL": channel}
+    if channel != "releases" and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", channel):
+        env["BOSUN_UPDATE_CHANNEL"] = channel
+    delay = repr(float(s.self_update_delay_hours)).removesuffix(".0")  # exact: 1e-05 and 24.123456789 too
+    if s.self_update_delay_hours != 24 and re.fullmatch(r"[0-9][0-9.e+-]{0,23}", delay):
+        env["BOSUN_SELF_UPDATE_DELAY_HOURS"] = delay
+    return env
 
 
 LAUNCHD_PATH = "/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -428,7 +532,7 @@ def windows_refresh_task(uv_exe: str, env: dict[str, str]) -> str:
     """The daily refresh's command line for Task Scheduler (conhost keeps the console window hidden)."""
     from . import launcher
 
-    return "conhost.exe " + launcher.windows_command(uv_exe, "refresh", env.get("BOSUN_UPDATE_CHANNEL", ""))
+    return "conhost.exe " + launcher.windows_command(uv_exe, "refresh", env)
 
 
 def _install_windows(args, s) -> int:
@@ -453,8 +557,7 @@ def _install_windows(args, s) -> int:
     startup = launcher.start_menu() / "Startup"
     (startup / "Bosun.lnk").unlink(missing_ok=True)  # its old name
     lnk = startup / launcher.STARTUP_NAME
-    r2 = launcher.windows_shortcut(lnk, uv_exe, "serve", "Bosun dashboard (127.0.0.1)",
-                                   service_env(s).get("BOSUN_UPDATE_CHANNEL", ""))
+    r2 = launcher.windows_shortcut(lnk, uv_exe, "serve", "Bosun dashboard (127.0.0.1)", service_env(s))
     print(f"Startup shortcut (dashboard at logon): {'ok' if r2.ok else 'FAILED'} {lnk} {r2.stderr.strip()[:200]}")
     print("To remove: schtasks /Delete /TN Bosun-Refresh /F, and delete the shortcut above.")
     return 0 if ok and r2.ok else 1
@@ -791,7 +894,10 @@ def main(argv: list[str] | None = None) -> int:
                    "Linux: apt,snap,brew,runtimes,npm-global,repos)")
     r.add_argument("--no-auto", action="store_true", help="skip auto-upgrades this run")
     sub.add_parser("update-scanner", help="install or update bin/osv-scanner now (refresh also does this daily)")
-    sub.add_parser("self-update", help="move this checkout to the newest signed release now (refresh also checks daily)")
+    su = sub.add_parser("self-update", help="move this checkout to the newest signed release now (refresh also checks daily)")
+    su.add_argument("--repin", metavar="vX.Y.Z", help="a release refused as moved: hold it to what it points at now "
+                    "(after you have checked that is the real release); it waits again like a new one, and nothing "
+                    "is installed by this command")
     sub.add_parser("serve", help="run the dashboard on 127.0.0.1")
     sub.add_parser("demo", help="the dashboard on made-up data, with every action that changes anything refused "
                    "(for a first look and for screenshots)")
@@ -832,7 +938,14 @@ def main(argv: list[str] | None = None) -> int:
     dg.add_argument("--out", help="where to write the zip")
     dg.add_argument("--json", action="store_true", help="print the bundle instead of writing a zip")
     args = p.parse_args(argv)
-    s = load_settings()
+    if args.cmd == "serve":  # before the settings, the log and the database: any of them may be what broke
+        args.on_probation = startguard.guard_serve()
+    try:
+        s = load_settings()
+    except Exception as exc:
+        if getattr(args, "on_probation", False):
+            startguard.failed(startguard.data_dir(), f"the settings did not load ({type(exc).__name__}: {exc})")
+        raise
     demo_folder = None
     if args.cmd == "demo":  # a folder of its own, and nothing that reaches outside it: set before logging opens anything
         import dataclasses
@@ -853,12 +966,28 @@ def main(argv: list[str] | None = None) -> int:
                "trace": cmd_trace, "diagnose": cmd_diagnose, "usage": cmd_usage}[args.cmd]
     from .migrations import MigrationRefused
     try:
-        return handler(args, s)
+        code = handler(args, s)
+        if code and getattr(args, "on_probation", False):
+            startguard.failed(s.data_dir, f"bosun serve exited with {code} before it served")
+        return code
     except MigrationRefused as exc:
+        if getattr(args, "on_probation", False):
+            startguard.failed(s.data_dir, f"MigrationRefused: {exc}")
         print(exc, file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130
+    except sqlite3.OperationalError as exc:
+        if not read_only:
+            raise
+        # read-only commands don't migrate: after an update, the database waits for the dashboard to bring it up
+        print(f"bosun: could not read the database ({_printable(exc)}). If Bosun was just updated, the dashboard "
+              "brings the database up to date when it starts; try again then, or run `bosun refresh`.", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        if getattr(args, "on_probation", False):
+            startguard.failed(s.data_dir, f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         if demo_folder is not None:
             demo_folder.cleanup()

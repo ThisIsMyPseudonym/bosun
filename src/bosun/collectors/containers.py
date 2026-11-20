@@ -19,7 +19,7 @@ from .. import proc
 from ..config import Settings
 from ..enrich.eol import EolClient, Support
 from ..enrich.osv import vuln_from_osv
-from ..models import Item, Source
+from ..models import Item, Source, Vuln
 from ..store import Store
 from .repos import find_repos
 
@@ -39,22 +39,31 @@ _SKIP_DIRS = {"node_modules", ".git", ".venv", "venv", "dist", "build", ".next",
 _REF_OK = re.compile(r"^[a-z0-9][a-z0-9._/:@-]{0,255}$")
 
 
+_DIGEST = re.compile(r"^[a-z0-9]+(?:[+._-][a-z0-9]+)*:[0-9a-fA-F]+$")
+
+
 @dataclass(frozen=True)
 class ImageRef:
     raw: str
     repo: str  # last path component, e.g. "node", "pgvector"
     tag: str
+    digest: str = ""
 
     @property
     def floating(self) -> bool:
+        if self.digest:
+            return False  # pinned by digest: immutable regardless of tag (or lack of one)
         return self.tag in ("latest", "") or not re.search(r"\d", self.tag)
 
 
 def parse_ref(raw: str) -> ImageRef:
-    ref = raw.split("@", 1)[0]
+    ref, sep, raw_digest = raw.partition("@")
+    digest = raw_digest if sep and _DIGEST.fullmatch(raw_digest) else ""
     last = ref.rsplit("/", 1)[-1]
-    name, _, tag = last.partition(":")
-    return ImageRef(raw, name.lower(), tag or "latest")
+    name, has_tag, tag = last.partition(":")
+    if digest and not has_tag:
+        return ImageRef(raw, name.lower(), "", digest)
+    return ImageRef(raw, name.lower(), tag or "latest", digest)
 
 
 def runtime_cycle(ref: ImageRef) -> str | None:
@@ -81,7 +90,11 @@ def distro_of(ref: ImageRef) -> tuple[str, str] | None:
 def _subst(text: str, args: dict[str, str]) -> str:
     def rep(m: re.Match) -> str:
         name, default = m[1] or m[3], m[2]
-        return args.get(name) or (default or "")
+        if name in args and args[name]:
+            return args[name]
+        if default is not None:
+            return default
+        return m[0]  # leave unset variables intact so callers skip partial refs like repo/app:${TAG}
     return re.sub(r"\$\{(\w+)(?::?-([^}]*))?\}|\$(\w+)", rep, text)
 
 
@@ -101,9 +114,10 @@ def parse_dockerfile(text: str) -> list[str]:
         if not m:
             continue
         ref = _subst(m[1], args)
+        is_alias = ref.lower() in aliases
         if m[2]:
             aliases.add(m[2].lower())
-        if not ref or "$" in ref or ref.lower() in aliases or ref.lower() == "scratch":
+        if not ref or "$" in ref or is_alias or ref.lower() == "scratch" or ref.endswith((":", "@")):
             continue
         refs.append(ref)
     return refs
@@ -113,7 +127,7 @@ def parse_compose(text: str) -> list[str]:
     refs = []
     for m in re.finditer(r"(?m)^\s*image:\s*[\"']?([^\"'\s#]+)", text):
         ref = _subst(m[1], {})
-        if ref and "$" not in ref:
+        if ref and "$" not in ref and not ref.endswith((":", "@")):
             refs.append(ref)
     return refs
 
@@ -150,7 +164,7 @@ def image_item(ref: ImageRef, repo: Path, file: Path, eol: EolClient) -> Item | 
     target = []
     if runtime and runtime.recommended and runtime.recommended != runtime.cycle:
         target.append(f"{ref.repo} {runtime.recommended}")
-    if distro and distro.unsupported and distro.recommended:
+    if d and distro and distro.unsupported and distro.recommended:
         target.append(f"{d[0]} {distro.recommended}")
     name = f"{ref.repo} {cycle}" if cycle else ref.raw
     return Item(
@@ -185,7 +199,8 @@ def dockerfile_items(s: Settings, repos: list[Path]) -> list[Item]:
 
 def parse_image_scan(text: str, ref: str, created: str) -> Item | None:
     data = json.loads(text) if text.strip() else {}
-    fixed, unfixed = [], []
+    fixed: list[Vuln] = []
+    unfixed: list[Vuln] = []
     for result in data.get("results") or []:
         for pkg in result.get("packages") or []:
             for v in pkg.get("vulnerabilities") or []:

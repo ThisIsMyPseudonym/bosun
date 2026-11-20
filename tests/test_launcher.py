@@ -157,7 +157,7 @@ def test_the_main_channel_reaches_the_windows_task_and_shortcut(monkeypatch):
     task = windows_refresh_task("C:/uv.exe", service_env(_settings("main")))
     assert task.startswith('conhost.exe --headless cmd.exe /d /c "set BOSUN_UPDATE_CHANNEL=main&& "C:/uv.exe" run')
     assert task.endswith('bosun refresh"')
-    assert launcher.windows_command("C:/uv.exe", "serve", "main").endswith('bosun serve"')
+    assert launcher.windows_command("C:/uv.exe", "serve", {"BOSUN_UPDATE_CHANNEL": "main"}).endswith('bosun serve"')
 
 
 def test_a_channel_that_is_not_a_plain_word_is_not_written_into_a_service():

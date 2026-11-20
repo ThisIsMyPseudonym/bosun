@@ -410,7 +410,7 @@ def _refresh(s: Settings, store: Store, only: set[str] | None, auto_upgrade: boo
     if s.self_update and not only:  # last, so this refresh ran on one version of the code
         try:
             with trace.span("step", "self-update"):
-                out = selfupdate.update(store, channel=s.update_channel)
+                out = selfupdate.update(store, channel=s.update_channel, delay_hours=s.self_update_delay_hours)
             tools.append(str(out))
             if out.status == "failed" and out.new:  # new code that didn't start; a failed fetch just waits a day
                 errors.append(str(out))

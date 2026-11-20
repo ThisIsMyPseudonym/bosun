@@ -31,13 +31,21 @@ there is "archive or ignore", not "upgrade".
 ```sh
 uv run bosun doctor             # what this machine has and lacks for Bosun (changes nothing)
 uv run bosun refresh            # full refresh (about 2-4 min; Claude only summarizes new versions)
+uv run bosun status             # what needs you today (--json for scripts); reads the database, changes nothing
 uv run bosun serve              # http://127.0.0.1:8787
 uv run bosun open               # the dashboard in its own window (starts it first if it isn't running)
 uv run bosun install-tasks      # daily refresh at 08:30 + dashboard at logon + a Bosun app icon (per-user, no admin)
 uv run bosun install-launcher   # just the app icon
 uv run bosun update-scanner     # install or update bin/osv-scanner now
-uv run bosun self-update        # update to the newest signed release now (the daily refresh does this too)
+uv run bosun self-update        # update to the newest signed release now, without the day's wait (the daily refresh does this too)
 ```
+
+When the dashboard is running, `bosun refresh` asks it to refresh and waits, so only the dashboard writes the
+database and installs upgrades: Autopilot's upgrades are queued there, and the command prints `queued` for them.
+Its exit code then says whether the scan worked, not the upgrades; the dashboard and `bosun runs` say how those
+went. The dashboard must show on each answer that it holds the key in Bosun's data folder. A program that took
+its port without the key is ignored, and the command refreshes on its own, as it does when no dashboard is
+running. A lock file in the data folder keeps two refreshes from running at once.
 
 ## The app icon
 
@@ -88,7 +96,54 @@ releases are not installed. A release is installed only if all of these hold, ch
   sideways onto another line of history;
 - every commit from the current one up to it is signed by a trusted key (see below);
 - it still points where it did when this machine first saw it. A release never changes: a tag that was moved
-  is refused, now and later. Publish a new version instead.
+  is refused, now and later. Publish a new version instead. If you have checked that a refused tag now points
+  at the real release (say the first one this machine saw was a mistake), `bosun self-update --repin vX.Y.Z`
+  holds it to where it points now. That installs nothing: the tag still has to pass every other check, and it
+  waits its 24 hours again like a new release. No dashboard or agent action can do this.
+
+It also waits. A release that passes is installed only once this machine has known it for 24 hours. A bad
+release, or one signed with a stolen key, is usually noticed and replaced within a day, and the machines it
+reaches are the ones that take it in its first hours. The 24 hours count from when this machine first fetched
+the tag, never from the date inside it, because whoever signs the tag sets that date. A first-seen time that is
+missing, garbled or later than the clock counts as not waited: the wait starts again from then. Tags Bosun had
+already seen before it kept these times (1.0.2 and earlier) start their wait the first time the new version
+checks. While it waits, the sidebar says which release is waiting and until when.
+
+While the newest release is waiting, an older one that has waited is not installed either: the newer one may be
+the fix for it. Say v1.0.3 is bad and v1.0.4 replaces it five hours later. A day after v1.0.3 appeared, Bosun
+still waits, and five hours after that it installs v1.0.4 and never v1.0.3. Releases published faster than the
+wait would put every update off for good, so there is a limit: once the oldest release on offer has waited three
+days beyond the wait (four days in all, by default), Bosun installs the newest release that has waited, and the
+newer one follows when its own wait is over. The limit is reached only when releases keep coming faster than
+the wait for days on end; a bad release replaced within three days of its own appearance, with nothing older
+still on offer, is never installed. A release is installed at the first check after its wait is over: the daily
+refresh, or a refresh you start. So that a refresh that runs a little earlier than yesterday's doesn't leave it a
+second day, a release counts as having waited up to two hours early (22 hours of a 24-hour wait). A release tag
+that is withdrawn and published again starts its wait again.
+
+An update doesn't start with less than 1 GB free on the disk Bosun is installed on, by hand or not: one that
+runs out of room halfway leaves a half-installed environment to undo. The sidebar says so, and the next check
+after you free some space goes ahead.
+
+An update that changes Bosun's `uv.lock` is checked with osv-scanner before it moves. A package in the new
+lockfile reported as malicious refuses the update, and the sidebar says which; that commit stays refused until a
+scan finds it clean. Other advisories are noted. An osv-scanner that is installed but fails holds the update until
+the next check where it works (`bosun self-update` installs it unchecked); a missing one is said, without holding
+the update back.
+
+`bosun self-update` installs the newest release that passes at once, and says it skipped the wait, as a click in
+the dashboard skips Autopilot's wait. Set `BOSUN_SELF_UPDATE_DELAY_HOURS` to change the wait (hours; `0` turns
+it off, for the maintainer's own machines). Anything that isn't a number of hours, 0 or more, leaves it at 24.
+`install-tasks` carries it into the background services when it is set at install time; run it again after
+changing it. Only the environment and those service files set it: no dashboard action, API call or agent tool
+changes the wait or installs a release early. That limits agents acting through Bosun: an agent that can run
+commands as you could run `bosun self-update`, or edit the service files, itself. Channel `main` has no wait.
+
+A release that was installed and didn't install or import (it was rolled back, see below) is tried again at the
+next check, since a download can fail for a while. After three failures it is not tried again by the daily
+refresh, and nor is one the dashboard didn't serve on: it is
+the same code and would fail the same way. Bosun says so on every refresh and installs the next newer release
+once one passes. `bosun self-update` tries it again.
 
 A refused release is reported as an error on every refresh until it's resolved, and Bosun moves to the newest
 release that does pass, if there is one. A checkout that is ahead of every release (you cloned `main`, or have
@@ -104,9 +159,48 @@ the dashboard keeps running the old code and says so. systemd and launchd start 
 its own replacement. The sidebar shows the commit each dashboard runs, and the result of the last self-update
 when you point at it ("update stopped" when it failed or was refused). Set `BOSUN_SELF_UPDATE=0` to turn this off.
 
+Code that imports can still fail to serve: a migration that fails, a setting the new code can't read, a start
+that hangs. So each update leaves a small record, `restart.json` in the data folder, naming the checkout, the
+commit it came from and the one it moved to. The first thing `bosun serve` does is read it. Until the new
+dashboard answers `/health`, every start counts. If the new commit starts three times without serving, or one
+start hasn't served within 10 minutes, Bosun resets the checkout to the commit it came from, installs that
+commit's dependencies again if they changed, and starts the old dashboard. The 10 minutes start again once the
+port is free and once the migrations are done, so a slow port or a long migration isn't taken for a hang. A
+start that can't bind its port because another program holds it isn't counted: that program is the problem,
+not the new code, and Bosun says so in its log. launchd and systemd do the restarting. On Windows, or when
+`bosun serve` was started by hand, the first start watches the others itself, and passes Ctrl+C, a closed
+terminal or a `kill` on to the dashboard it runs.
+
+The sidebar then says which commit didn't start, why, and that Bosun went back (or that its dependencies didn't
+install again: the old code then runs with the new packages until the next update). It goes back only when git
+shows the move the record describes: the record names this checkout, the checkout is still on the commit the
+update moved to, HEAD's reflog shows it got there by a fast-forward straight from the old commit, and nothing
+is uncommitted. A record that doesn't match is refused and logged; one that matches but finds uncommitted
+changes leaves the checkout as it is and says so. If `git reset` itself fails, the new code runs on, watched
+but not counted, and the next start tries again. The daily update doesn't take a commit that didn't serve here
+again; it moves on once a newer release is published. `bosun self-update` run by hand tries it again. A crash
+after the dashboard has served is not undone.
+
+The record is written as soon as the checkout moves, before the new code's import check, so a dashboard that
+restarts onto it meanwhile is watched too. And the automatic update doesn't move again until a dashboard has
+served on the commit it last moved to, so a bad start always goes back to code that served here. A machine
+that runs the daily update but no dashboard moves on after two days; `bosun self-update` doesn't wait.
+
+**This protection starts with the release after the one that brings it.** The release that introduces it is
+installed and started by the version before it, which has no way back from code that imports but doesn't
+serve, and doesn't remember which commit failed. If that first release can't serve, the machine is left with
+a dashboard that keeps restarting (or, if it doesn't import, back on the previous version, which takes the same
+release again about once a day). Check that the dashboard comes back after the restart onto it.
+
+The restart onto new code waits for running upgrades and fixes, however long they take and whoever started
+them. Work whose process is gone doesn't hold it back: each job and fix has a run that records its process
+(see `runs.pid` in the [data model](data-model.md)), and a queued or running row whose process has ended was
+left behind by a refresh or command that was killed. A row with no such record counts as running.
+
 `BOSUN_UPDATE_CHANNEL=main` follows the upstream branch (`origin/main`) instead, as Bosun did before releases:
 every pushed commit whose tip is signed by a trusted key is installed within a day. It is meant for the
 maintainer's own machines. `install-tasks` carries `BOSUN_UPDATE_CHANNEL` into the background services when it is set at install time. Run it again after changing the channel.
+A commit on `main` that didn't install three times, or didn't serve, is not tried again either, until a newer one is pushed.
 
 Signatures are checked against `trusted_signers` at the repository root. The list is read from the commit the
 checkout is on now, never from the incoming one, so whoever can push to the repository (a stolen token, a

@@ -3,7 +3,6 @@
 import http.server
 import json
 import logging
-import sqlite3
 import sys
 import threading
 import time

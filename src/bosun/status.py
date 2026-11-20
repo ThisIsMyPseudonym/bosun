@@ -31,6 +31,9 @@ def _clean_result(res: dict[str, Any] | None) -> dict[str, Any] | None:
     out = dict(res)
     if isinstance(out.get("errors"), list):
         out["errors"] = [redact.text(str(e)) for e in out["errors"]]
+    for field in ("tools", "auto_upgraded"):  # text from tools and their output, too: no secrets in it
+        if isinstance(out.get(field), list):
+            out[field] = [redact.text(e) if isinstance(e, str) else e for e in out[field]]
     return out
 
 

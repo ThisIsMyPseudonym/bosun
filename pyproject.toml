@@ -1,6 +1,6 @@
 [project]
 name = "bosun-watch"
-version = "1.0.2"
+version = "1.0.3"
 description = "Bosun: a local dashboard of outdated software and dependencies, with security context and one-click upgrades"
 authors = [
     { name = "ThisIsMyPseudonym", email = "35669751+ThisIsMyPseudonym@users.noreply.github.com" }
@@ -27,7 +27,9 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "mypy>=2.4.1",
     "pytest>=9.1.1",
+    "ruff>=0.17.6",
 ]
 
 [project.scripts]
@@ -39,5 +41,63 @@ packages = ["src/bosun"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # the contract tests ask real services; the normal run stays offline: `pytest -m contract tests/contract` runs them
-addopts = "-m 'not contract'"
-markers = ["contract: asks a real outside service whether it still answers the way Bosun reads it (not run by default)"]
+# the upgrade test installs the previous release's dependencies (network, about a minute): `pytest -m upgrade`, as CI does
+addopts = "-m 'not contract and not upgrade'"
+markers = [
+    "contract: asks a real outside service whether it still answers the way Bosun reads it (not run by default)",
+    "upgrade: upgrades from the previous release to this code, with its data and its updater (not run by default; CI runs `-m upgrade`)",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B"]
+ignore = ["B007", "B904", "B905", "E731"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B008", "B017", "B023", "E701", "E702", "F811"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+warn_unused_ignores = true
+
+# Existing modules with pre-existing type debt; remove entries here as each module is typed.
+# Every other module (and any newly added module) is type-checked in CI.
+[[tool.mypy.overrides]]
+module = [
+    "bosun.actions",
+    "bosun.appwatch",
+    "bosun.attention",
+    "bosun.auth",
+    "bosun.caskguard",
+    "bosun.cli",
+    "bosun.collectors.linux",
+    "bosun.collectors.mac",
+    "bosun.collectors.mcp",
+    "bosun.diagnose",
+    "bosun.doctor",
+    "bosun.enrich.brewvulns",
+    "bosun.enrich.exposure",
+    "bosun.enrich.nvd",
+    "bosun.enrich.summarize",
+    "bosun.launcher",
+    "bosun.listprefs",
+    "bosun.llm",
+    "bosun.mcp_pin",
+    "bosun.notify",
+    "bosun.proc",
+    "bosun.refresh",
+    "bosun.registry",
+    "bosun.relaunch",
+    "bosun.serialize",
+    "bosun.store",
+    "bosun.takeover",
+    "bosun.trace",
+    "bosun.usage",
+    "bosun.versions",
+]
+ignore_errors = true
+

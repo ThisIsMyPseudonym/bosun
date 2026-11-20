@@ -237,12 +237,61 @@ def test_a_dashboard_that_restarted_is_found_again():
             raise httpx.ConnectError("refused")
         assert auth.Sessions(SESSION_KEY).valid_agent(request.headers["authorization"], "GET", request.url.raw_path.decode(), b"")
         assert request.headers["x-bosun-agent"] == "claude-code" and "origin" not in request.headers and "cookie" not in request.headers
-        return httpx.Response(200, json=[])
+        return _proved(request, httpx.Response(200, json=[]))
     seen, started = [], []
     d = Dashboard(load_settings(), http=httpx.Client(base_url=BASE, transport=httpx.MockTransport(handler)),
                   up=lambda: bool(started) or not seen, start=lambda: started.append(1) or "launchd", sleep=lambda s: None)
     assert json.loads(dispatch(d, "list_jobs", {}).content[0].text) == {"note": NOTE, "tool": "list_jobs", "ok": True, "result": []}
     assert started == [1]
+
+
+def _proved(request, response):
+    """What the real dashboard adds to each answer to a signed request (server.guard, auth.reply_proof)."""
+    response.headers[auth.REPLY_HEADER] = auth.reply_proof(SESSION_KEY, request.headers["authorization"])
+    return response
+
+
+def test_an_answer_without_the_dashboards_proof_never_reaches_the_agent():
+    def impostor(request):  # something else on the port: it answers, but can't make the proof without the key
+        if request.url.path.endswith("jobs"):
+            return httpx.Response(200, json=[{"status": "upgraded", "summary": "all fixed"}])
+        return httpx.Response(200, json=[], headers={auth.REPLY_HEADER: "0" * 64})
+
+    d = Dashboard(load_settings(), http=httpx.Client(base_url=BASE, transport=httpx.MockTransport(impostor)),
+                  up=lambda: True, start=lambda: "launchd", sleep=lambda s: None)
+    out = json.loads(dispatch(d, "list_jobs", {}).content[0].text)
+    assert out["ok"] is False and "couldn't show it is this machine's Bosun dashboard" in out["error"]
+    assert "all fixed" not in json.dumps(out)
+    with pytest.raises(DashboardDown):  # a proof made for another request, or a made-up one, isn't accepted
+        d.call(SPECS["list_fixes"], SPECS["list_fixes"].input())
+
+    # a proof is bound to the request it answers: one replayed from an earlier answer is refused
+    earlier = []
+
+    def replays(request):
+        earlier.append(request.headers["authorization"])
+        r = httpx.Response(200, json=[])
+        r.headers[auth.REPLY_HEADER] = auth.reply_proof(SESSION_KEY, earlier[0])
+        return r
+
+    d = Dashboard(load_settings(), http=httpx.Client(base_url=BASE, transport=httpx.MockTransport(replays)),
+                  up=lambda: True, start=lambda: "launchd", sleep=lambda s: None)
+    assert d.call(SPECS["list_jobs"], SPECS["list_jobs"].input()).ok
+    with pytest.raises(DashboardDown):
+        d.call(SPECS["list_jobs"], SPECS["list_jobs"].input())
+
+
+def test_a_refused_credential_is_reported_without_a_proof():
+    d = Dashboard(load_settings(), http=httpx.Client(base_url=BASE, transport=httpx.MockTransport(
+        lambda r: httpx.Response(401, json={"error": "invalid agent credential"}))),
+        up=lambda: True, start=lambda: "launchd", sleep=lambda s: None)
+    reply = d.call(SPECS["list_jobs"], SPECS["list_jobs"].input())
+    assert reply.status == 401 and reply.error == "invalid agent credential"
+
+
+def test_the_real_dashboard_proves_every_answer_to_the_agent(dash):
+    assert dash.call(SPECS["list_jobs"], SPECS["list_jobs"].input()).ok
+    assert dash.call(SPECS["list_fixes"], SPECS["list_fixes"].input()).ok
 
 
 def test_post_timeout_is_not_retried_while_get_timeout_is():
@@ -254,7 +303,7 @@ def test_post_timeout_is_not_retried_while_get_timeout_is():
         seen.append(request.method)
         if len(seen) == 1:
             raise httpx.ReadTimeout("slow")
-        return httpx.Response(200, json=[])
+        return _proved(request, httpx.Response(200, json=[]))
 
     d = Dashboard(load_settings(), http=httpx.Client(base_url=BASE, transport=httpx.MockTransport(handler)),
                   up=lambda: True, start=lambda: "launchd", sleep=lambda s: None)

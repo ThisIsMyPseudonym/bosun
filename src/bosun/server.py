@@ -77,10 +77,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     sessions = auth.Sessions(session_key or auth.load_key(s.data_dir))
     cookie = auth.cookie_name(s.port)
     refresh_file_lock = lock.FileLock(store.path.parent / "refresh.lock")
-    if not lock.is_locked(refresh_file_lock.path):
-        stale = store.abandon_stale_jobs()
-        if stale:
-            log.info("marked %d jobs from a previous run as abandoned", stale)
+    # with a `bosun refresh` running on its own, only what no process is doing any more: some may be its own
+    stale = store.abandon_stale_jobs(keep_live=lock.is_locked(refresh_file_lock.path))
+    if stale:
+        log.info("marked %d jobs from a previous run as abandoned", stale)
     token = token or secrets.token_urlsafe(32)
     refresh_state: dict = {"running": False, "last_result": None, "error": None, "rechecking": [], "trace_id": None}
     refresh_lock = threading.Lock()
@@ -91,7 +91,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if not refresh_file_lock.acquire():
             refresh_lock.release()
             return
-        refresh_state.update(running=True, rechecking=sorted(sources))
+        refresh_state.update(running=True, rechecking=sorted(sources), trace_id=None)  # not the refresh's result
         try:
             refresh_state["last_result"] = recheck(s, store, sources)
         except Exception:
@@ -177,6 +177,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                                                    if request.scope.get("query_string") else "")
         if not sessions.valid_agent(authorization, request.method, target, body):
             return JSONResponse({"error": "invalid agent credential"}, status_code=401)
+        request.state.reply_proof = sessions.reply_proof(authorization)  # this answer is the real dashboard's
         path = request.url.path
         if not path.startswith("/api/") or path == "/api/state":  # the page and its poll are the browser's
             return JSONResponse({"error": "agents can only call actions"}, status_code=403)
@@ -198,11 +199,21 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         body = await request.body() if "authorization" in request.headers else b""
         response = _refuse(request, body) or await call_next(request)
         response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'")
+            "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self'; font-src 'self'; "
+            "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
         response.headers["Referrer-Policy"] = "no-referrer"
-        # revalidate (cheap: ETag -> 304) so the page never runs stale JS after an update
-        response.headers.setdefault("Cache-Control", "no-cache")
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        proof = getattr(request.state, "reply_proof", None)
+        if proof:
+            response.headers[auth.REPLY_HEADER] = proof
+        # sensitive HTML/JSON (including `/` with its CSRF token) stays out of disk cache;
+        # static assets revalidate (cheap: ETag -> 304) so the page never runs stale JS after an update
+        default_cache = "no-cache" if request.url.path.startswith(("/static/", "/favicon.ico")) else "no-store"
+        response.headers.setdefault("Cache-Control", default_cache)
         return response
 
     @app.get("/health", include_in_schema=False)
@@ -261,7 +272,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if visible:  # the page is open in front of you: no need to notify about what's on it
             notifier.viewed()
         snap = store.latest_snapshot()
-        body = {"snapshot": None, "prefs": store.prefs(), "refresh": refresh_state,
+        prefs = store.prefs()
+        body = {"snapshot": None, "prefs": prefs, "refresh": refresh_state,
                 "claude_enabled": shutil.which("claude") is not None,
                 "model": s.model if s.summary_model == s.model else f"{s.summary_model} + {s.model}",
                 "machine": {"kind": machine.KIND, "label": machine.LABEL, "password_window": helper is not None,
@@ -273,12 +285,12 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                 "history": store.history(), "autopilot": _autopilot(snap), "relaunch": _pending_relaunch(),
                 "notify": {"on": notify.is_on(store)},
                 "agents": registry.agent_policy(store),
-                "assistant": {"model": assistant.model, "budget_usd": llm.budgets(store)["assistant_usd"],
+                "assistant": {"model": assistant.model if assistant else s.model, "budget_usd": llm.budgets(store)["assistant_usd"],
                               "left_usd": llm.assistant_left(store)},
                 "terminal": _terminal_now(), "watches": appwatch.view(store),
                 "view": store.setting("view") or "auto", "list_prefs": listprefs.read(store)}
         if snap:
-            prefs, now, first = body["prefs"], time.time(), store.first_seen()
+            now, first = time.time(), store.first_seen()
             have = icons.cached(icon_dir)
             body["snapshot"] = {"id": snap["id"], "ts": snap["ts"], "errors": snap["errors"],
                                 "projects": snap["meta"].get("projects", []),
@@ -421,12 +433,12 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if item is None:  # nothing outdated under that key any more: nothing to run
             return {"key": key, "recipes": [], "note": "Bosun has nothing to update under that key now."}
         failed = _last_failure(key)
-        found = recipes.describe(item_from_dict(item), failed, failed=bool(failed)) if ptyrun.AVAILABLE else []
-        found.sort(key=lambda r: not r["follow_up"])  # the specific fix before "try again"
-        return {"key": key, "name": item["name"], "recipes": found,
+        found_recipes = recipes.describe(item_from_dict(item), failed, failed=bool(failed)) if ptyrun.AVAILABLE else []
+        found_recipes.sort(key=lambda r: not r["follow_up"])  # the specific fix before "try again"
+        return {"key": key, "name": item["name"], "recipes": found_recipes,
                 "note": ("The user starts one of these with its button in the dashboard (the item's details, or under "
                          "this answer in the Ask Bosun panel). Nobody else can start one: it may ask for their password."
-                         if found else "There is nothing Bosun can run here for this item.")}
+                         if found_recipes else "There is nothing Bosun can run here for this item.")}
 
     @actions.bind("run_recipe")
     def run_recipe(ctx: ActionContext, body: RunIn):
@@ -668,7 +680,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             raise Conflict("A refresh is already running")
         snap = store.latest_snapshot() or {}
         name = next((p["name"] for p in (snap.get("meta") or {}).get("projects", []) if p["key"] == body.project), "project")
-        refresh_state.update(running=True, rechecking=[name])
+        refresh_state.update(running=True, rechecking=[name], trace_id=None)  # not the refresh's result
         try:
             return recheck_project(s, store, body.project)
         except ValueError as exc:
@@ -710,7 +722,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             raise NotFound("Watching an app for a manual update is a Mac feature")
         item = _items_by_key().get(body.key)
         bundle = appwatch.watchable(item, Path.home()) if item else None
-        if bundle is None:
+        if item is None or bundle is None:
             raise NotFound("Unknown app; refresh and try again")
         watch = appwatch.start(store, item, bundle)
         return {"watching": watch["name"], "want": watch["want"]}
@@ -976,17 +988,18 @@ def mount_actions(app: FastAPI, actions: Actions) -> None:
 def _endpoint(actions: Actions, spec: ActionSpec):
     async def endpoint(request: Request):
         if spec.method == "GET":
-            payload: object = dict(request.query_params)
+            payload: dict[str, object] = dict(request.query_params)
         else:
             raw = await request.body()
             try:
-                payload = json.loads(raw) if raw.strip() else {}
+                parsed: object = json.loads(raw) if raw.strip() else {}
             except json.JSONDecodeError as exc:
                 raise RequestValidationError([{"type": "json_invalid", "loc": ("body", exc.pos),
                                                "msg": "JSON decode error", "input": {}, "ctx": {"error": exc.msg}}])
-            if not isinstance(payload, dict):
+            if not isinstance(parsed, dict):
                 raise RequestValidationError([{"type": "model_attributes_type", "loc": ("body",),
-                                               "msg": "Input should be a valid dictionary or object", "input": payload}])
+                                               "msg": "Input should be a valid dictionary or object", "input": parsed}])
+            payload = parsed
         try:
             body = actions.validate(spec.name, {**payload, **request.path_params})
         except ValidationError as exc:

@@ -50,7 +50,7 @@ def test_recheck_replaces_only_rechecked_sources(tmp_path, monkeypatch):
     out = R.recheck(s, store, {"pip-global"})
     keys = {d["key"] for d in store.latest_snapshot()["items"]}
     assert out["rechecked"] == ["pip-global"]
-    assert keys == {"pip-global:lxml", "winget:Git.Git", f"repo::next@p"}  # anyio gone (upgraded); others kept
+    assert keys == {"pip-global:lxml", "winget:Git.Git", "repo::next@p"}  # anyio gone (upgraded); others kept
 
 
 def test_preflight_blocks_upgrades_while_blockers_run():

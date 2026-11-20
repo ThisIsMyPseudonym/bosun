@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -15,6 +16,7 @@ log = logging.getLogger(__name__)
 
 API = "https://endoflife.date/api/{product}.json"
 GIVE_UP_AFTER = 2  # products in a row the service could not answer: not asked again this refresh
+_NUM_VERSION = re.compile(r"^v?(\d+(?:\.\d+)*)")
 
 
 @dataclass(frozen=True)
@@ -46,15 +48,41 @@ def _parse_eol(value, today: dt.date) -> tuple[str, bool, bool]:
 parse_eol = _parse_eol  # (ISO date, passed, within SOON_DAYS) for a cycle's "eol" value
 
 
+def _cycle_nums(cycle: str) -> tuple[int, ...]:
+    m = _NUM_VERSION.match(cycle.strip().lower())
+    return tuple(int(p) for p in m.group(1).split(".")) if m else ()
+
+
 def match_cycle(cycles: list[dict], version: str) -> dict | None:
-    """'3.11' -> cycle 3.11; '7' (floating major) -> newest 7.x cycle; codename -> that cycle."""
+    """'3.11' or '3.11.4' -> cycle 3.11; '10.13.6' -> cycle 10.13; '14.7.2' -> cycle 14;
+    '7' (floating major) -> newest 7.x cycle; codename -> that cycle.
+    Never falls back from a specific major.minor (e.g. '3.5' or '10.9') to a newer major.other cycle."""
     v = version.strip().lower()
+    if not v:
+        return None
+    by_cycle: dict[str, dict] = {}
     for c in cycles:
+        cid = str(c.get("cycle", "")).strip().lower()
         codename = str(c.get("codename") or "").lower().split(" ")[0]  # "Focal Fossa" -> "focal"
-        if str(c.get("cycle", "")).lower() == v or codename == v:
+        if cid == v or (codename and codename == v):
             return c
-    major = [c for c in cycles if str(c.get("cycle", "")).split(".")[0] == v.split(".")[0]]
-    return major[0] if major else None  # API lists newest first
+        if cid:
+            by_cycle.setdefault(cid, c)
+    m = _NUM_VERSION.match(v)
+    if not m:
+        return None
+    parts = m.group(1).split(".")
+    # Walk progressively shorter exact cycle prefixes: "10.13.6" -> "10.13" -> "10"; "8.0_1" -> "8.0"
+    for length in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:length])
+        if prefix in by_cycle:
+            return by_cycle[prefix]
+    # Floating major fallback ("7" -> newest 7.x, "10" -> newest 10.x) only when no minor was given
+    if len(parts) == 1:
+        major = [c for c in cycles if str(c.get("cycle", "")).strip().split(".")[0] == parts[0]]
+        if major:
+            return max(major, key=lambda c: _cycle_nums(str(c.get("cycle", ""))))
+    return None
 
 
 def recommended_cycle(cycles: list[dict], today: dt.date) -> str:

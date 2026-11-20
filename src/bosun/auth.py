@@ -67,6 +67,19 @@ def cookie_value(key: str) -> str:
 
 
 AGENT_TTL_S = 60
+REPLY_HEADER = "x-bosun-reply"  # the dashboard's proof, on its answer to a signed request, that it holds the key
+
+
+def reply_proof(key: str, authorization: str) -> str:
+    """What the dashboard adds to its answer to an agent's signed request. It is bound to that request's own
+    signature, which has a fresh nonce, so a program that took the dashboard's port can't copy one from an
+    earlier answer: only a holder of the key file answers as this user's dashboard."""
+    return _mac(key, f"reply|{authorization.strip()}")
+
+
+def valid_reply(key: str, authorization: str | None, value: str | None) -> bool:
+    return bool(authorization and value) and hmac.compare_digest(
+        str(value).encode("utf-8", "replace"), reply_proof(key, str(authorization)).encode())
 
 
 def _agent_mac(key: str, ts: int | str, nonce: str, method: str, target: str, body: bytes) -> str:
@@ -139,6 +152,9 @@ class Sessions:
                 mac.encode("utf-8", "replace"), want.encode()):
             return False
         return self._once(f"agent:{nonce}", now)
+
+    def reply_proof(self, authorization: str) -> str:
+        return reply_proof(self._key, authorization)
 
     def _once(self, nonce: str, now: float) -> bool:
         with self._lock:

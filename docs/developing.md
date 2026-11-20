@@ -10,7 +10,15 @@ uv run bosun actions          # everything Bosun can do, with its risk tier (--j
 uv run bosun db               # the database's path and schema migrations
 uv run bosun db --doc > docs/data-model.md   # after a schema or view change (a test fails if it is stale)
 BOSUN_LIVE_EVALS=1 uv run pytest tests/test_assistant_evals.py -k live -s   # the assistant against real Claude (cents)
+uv run pytest -m upgrade      # the upgrade path from the previous release (needs the network; not in the default run)
 ```
+
+The upgrade test (`tests/test_upgrade_path.py`, run by CI after the offline suite) takes the newest earlier release tag
+(`BOSUN_UPGRADE_FROM=vX.Y.Z` picks one), makes a database with that release's own code, opens it with this code
+(migrations, the `.bak-v<N>` copy, `bosun serve` answering) and opens it with the old code again (a rollback), then runs
+that release's own `selfupdate.update` on a signed fixture repo and checks it reaches this code. It skips, saying why,
+when no earlier release tag is in the checkout: a shallow clone, or a repository that lacks the public tags
+(`git fetch https://github.com/<owner>/bosun.git 'refs/tags/v*:refs/tags/v*'`).
 
 Every other `bosun` command opens the database in the data folder and migrates it. In a worktree with a new
 migration, point it somewhere else first: `BOSUN_DATA_DIR=$(mktemp -d) uv run bosun ...`.

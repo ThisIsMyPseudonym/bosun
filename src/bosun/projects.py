@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import proc, redact
-from .models import Item, Source
+from .models import Item
 
 log = logging.getLogger(__name__)
 

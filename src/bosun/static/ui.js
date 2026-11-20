@@ -59,23 +59,35 @@ MC.fold = { open: (key, dflt) => { if (!kept.has(key)) kept.set(key, !!dflt); re
 // crash) a window left open still holds the old one, and every action would be refused with nothing to click.
 // So on that refusal the page reads its own address again for the new token and tries once more. Only this
 // page can read that answer (same origin, signed-in cookie), which is what the token is there to prove.
-MC.freshToken = async function freshToken() {
-  try {
-    const res = await fetch("/", { headers: { accept: "text/html" } });
-    if (!res.ok) return false;
-    const found = /<meta name="bosun-token" content="([^"]+)">/.exec(await res.text());
-    if (!found || found[1] === MC.TOKEN) return false;
-    MC.TOKEN = found[1];
-    return true;
-  } catch (e) { return false; }
+let tokenRefresh = null;
+MC.freshToken = async function freshToken(staleToken) {
+  // Another in-flight request already refreshed the token after Bosun restarted.
+  if (staleToken && MC.TOKEN !== staleToken) return true;
+  const before = staleToken || MC.TOKEN;
+  if (!tokenRefresh) {
+    tokenRefresh = (async () => {
+      try {
+        const res = await fetch("/", { headers: { accept: "text/html" }, cache: "no-store" });
+        if (!res.ok) return null;
+        const found = /<meta name="bosun-token" content="([^"]+)">/.exec(await res.text());
+        if (!found) return null;
+        MC.TOKEN = found[1];
+        return found[1];
+      } catch (e) { return null; }
+      finally { tokenRefresh = null; }
+    })();
+  }
+  const got = await tokenRefresh;
+  return !!got && got !== before;
 };
 
 MC.api = async function api(path, opts = {}, again = true) {
+  const sent = MC.TOKEN;
   const res = await fetch(path, { ...opts,
-    headers: { "content-type": "application/json", "x-bosun-token": MC.TOKEN, ...(opts.headers || {}) } });
+    headers: { "content-type": "application/json", "x-bosun-token": sent, ...(opts.headers || {}) } });
   const body = await res.json().catch(() => ({}));
   if (res.status === 403 && body.error === "missing or invalid token") {
-    if (again && await MC.freshToken()) return MC.api(path, opts, false);
+    if (again && await MC.freshToken(sent)) return MC.api(path, opts, false);
     // could not catch up by itself: from here the banner says so, with the one click that fixes it (app.js)
     MC.stale = true;
     if (MC.banner) MC.banner("");

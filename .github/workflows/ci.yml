@@ -22,11 +22,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0  # the upgrade test needs the history and tags to find the previous release
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.13"
       - run: uv sync --locked
       - run: uv run --locked pytest -q -p no:cacheprovider
+      # The release tags are published to the public repository. This repository's history may not contain them (the
+      # private one does not), so fetch them apart from the history; where they are there already this changes nothing.
+      # Without any, the upgrade test fails here (BOSUN_UPGRADE_REQUIRED), and skips with the reason elsewhere.
+      - name: fetch the published release tags
+        if: ${{ !cancelled() }}  # the upgrade test runs after a failed test step too, and needs the tags then
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: "0"  # a repository that needs a login fails at once instead of waiting for one
+        run: git fetch --no-tags --quiet "https://github.com/${{ github.repository_owner }}/bosun.git" 'refs/tags/v*:refs/tags/v*' || echo "::warning::could not fetch the release tags; the upgrade test may skip"
+      # The previous release's data and updater against this code (tests/test_upgrade_path.py). Apart from the offline
+      # run because it installs that release's dependencies, which needs the network.
+      # Required here: without a previous release it fails rather than skipping, which CI would show as a pass.
+      - if: ${{ !cancelled() }}
+        env:
+          BOSUN_UPGRADE_REQUIRED: "1"
+        run: uv run --locked pytest -q -p no:cacheprovider -m upgrade -rs
 
   javascript:
     name: the dashboard's scripts parse
@@ -36,3 +53,17 @@ jobs:
         with:
           persist-credentials: false
       - run: for f in src/bosun/static/*.js; do node --check "$f"; done
+
+  lint:
+    name: lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - run: uv run --locked ruff check src tests
+      - run: uv run --locked mypy src/bosun

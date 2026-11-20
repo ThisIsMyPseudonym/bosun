@@ -145,7 +145,8 @@ def test_a_failed_run_is_a_job_and_a_run_like_any_other(dash):
     dash.type(job, "wrong\n")
     done = dash.finished(job)
     assert done["status"] == "failed" and "(exit 1)" in done["output"] and "wrong" not in done["output"]
-    found = dash.store.trace(done["trace_id"])
+    # the job row is written first, the run record as the run closes: wait for both
+    found = dash.until(lambda: (t := dash.store.trace(done["trace_id"])) and t["run"]["status"] != "running" and t)
     assert (found["run"]["kind"], found["run"]["status"], found["run"]["subject"], found["run"]["actor"]) == (
         "manual", "failed", KEY, "user")
     assert found["parent"]["kind"] == "action" and found["parent"]["subject"] == "run_recipe"  # who started it

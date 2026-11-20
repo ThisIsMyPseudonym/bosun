@@ -46,6 +46,37 @@ def run(argv: list[str] | tuple[str, ...], timeout: float = 300, cwd: str | None
         return r
 
 
+def pid_alive(pid: object) -> bool:
+    """Whether a process with this id runs on this machine. Unsure (no permission to ask, a bad id) counts as
+    alive: callers use it only to tell work whose process is gone, and must not skip work that may be running."""
+    if type(pid) is not int or pid <= 0:
+        return True
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":  # os.kill(pid, 0) on Windows would end the process
+        import ctypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists; anything else: no such process
+        try:
+            code = ctypes.c_ulong()
+            if not kernel.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle(ctypes.c_void_p(handle))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # PermissionError: it exists, as another user
+        return True
+    return True
+
+
 # A repository's own .git/config can make git run commands: core.fsmonitor on any status/ls-files/grep, hooks on
 # checkout and commit, and gpg.program on any log of a signed commit when log.showSignature is on. Bosun runs git
 # in every repo it finds under your home, including ones you only unpacked, so every git call goes through here

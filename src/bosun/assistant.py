@@ -451,10 +451,19 @@ class Assistant:
                   tier=mcp_server.TIER_PLAIN[spec.risk], risk=risk, input=redact.value(asked.input),
                   items=self._items(asked.input), expires=asked.expires)
         assert turn.loop is not None
-        answer = await turn.loop.run_in_executor(self._pool, self.approvals.wait, asked.id)
-        self.store.update_message(row, outcome=answer.state, text=answer.reason)
-        turn.emit("approval_done", id=asked.id, outcome=answer.state, reason=redact.text(answer.reason))
+        try:
+            answer = await turn.loop.run_in_executor(self._pool, self.approvals.wait, asked.id)
+        except asyncio.CancelledError:  # Stop can end the turn before the wait hands back its answer: close the card
+            self.approvals.stop(turn.conversation_id)
+            answer = self.approvals.get(asked.id) or asked
+            self._approval_done(turn, row, answer)
+            raise
+        self._approval_done(turn, row, answer)
         return answer
+
+    def _approval_done(self, turn: Turn, row: int, answer: Approval) -> None:
+        self.store.update_message(row, outcome=answer.state, text=answer.reason)
+        turn.emit("approval_done", id=answer.id, outcome=answer.state, reason=redact.text(answer.reason))
 
     def _items(self, args: dict[str, Any]) -> list[dict[str, Any]]:
         """What an approval is about, by name and version: the card shows these, not just keys."""

@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import attention, machine, migrations, normalize, redact, trace
+from . import attention, machine, migrations, normalize, proc, redact, trace
 
 log = logging.getLogger(__name__)
 CACHE_DAYS = 180  # a kept answer nobody has asked for again in this long is gone; the next ask fetches it afresh
@@ -280,12 +280,26 @@ class Store:
         with self._tx(write=True) as db:
             db.execute("UPDATE jobs SET status=?, started=? WHERE id=?", (status, time.time(), job_id))
 
-    def abandon_stale_jobs(self) -> int:
-        """Jobs left queued/running by a previous process will never finish: say so."""
+    def abandon_stale_jobs(self, keep_live: bool = False) -> int:
+        """Jobs left queued/running by a previous process will never finish: say so.
+
+        keep_live: only those whose process is gone (the one its run recorded, as busy() judges), for when
+        another process (a `bosun refresh` run on its own) may still be doing some of them."""
         with self._tx(write=True) as db:
-            cur = db.execute("UPDATE jobs SET status='abandoned', finished=? WHERE status IN ('queued','running')",
-                             (time.time(),))
-            return cur.rowcount
+            if not keep_live:
+                cur = db.execute("UPDATE jobs SET status='abandoned', finished=? WHERE status IN ('queued','running')",
+                                 (time.time(),))
+                return cur.rowcount
+            rows = db.execute(
+                "SELECT j.id, (SELECT pid FROM runs WHERE runs.trace_id = j.trace_id) AS own, "
+                "(SELECT pid FROM runs WHERE runs.trace_id = j.parent_trace AND j.parent_trace != '') AS asker "
+                "FROM jobs j WHERE j.status IN ('queued','running')").fetchall()
+            dead = [r["id"] for r in rows if not _alive(r["own"] if r["own"] is not None else r["asker"])]
+            now = time.time()
+            for job_id in dead:
+                db.execute("UPDATE jobs SET status='abandoned', finished=? WHERE id=? AND status IN ('queued','running')",
+                           (now, job_id))
+            return len(dead)
 
     def finish_job(self, job_id: int, status: str, output: str) -> None:
         with self._tx(write=True) as db:
@@ -386,10 +400,19 @@ class Store:
         return None
 
     def busy(self) -> bool:
-        """An upgrade or a fix is queued or running (a job waiting for an app to close survives a restart)."""
+        """An upgrade or a fix is queued or running (a job waiting for an app to close survives a restart).
+
+        Not one whose process is gone: a job or fix left "running" by a refresh or a command that was killed
+        would otherwise hold back the dashboard's restart onto new code for good. The process is the one its run
+        recorded (runs.pid): the run doing the work, or before that starts, the run that asked for it. Work with
+        no such record, or whose process can't be told apart from a live one, counts as running."""
         with self._tx() as db:
-            return bool(db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running') UNION ALL "
-                                   "SELECT 1 FROM fixes WHERE status IN ('queued','running') LIMIT 1").fetchone())
+            rows = db.execute(
+                "SELECT (SELECT pid FROM runs WHERE runs.trace_id = w.trace_id) AS own, "
+                "(SELECT pid FROM runs WHERE runs.trace_id = w.parent_trace AND w.parent_trace != '') AS asker "
+                "FROM (SELECT trace_id, parent_trace FROM jobs WHERE status IN ('queued','running') UNION ALL "
+                "SELECT trace_id, parent_trace FROM fixes WHERE status IN ('queued','running')) AS w").fetchall()
+        return any(_alive(r["own"] if r["own"] is not None else r["asker"]) for r in rows)
 
     def abandon_stale_fixes(self) -> int:
         with self._tx(write=True) as db:
@@ -650,3 +673,8 @@ class Store:
             "cache": {"summaries_from_cache": summ.get("cached", 0), "summaries_asked": asked,
                       "hit_rate": round(summ.get("cached", 0) / asked, 3) if asked else None},
         }
+
+
+def _alive(pid: object) -> bool:
+    """The process that owns a queued or running job or fix is still there (no record: assume it is)."""
+    return pid is None or proc.pid_alive(pid)

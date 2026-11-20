@@ -151,9 +151,6 @@ def test_autopilot_card_offers_only_what_being_there_fixes(client):
 
 def test_installed_app_gets_the_logo(client):
     """Edge/Chrome take an installed app's icons from the manifest; Windows asks for /favicon.ico."""
-    import json
-    from pathlib import Path
-
     assert 'rel="manifest" href="/static/manifest.json"' in client.get("/").text
     manifest = client.get("/static/manifest.json").json()
     assert manifest["name"] == "Bosun" and manifest["start_url"] == "/" and manifest["display"] == "standalone"

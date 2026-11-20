@@ -363,6 +363,33 @@ def test_one_turn_at_a_time_and_stop_cancels_it(panel):
     assert panel.wait(cid)[-1][1]["status"] == "ok"
 
 
+def test_a_stop_that_cancels_the_turn_before_the_wait_returns_still_closes_the_card(panel, monkeypatch):
+    """The turn can be cancelled while the answered wait is still on its way back: the card is closed all the same."""
+    monkeypatch.setattr(assistant_module, "STOP_GRACE_S", 0)
+    wait = panel.approvals.wait
+
+    def slow(approval_id):
+        answer = wait(approval_id)
+        time.sleep(0.5)
+        return answer
+
+    monkeypatch.setattr(panel.approvals, "wait", slow)
+
+    async def script(model):
+        await model.call("upgrade", {"keys": [JQ]})
+
+    panel.script(script)
+    cid = panel.ask("upgrade jq")["conversation_id"]
+    approval = panel.wait(cid, "approval")[-1][1]
+    assert panel.user.post(f"/api/assistant/conversations/{cid}/stop", headers=H).json() == {"stopping": True}
+    events = panel.wait(cid)
+    assert events[-1][1]["status"] == "stopped" and panel.upgrades == []
+    done = [d for k, d in events if k == "approval_done"]
+    assert done == [{"id": approval["id"], "outcome": "stopped", "reason": "the user stopped the assistant"}]
+    card = [m for m in panel.conversation(cid)["messages"] if m["role"] == "approval"]
+    assert [m["outcome"] for m in card] == ["stopped"]
+
+
 def test_stop_reaches_a_model_that_is_not_calling_anything(panel, monkeypatch):
     monkeypatch.setattr(assistant_module, "STOP_GRACE_S", 0.3)
 

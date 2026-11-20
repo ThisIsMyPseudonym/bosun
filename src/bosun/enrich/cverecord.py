@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import httpx
@@ -258,26 +258,42 @@ def fixes_installed(record: Record, item: Item) -> bool:
     """Does the record itself say the installed version is affected and the available one is not? This is the
     evidence the publisher of a release does not control. An old CVE of the same product (fixed releases ago),
     or a record with no versions Bosun can read, is not confirmed."""
-    if not is_known(item.installed) or not is_known(item.available):
+    available = item.available
+    if not is_known(item.installed) or available is None or not is_known(available):
         return False
     ranges = [r for a in matching(record, item) for r in a.ranges]
     if not any(_in(item.installed, r) for r in ranges):
         return False
-    return not any(_in(item.available, r) is not False for r in ranges)  # still inside, or can't tell: not a fix
+    return not any(_in(available, r) is not False for r in ranges)  # still inside, or can't tell: not a fix
+
+
+REQUEST_TIMEOUT_S = 10.0
+CONNECT_TIMEOUT_S = 5.0
 
 
 class CveRecords:
-    def __init__(self, store: Store, http: httpx.Client | None = None, budget_s: float = BUDGET_S):
+    def __init__(self, store: Store, http: httpx.Client | None = None, budget_s: float = BUDGET_S,
+                 clock: Callable[[], float] | None = None):
         self.store = store
-        self.http = http or httpx.Client(timeout=httpx.Timeout(10, connect=5), headers={"User-Agent": "bosun/1.0"})
-        self.deadline = time.monotonic() + budget_s
+        self.http = http or httpx.Client(
+            timeout=httpx.Timeout(REQUEST_TIMEOUT_S, connect=CONNECT_TIMEOUT_S),
+            headers={"User-Agent": "bosun/1.0"},
+        )
+        # Budget counts time spent in CVE.org lookups (not wall time spent in unrelated refresh steps like summaries)
+        self.budget_s = float(budget_s)
+        self.elapsed_s = 0.0
+        self._clock = clock
         self.failures = 0
         self.lookups = 0  # records asked of the service this refresh (not ones answered from the cache)
 
     @property
+    def remaining(self) -> float:
+        return max(0.0, self.budget_s - self.elapsed_s)
+
+    @property
     def spent(self) -> bool:
-        """The service is failing or the refresh has waited long enough: no more lookups this time."""
-        return self.failures >= GIVE_UP_AFTER or time.monotonic() > self.deadline
+        """The service is failing or CVE.org lookups have used the refresh's time budget: no more lookups this time."""
+        return self.failures >= GIVE_UP_AFTER or self.elapsed_s >= self.budget_s
 
     def record(self, cve: str) -> Record | None:
         """None: no published record Bosun can read. A failed lookup is not kept, so the next refresh asks again;
@@ -287,9 +303,15 @@ class CveRecords:
             return parse(cached)
         if self.store.cache_get("cve-miss", cve, max_age_hours=MISS_HOURS) is not None or self.spent:
             return None
+        left = self.remaining
+        if left <= 0:
+            return None
         self.lookups += 1
+        clock = self._clock or time.monotonic
+        started = clock()
         try:
-            r = self.http.get(API + cve)
+            timeout = httpx.Timeout(min(REQUEST_TIMEOUT_S, left), connect=min(CONNECT_TIMEOUT_S, left))
+            r = self.http.get(API + cve, timeout=timeout)
             if r.status_code != 404:
                 r.raise_for_status()
             data = {} if r.status_code == 404 else r.json()
@@ -299,6 +321,8 @@ class CveRecords:
             outages.note("cve", "CVE.org's records", "scores for some named flaws may be missing until it does",
                          unreadable=not isinstance(exc, httpx.HTTPError))
             return None
+        finally:
+            self.elapsed_s += max(0.0, clock() - started)
         self.failures = 0
         rec = parse(data) if data else None
         if r.status_code != 404 and rec is None:  # a 200 that is not a record: the format has changed

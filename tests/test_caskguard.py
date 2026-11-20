@@ -332,7 +332,7 @@ def test_a_copy_past_its_keep_date_is_not_offered(tmp_path, monkeypatch):
 
 
 def test_after_an_earlier_copy_is_put_back_the_update_is_listed_again_as_a_reinstall():
-    from bosun.actions import UnsafeItem, brew_drift, upgrade_argv
+    from bosun.actions import brew_drift, upgrade_argv
     from bosun.collectors.mac import App, cask_items
     from bosun.serialize import item_from_dict, item_to_dict
 

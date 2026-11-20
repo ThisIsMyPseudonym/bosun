@@ -207,6 +207,16 @@ class Dashboard:
             self._checked = False
             self.ensure_up()
             r = self._http.request(spec.method, path, auth=self._auth(), **kwargs)
+        # the dashboard proves each answer to a signed request with the key (auth.reply_proof); something else
+        # listening on the port can't, and what it says must not reach the agent as Bosun's. A 401 is the one
+        # answer the dashboard gives without a proof: it didn't accept the credential, so it has nothing to prove.
+        if r.status_code != 401 and not auth.valid_reply(auth.load_key(self.s.data_dir),
+                                                         r.request.headers.get("authorization"),
+                                                         r.headers.get(auth.REPLY_HEADER)):
+            self._checked = False
+            raise DashboardDown(f"Something on port {self.s.port} answered, but couldn't show it is this machine's "
+                                "Bosun dashboard, so its answer was not used. Check what is listening there, or "
+                                "start Bosun with `bosun open`.")
         try:
             parsed = r.json()
         except ValueError:

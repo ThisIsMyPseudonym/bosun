@@ -97,7 +97,8 @@ macOS is the supported platform. Windows and Linux are experimental: the tests r
 Run Bosun from a git checkout and it keeps itself up to date. After the daily refresh, it moves the checkout
 forward to the newest **release**: a tag named `vMAJOR.MINOR.PATCH`. Releases are signed tags. A running Bosun
 installs a release only if its signature and every commit up to it check out against a list of trusted keys in
-the repository, and never moves to an older version. Set `BOSUN_SELF_UPDATE=0` to turn this off. The rules in
+the repository, and never moves to an older version. A new release waits 24 hours after this machine first
+sees it, so a bad one can be replaced first. Set `BOSUN_SELF_UPDATE=0` to turn this off. The rules in
 full are in [Operating Bosun](docs/operating.md#staying-current-in-full).
 
 ## Leaving Bosun alone

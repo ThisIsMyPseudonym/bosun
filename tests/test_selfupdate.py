@@ -1,11 +1,14 @@
 import json
+import os
 import socket
 import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
-from bosun import selfupdate
+from bosun import selfupdate, startguard
 from bosun.cli import wait_for_port
 from bosun.store import Store
 
@@ -343,6 +346,39 @@ def test_refuses_a_release_tag_that_was_moved_after_it_was_seen(repos):
     assert out.status == "failed" and "v1.1.0 was moved" in out.detail and selfupdate.head(here) == first
 
 
+def test_a_person_can_repin_a_moved_release_and_it_waits_again(repos, monkeypatch):
+    dev, here, store = repos
+    first = tag(dev, "v1.1.0", at=commit(dev, "app.py", "v2\n"))
+    git(dev, "push", "-q", "origin", "main")
+    assert release(store, here).new == first
+    later = commit(dev, "app.py", "v3, signed by the maintainer\n")
+    git(dev, "push", "-q", "origin", "main")
+    tag(dev, "v1.1.0", at=later)
+    out = release(store, here)
+    assert "bosun self-update --repin v1.1.0" in out.detail
+    said = selfupdate.repin(store, "v1.1.0", here)
+    assert "now held to" in said and selfupdate.head(here) == first  # repinning installs nothing
+    monkeypatch.setattr(selfupdate, "CHECK_EVERY_H", -1)
+    assert startguard.begin(store.path.parent, here) == "probation" and startguard.confirm(store.path.parent, here)
+    waiting = selfupdate.update(store, here, check=ok, delay_hours=24)
+    assert waiting.status == "waiting" and waiting.until and "v1.1.0" in waiting.detail  # the wait starts over
+    assert selfupdate.head(here) == first
+    assert release(store, here).new == later
+    assert "nothing to change" in selfupdate.repin(store, "v1.1.0", here)
+    with pytest.raises(ValueError):
+        selfupdate.repin(store, "main", here)
+    with pytest.raises(ValueError):
+        selfupdate.repin(store, "v9.9.9", here)
+
+
+def test_no_dashboard_or_agent_action_can_repin():
+    import pathlib
+
+    src = pathlib.Path(selfupdate.__file__).parent
+    callers = [f.name for f in src.glob("*.py") if "repin(" in f.read_text() and f.name not in ("selfupdate.py", "cli.py")]
+    assert callers == []
+
+
 def test_a_tag_the_clone_already_had_counts_as_seen(repos, tmp_path):
     dev, here, store = repos
     first = tag(dev, "v1.0.0")
@@ -485,16 +521,272 @@ def test_only_an_ssh_signature_counts_never_one_the_persons_own_keyring_would_ac
         assert any(str(x).startswith(f"{name}=/nonexistent/") for x in checked), name
 
 
-def test_unverified_tag_does_not_squat_release_name(repos):
+# --- new code that imports but doesn't serve (startguard) -----------------------------------------------------
+
+def test_an_update_puts_the_next_start_on_probation(repos):
+    dev, here, store = repos
+    old = selfupdate.head(here)
+    new = commit(dev, "app.py", "v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    assert selfupdate.update(store, here, check=ok, channel="main").status == "updated"
+    p = startguard.read(store.path.parent)["pending"]
+    assert (p["old"], p["new"], p["starts"]) == (old, new, 0)
+
+
+def test_a_commit_that_did_not_serve_is_not_taken_again_until_someone_asks(repos, monkeypatch):
+    dev, here, store = repos
+    monkeypatch.setattr(selfupdate, "CHECK_EVERY_H", -1)  # every call is the daily check
+    monkeypatch.setattr(startguard, "uv_bin", lambda: None)
+    data = store.path.parent
+    old = selfupdate.head(here)
+    bad = commit(dev, "app.py", "v2 crashes on start\n")
+    git(dev, "push", "-q", "origin", "main")
+    assert selfupdate.update(store, here, check=ok, channel="main").status == "updated"
+    for _ in range(startguard.MAX_STARTS):  # launchd starts it, it dies before it serves, three times
+        assert startguard.begin(data, here) == "probation"
+    assert startguard.begin(data, here) == "rolled back" and selfupdate.head(here) == old
+
+    out = selfupdate.update(store, here, check=ok, channel="main")  # the old dashboard's daily check
+    assert out.status == "failed" and "the dashboard didn't serve on it" in out.detail and selfupdate.head(here) == old
+    assert "isn't tried again automatically" in out.detail and "`bosun self-update` tries this one now" in out.detail
+    assert bad in selfupdate.failed_commits(store)  # one record of what not to take again, whichever way it failed
+
+    assert selfupdate.update(store, here, force=True, check=ok, channel="main").status == "updated"  # by hand
+    assert selfupdate.head(here) == bad and startguard.read(data)["pending"]["new"] == bad
+    assert startguard.begin(data, here) == "probation" and startguard.confirm(data, here)
+    assert startguard.bad(data) is None  # it serves after all: nothing held against it any more
+
+
+def test_a_newer_commit_is_taken_after_one_that_did_not_serve(repos, monkeypatch):
+    dev, here, store = repos
+    monkeypatch.setattr(selfupdate, "CHECK_EVERY_H", -1)
+    monkeypatch.setattr(startguard, "uv_bin", lambda: None)
+    data = store.path.parent
+    commit(dev, "app.py", "v2 crashes on start\n")
+    git(dev, "push", "-q", "origin", "main")
+    selfupdate.update(store, here, check=ok, channel="main")
+    for _ in range(startguard.MAX_STARTS + 1):
+        startguard.begin(data, here)
+    fixed = commit(dev, "app.py", "v3 fixed\n")
+    git(dev, "push", "-q", "origin", "main")
+    assert selfupdate.update(store, here, check=ok, channel="main").status == "updated"
+    assert selfupdate.head(here) == fixed
+
+
+def gone_pid():
+    """The id of a process that has ended."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def ran_in(store, trace_id, pid, parent=""):
+    with store._db:
+        store._db.execute("INSERT INTO runs (trace_id, kind, actor, status, started, parent_trace, process, pid) "
+                          "VALUES (?,?,?,?,?,?,?,?)", (trace_id, "upgrade", "autopilot", "running", time.time(),
+                                                       parent, "cli", pid))
+
+
+def test_running_work_always_holds_a_restart_back(repos, monkeypatch):
+    """However long it runs, and whoever started it: an Autopilot upgrade still going is never cut off."""
+    dev, here, store = repos
+    job = store.create_job("brew:jq", ["brew"], status="running", trace_id="t-live", actor="autopilot")
+    ran_in(store, "t-live", os.getpid())
+    monkeypatch.setattr(selfupdate, "head", lambda root: "aaa" if not slept else "bbb")
+    slept = []
+
+    def sleep(s):
+        slept.append(s)
+        if len(slept) > 500:  # 500 minutes: well past the 6 hours an earlier version waited
+            raise TimeoutError
+
+    with pytest.raises(TimeoutError):
+        selfupdate.restart_when_idle(store.busy, here, interval=60, then=lambda: pytest.fail("restarted"),
+                                     sleep=sleep, check=ok)
+    store.finish_job(job, "succeeded", "")
+    assert not store.busy()
+
+
+def test_work_whose_process_is_gone_does_not_hold_a_restart_back(repos, monkeypatch):
+    """A row a killed refresh left "running" would otherwise keep the dashboard on old code for good."""
+    dev, here, store = repos
+    dead = gone_pid()
+    store.create_job("brew:jq", ["brew"], status="running", trace_id="t-dead", actor="user")
+    ran_in(store, "t-dead", dead)
+    store.create_job("brew:git", ["brew"], status="queued", trace_id="t-never", actor="system")
+    ran_in(store, "t-asker", dead)  # queued by a run whose process is gone, and never started
+    with store._db:
+        store._db.execute("UPDATE jobs SET parent_trace='t-asker' WHERE trace_id='t-never'")
+    assert not store.busy()
+    commits = iter(["aaa", "bbb"])
+    monkeypatch.setattr(selfupdate, "head", lambda root: next(commits))
+    restarted = []
+    selfupdate.restart_when_idle(store.busy, here, interval=60, then=lambda: restarted.append(True),
+                                 sleep=lambda s: None, check=ok)
+    assert restarted == [True]
+
+
+def test_work_with_no_record_of_its_process_counts_as_running(tmp_path):
+    store = Store(tmp_path / "db")
+    store.create_job("brew:jq", ["brew"], status="running", trace_id="t-unknown", actor="autopilot")
+    assert store.busy()  # nothing says it is dead: never cut it off
+    fix = store.create_fix("npm:x", "proj")
+    with store._db:
+        store._db.execute("UPDATE jobs SET status='succeeded'")
+    assert store.busy() and store.fix(fix)["status"] == "queued"
+    ran_in(store, store.fix(fix)["trace_id"], gone_pid())
+    assert not store.busy()
+
+
+def test_a_process_is_alive_until_it_ends():
+    from bosun import proc
+
+    assert proc.pid_alive(os.getpid())
+    assert not proc.pid_alive(gone_pid())
+    assert proc.pid_alive(None) and proc.pid_alive(-1)  # unsure: counted as alive
+
+
+def test_the_way_back_is_recorded_before_the_new_code_is_checked(repos):
+    """The check can take minutes; a dashboard that restarts onto the new code meanwhile must be watched."""
+    dev, here, store = repos
+    old = selfupdate.head(here)
+    new = commit(dev, "app.py", "v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    seen = []
+
+    def check(root, deps):
+        seen.append(startguard.pending(store.path.parent, here))
+        return ""
+
+    assert selfupdate.update(store, here, check=check, channel="main").status == "updated"
+    assert seen[0]["old"] == old and seen[0]["new"] == new
+
+
+def test_an_import_that_fails_leaves_nothing_for_startguard_to_act_on(repos):
+    dev, here, store = repos
+    old = selfupdate.head(here)
+    commit(dev, "app.py", "broken\n")
+    git(dev, "push", "-q", "origin", "main")
+    out = selfupdate.update(store, here, check=lambda root, deps: "ImportError: x", channel="main")
+    assert out.status == "failed" and selfupdate.head(here) == old
+    assert startguard.begin(store.path.parent, here) == "none"  # its record names a commit HEAD isn't on
+    assert startguard.pending(store.path.parent, here) is None
+
+
+def test_an_interrupted_move_that_imports_is_watched_and_keeps_its_count(repos):
+    dev, here, store = repos
+    old = selfupdate.head(here)
+    new = commit(dev, "app.py", "v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    git(here, "fetch", "-q")
+    git(here, "merge", "--ff-only", "-q", new)  # the refresh was killed after moving HEAD, before telling anyone
+    store.set_setting(selfupdate.PENDING, json.dumps({"old": old, "new": new, "deps": False,
+                                                      "at": time.time() - selfupdate.PENDING_STALE_S - 1}))
+    selfupdate.update(store, here, check=ok, channel="main")
+    p = startguard.pending(store.path.parent, here)
+    assert (p["old"], p["new"], p["starts"]) == (old, new, 0)
+
+    assert startguard.begin(store.path.parent, here) == "probation"  # one start counted, then interrupted again
+    store.set_setting(selfupdate.PENDING, json.dumps({"old": old, "new": new, "deps": False,
+                                                      "at": time.time() - selfupdate.PENDING_STALE_S - 1}))
+    selfupdate.update(store, here, check=ok, channel="main")
+    assert startguard.pending(store.path.parent, here)["starts"] == 1
+
+
+def test_no_second_move_until_a_dashboard_has_served_on_the_first(repos, monkeypatch):
+    """Otherwise a bad start would go back to a commit nothing ever served on."""
+    dev, here, store = repos
+    monkeypatch.setattr(selfupdate, "CHECK_EVERY_H", -1)
+    first = commit(dev, "app.py", "v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    assert selfupdate.update(store, here, check=ok, channel="main").status == "updated"
+    second = commit(dev, "app.py", "v3\n")
+    git(dev, "push", "-q", "origin", "main")
+    out = selfupdate.update(store, here, check=ok, channel="main")
+    assert out.status == "skipped" and "hasn't started on" in out.detail and selfupdate.head(here) == first
+
+    assert startguard.begin(store.path.parent, here) == "probation" and startguard.confirm(store.path.parent, here)
+    assert selfupdate.update(store, here, check=ok, channel="main").status == "updated"
+    assert selfupdate.head(here) == second
+
+
+def test_a_move_no_dashboard_serves_on_for_two_days_does_not_hold_updates_for_good(repos, monkeypatch):
+    """A machine that runs the daily refresh but no dashboard; and a person may always move on."""
+    dev, here, store = repos
+    monkeypatch.setattr(selfupdate, "CHECK_EVERY_H", -1)
+    commit(dev, "app.py", "v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    selfupdate.update(store, here, check=ok, channel="main")
+    third = commit(dev, "app.py", "v3\n")
+    git(dev, "push", "-q", "origin", "main")
+    assert selfupdate.update(store, here, force=True, check=ok, channel="main").status == "updated"
+    fourth = commit(dev, "app.py", "v4\n")
+    git(dev, "push", "-q", "origin", "main")
+    folder = store.path.parent
+    rec = startguard.read(folder)
+    rec["pending"]["at"] = time.time() - selfupdate.HOLD_UNCONFIRMED_H * 3600 - 60
+    startguard.write(folder, rec)
+    assert selfupdate.update(store, here, check=ok, channel="main").status == "updated"
+    assert selfupdate.head(here) == fourth != third
+
+
+@pytest.mark.parametrize("at", [9e18, "soon", None, True])
+def test_a_going_back_dated_in_the_future_does_not_hide_newer_outcomes(repos, at):
+    dev, here, store = repos
+    folder = store.path.parent
+    rec = startguard.read(folder)
+    startguard._remember(rec, {"commit": "a" * 40, "old": "b" * 40, "why": "it crashed", "at": at})
+    startguard.write(folder, rec)
+    store.set_setting(selfupdate.STATUS, json.dumps({"status": "current", "detail": "fine", "at": time.time(),
+                                                     "channel": "releases"}))
+    assert selfupdate.last_status(store)["detail"] == "fine"
+
+
+def test_a_tag_first_seen_unsigned_and_then_signed_is_refused_as_moved(repos):
+    """What a release name first pointed at is what it is: a lightweight tag replaced by a signed one is a person's
+    to sort out (it may be a mistake), never installed on its own."""
     dev, here, store = repos
     v2 = commit(dev, "app.py", "v2\n")
     git(dev, "push", "-q", "origin", "main")
     tag(dev, "v2.0.0", how="lightweight")
     assert release(store, here).status == "failed"
-    # Maintainer replaces the accidental lightweight tag with a properly signed release tag: it must succeed.
     tag(dev, "v2.0.0", how="signed")
     out = release(store, here)
-    assert out.status == "updated" and out.new == v2 and selfupdate.head(here) == v2
+    assert out.status == "failed" and "v2.0.0 was moved" in out.detail and selfupdate.head(here) != v2
+
+
+def test_a_name_first_seen_on_another_line_and_swapped_after_the_wait_is_refused(repos, monkeypatch):
+    """A name parked on a commit that isn't ahead of this one (skipped, nothing said), then, once its wait has run
+    down, moved onto a signed release: it must not install straight away with the wait already served."""
+    monkeypatch.setattr(selfupdate, "CHECK_EVERY_H", -1)  # every call is the daily check
+    dev, here, store = repos
+    side = git(dev, "commit-tree", "-m", "elsewhere", git(dev, "rev-parse", "HEAD^{tree}"))
+    tag(dev, "v9.0.0", at=side)
+    assert selfupdate.update(store, here, check=ok).status == "current"
+    at = json.loads(store.setting(selfupdate.SEEN_AT))
+    at["v9.0.0"] -= (selfupdate.DELAY_HOURS + 1) * 3600
+    store.set_setting(selfupdate.SEEN_AT, json.dumps(at))
+    tag(dev, "v9.0.0", at=commit(dev, "app.py", "v9\n"))
+    git(dev, "push", "-q", "origin", "main")
+    out = selfupdate.update(store, here, check=ok)
+    assert out.status == "failed" and "v9.0.0 was moved" in out.detail and selfupdate.head(here) != out.new
+
+
+def test_an_old_release_moved_forward_is_refused_when_the_checkout_is_past_it(repos, monkeypatch):
+    """First seen behind this checkout (skipped as older), then re-signed onto a commit ahead of it."""
+    monkeypatch.setattr(selfupdate, "CHECK_EVERY_H", -1)  # every call is the daily check
+    dev, here, store = repos
+    tag(dev, "v1.0.0")
+    past = commit(dev, "app.py", "v1.0.1-dev\n")
+    git(dev, "push", "-q", "origin", "main")
+    assert selfupdate.update(store, here, check=ok, channel="main").new == past  # no tag on this commit
+    assert startguard.begin(store.path.parent, here) == "probation" and startguard.confirm(store.path.parent, here)
+    out = selfupdate.update(store, here, check=ok)
+    assert out.status == "current" and selfupdate.head(here) == past  # v1.0.0 is behind: seen, not installed
+    tag(dev, "v1.0.0", at=commit(dev, "app.py", "v1.0.0 again, re-signed\n"))
+    git(dev, "push", "-q", "origin", "main")
+    out = selfupdate.update(store, here, check=ok)
+    assert out.status == "failed" and "v1.0.0 was moved" in out.detail and selfupdate.head(here) == past
 
 
 def test_resume_keeps_pending_when_rollback_fails_and_is_pending_tracks_live_journal(repos, monkeypatch):
@@ -519,3 +811,148 @@ def test_resume_keeps_pending_when_rollback_fails_and_is_pending_tracks_live_jou
     out = selfupdate.update(store, here, check=lambda root, deps: "ImportError")
     assert out.status == "failed" and "going back" in out.detail
     assert store.setting(selfupdate.PENDING)  # journal kept so the next update retries the rollback
+
+
+@pytest.mark.parametrize("journal", ['[1, 2]', '"x"', '{"at": "soon"}', '{"at": null}', '{"at": 9e999}', '{"at": 4e9}'])
+def test_a_garbled_journal_is_not_pending_and_does_not_stop_updates(repos, journal):
+    dev, here, store = repos
+    store.set_setting(selfupdate.PENDING, journal)
+    assert selfupdate.is_pending(store) is False
+    new = commit(dev, "app.py", "v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    out = selfupdate.update(store, here, check=ok, channel="main")
+    assert out.status == "updated" and selfupdate.head(here) == new
+
+
+def test_an_update_does_not_start_on_a_nearly_full_disk(repos, monkeypatch):
+    import collections
+    import shutil
+
+    dev, here, store = repos
+    tag(dev, "v1.1.0", at=commit(dev, "app.py", "v2\n"))
+    git(dev, "push", "-q", "origin", "main")
+    before = selfupdate.head(here)
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(10**12, 10**12 - 300 * 2**20, 300 * 2**20))
+    out = release(store, here)  # even by hand: running out halfway is worse than waiting
+    assert out.status == "skipped" and "only 300 MB free" in out.detail and selfupdate.head(here) == before
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(10**12, 0, 10**12))
+    assert release(store, here).status == "updated"
+
+
+def _fake_scanner(monkeypatch, tmp_path, report=None, rc=1):
+    """osv-scanner as a stand-in: what it was asked to scan, and the report it gives back."""
+    scanner = tmp_path / "osv-scanner"
+    scanner.write_text("")
+    monkeypatch.setattr(selfupdate, "_scanner", lambda: scanner)
+    real, seen = selfupdate.proc.run, []
+
+    def run(argv, *a, **kw):
+        if argv[0] != str(scanner):
+            return real(argv, *a, **kw)
+        folder = Path(argv[-1])
+        seen.append((list(argv), sorted(p.name for p in folder.iterdir()), (folder / "uv.lock").read_text()))
+        out = report if isinstance(report, str) else json.dumps(report) if report is not None else ""
+        return selfupdate.proc.Result(tuple(argv), rc, out, "boom")
+
+    monkeypatch.setattr(selfupdate.proc, "run", run)
+    return seen
+
+
+def _report(*vulns):
+    return {"results": [{"source": {"path": "uv.lock"}, "packages": [
+        {"package": {"name": name, "version": version, "ecosystem": "PyPI"}, "vulnerabilities": [{"id": vid, "aliases": aliases}]}
+        for name, version, vid, aliases in vulns]}]}
+
+
+def test_an_update_whose_lockfile_installs_malware_is_refused(repos, monkeypatch, tmp_path):
+    dev, here, store = repos
+    old = selfupdate.head(here)
+    new = commit(dev, "uv.lock", "evil lock\n")
+    commit(dev, "osv-scanner.toml", "[[IgnoredVulns]]\nid = 'MAL-2026-1'\n")  # config the commit ships is not read
+    git(dev, "push", "-q", "origin", "main")
+    seen = _fake_scanner(monkeypatch, tmp_path, _report(("requests", "2.0", "GHSA-x", []),
+                                                         ("reqeusts", "1.0", "PYSEC-1", ["MAL-2026-1"])))
+    out = selfupdate.update(store, here, force=True, check=ok, channel="main")
+    assert out.status == "failed" and "reqeusts 1.0" in out.detail and "malicious" in out.detail
+    assert "requests 2.0" not in out.detail
+    assert selfupdate.head(here) == old and not store.setting(selfupdate.PENDING)
+    argv, files, lock = seen[0]
+    assert argv[1:5] == ["scan", "source", "--format", "json"] and files == ["uv.lock"] and lock == "evil lock\n"
+    assert new != selfupdate.head(here)
+
+
+def test_other_advisories_in_the_new_lockfile_are_only_noted(repos, monkeypatch, tmp_path):
+    dev, here, store = repos
+    new = commit(dev, "uv.lock", "lock v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    _fake_scanner(monkeypatch, tmp_path, _report(("requests", "2.0", "GHSA-x", ["CVE-1"]), ("idna", "3", "GHSA-y", [])))
+    out = selfupdate.update(store, here, force=True, check=ok, channel="main")
+    assert out.status == "updated" and out.new == new
+    assert "advisories for 2 package(s), none reported as malicious" in out.detail
+
+
+@pytest.mark.parametrize("rc, report, said", [(2, None, "exited 2"), (1, "not json", "could not be read"),
+                                              (1, {"results": [{"packages": [{"vulnerabilities": [{"id": "GHSA-1"}]}]}]}, "could not be read")])
+def test_a_scanner_that_fails_holds_an_update_until_it_works_or_you_ask(repos, monkeypatch, tmp_path, rc, report, said):
+    dev, here, store = repos
+    old = selfupdate.head(here)
+    new = commit(dev, "uv.lock", "lock v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    seen = _fake_scanner(monkeypatch, tmp_path, report, rc)
+    out = selfupdate.update(store, here, check=ok, channel="main")  # what it would have found is unknown
+    assert out.status == "failed" and "update held" in out.detail and said in out.detail
+    assert selfupdate.head(here) == old and not store.setting(selfupdate.PENDING) and len(seen) == 1
+    out = selfupdate.update(store, here, force=True, check=ok, channel="main")  # `bosun self-update`
+    assert out.status == "updated" and out.new == new and "not checked" in out.detail and said in out.detail
+
+
+def test_a_commit_refused_for_malware_stays_refused_until_a_scan_finds_it_clean(repos, monkeypatch, tmp_path):
+    dev, here, store = repos
+    old = selfupdate.head(here)
+    new = commit(dev, "uv.lock", "evil lock\n")
+    git(dev, "push", "-q", "origin", "main")
+    _fake_scanner(monkeypatch, tmp_path, _report(("reqeusts", "1.0", "MAL-2026-1", [])))
+    assert selfupdate.update(store, here, force=True, check=ok, channel="main").status == "failed"
+    # next time osv-scanner is gone, or can't reach OSV: the refusal holds, even by hand
+    monkeypatch.setattr(selfupdate, "_scanner", lambda: tmp_path / "gone")
+    out = selfupdate.update(store, here, force=True, check=ok, channel="main")
+    assert out.status == "failed" and "stays refused" in out.detail and "no osv-scanner" in out.detail
+    _fake_scanner(monkeypatch, tmp_path, None, 2)
+    out = selfupdate.update(store, here, force=True, check=ok, channel="main")
+    assert out.status == "failed" and "stays refused" in out.detail and selfupdate.head(here) == old
+    # the advisory was withdrawn: a clean scan installs it and forgets the refusal
+    _fake_scanner(monkeypatch, tmp_path, {"results": []}, 0)
+    out = selfupdate.update(store, here, force=True, check=ok, channel="main")
+    assert out.status == "updated" and out.new == new and new not in selfupdate._malware_commits(store)
+
+
+def test_a_failed_diff_still_scans_the_lockfile(repos, monkeypatch, tmp_path):
+    dev, here, store = repos
+    old = selfupdate.head(here)
+    commit(dev, "uv.lock", "evil lock\n")
+    git(dev, "push", "-q", "origin", "main")
+    seen = _fake_scanner(monkeypatch, tmp_path, _report(("reqeusts", "1.0", "MAL-2026-1", [])))
+    real = selfupdate.git
+
+    def flaky(root, *args, **kw):
+        if args[:1] == ("diff",):
+            return selfupdate.proc.Result(("git", *args), 128, "", "fatal: bad object")
+        return real(root, *args, **kw)
+
+    monkeypatch.setattr(selfupdate, "git", flaky)
+    out = selfupdate.update(store, here, force=True, check=ok, channel="main")
+    assert out.status == "failed" and "malicious" in out.detail and len(seen) == 1 and selfupdate.head(here) == old
+
+
+def test_no_scanner_is_said_and_an_unchanged_lockfile_is_not_scanned(repos, monkeypatch, tmp_path):
+    dev, here, store = repos
+    commit(dev, "uv.lock", "lock v2\n")
+    git(dev, "push", "-q", "origin", "main")
+    out = selfupdate.update(store, here, force=True, check=ok, channel="main")
+    assert out.status == "updated" and "not checked" in out.detail and "no osv-scanner" in out.detail
+    seen = _fake_scanner(monkeypatch, tmp_path, _report(("x", "1", "MAL-1", [])))
+    commit(dev, "app.py", "v3\n")
+    git(dev, "push", "-q", "origin", "main")
+    out = selfupdate.update(store, here, force=True, check=ok, channel="main")
+    assert out.status == "updated" and not seen and "advisories" not in out.detail

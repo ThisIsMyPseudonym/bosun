@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import httpx
-import pytest
 
 from bosun import appupdaters, proc
 from bosun.appupdaters import CONFIRMED, MAU, NOT_OFFERED, UNKNOWN, Asker, Verdict, appcast_latest, parse_msupdate_list
