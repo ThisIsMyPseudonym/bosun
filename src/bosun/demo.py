@@ -62,7 +62,10 @@ def items() -> list[Item]:
     plan_vuln = _vuln(3, "Path traversal when unpacking an archive", 8.1, epss=0.12)
     return [
         # the project that has something exploited
-        _dep(ORCHARD, "npm", "tiny-parse", "2.3.1", "2.3.4", fixed=[exploited], spec="^2.3.0"),
+        _dep(ORCHARD, "npm", "tiny-parse", "2.3.1", "2.3.4", fixed=[exploited], spec="^2.3.0",
+             summary=Summary("Fixes the prototype pollution bug; nothing else changes",
+                             security_fixes=("prototype pollution",), upgrade_value="high", migration_effort="none",
+                             generated_by="demo")),
         _dep(ORCHARD, "npm", "url-sanitize-lite", "1.4.0", "2.0.2", fixed=[plan_vuln], spec="^1.4.0",
              summary=Summary("Major release: the options object was renamed", breaking_changes=("options renamed",),
                              upgrade_value="high", migration_effort="high", generated_by="demo")),
@@ -129,6 +132,65 @@ def items() -> list[Item]:
     ]
 
 
+HOUR = 3600
+HAIKU, SONNET = "claude-haiku-4-5", "claude-sonnet-4-6"
+
+# (hours ago, purpose, model alias, model id, input, output, cache read, cost in dollars, outcome, item key)
+# A month of made-up Claude calls: release-note summaries (many answered from Bosun's own cache), a few Ask Bosun
+# questions and two branch + test fixes. The total stays well inside the default budgets.
+_SUMMARIES = [(h, "summarize", "haiku", HAIKU, 2400, 310, 1800, cost, "ok", key) for h, cost, key in (
+    (2, 0.014, "brew-cask:firefox"), (3, 0.011, "brew:curl"), (5, 0.019, "brew:python@3.12"),
+    (30, 0.012, "brew:sqlite"), (54, 0.016, "brew:imagemagick"), (78, 0.010, "brew:tmux"), (102, 0.013, "brew:fd"),
+    (150, 0.018, "runtime:node@20"), (198, 0.012, "brew:bat"), (246, 0.011, "brew:htop"), (318, 0.015, "brew:wget"),
+    (390, 0.017, "brew-cask:blender"), (462, 0.012, "brew-cask:obsidian"), (534, 0.014, "brew-cask:vlc"),
+    (606, 0.013, "brew:ripgrep"), (678, 0.016, "brew-cask:inkscape"))]
+_CACHED = [(h, "summarize", "haiku", HAIKU, 0, 0, 0, 0.0, "cached", key) for h, key in (
+    (1, "brew:jq"), (4, "brew:tree"), (26, "brew:curl"), (50, "brew:sqlite"), (74, "brew:fd"), (122, "brew:bat"),
+    (170, "brew:htop"), (266, "brew:wget"), (362, "brew-cask:vlc"), (458, "brew:ripgrep"))]
+_OTHER = [
+    (1, "assistant", "sonnet", SONNET, 5200, 640, 9800, 0.074, "ok", ""),
+    (6, "explain", "haiku", HAIKU, 3100, 420, 2200, 0.018, "ok", "repo:npm:tiny-parse@" + ORCHARD),
+    (20, "fix", "sonnet", SONNET, 21000, 3800, 64000, 0.46, "ok", "repo:npm:markdown-lite@" + TIDEPOOL),
+    (96, "assistant", "sonnet", SONNET, 4800, 520, 8900, 0.066, "ok", ""),
+    (220, "assistant", "sonnet", SONNET, 6100, 710, 11200, 0.088, "ok", ""),
+    (300, "fix", "sonnet", SONNET, 18500, 3100, 52000, 0.39, "ok", "repo:PyPI:demo-yaml-reader@" + SKETCH),
+    (410, "explain", "haiku", HAIKU, 2900, 380, 2100, 0.016, "ok", "repo:npm:router-lite@" + TIDEPOOL),
+    (560, "assistant", "sonnet", SONNET, 5500, 600, 10100, 0.071, "ok", ""),
+]
+
+
+def _seed_usage(db, now: float) -> None:
+    """Made-up Claude calls for the AI usage page, so its totals, chart and budgets have something to show."""
+    for hours, purpose, alias, model, tin, tout, tread, cost, outcome, key in _SUMMARIES + _CACHED + _OTHER:
+        models = {model: {"input": tin, "output": tout, "cache_read": tread, "cache_write": 0, "cost_usd": cost}}
+        db.execute("INSERT INTO llm_calls (ts, purpose, item_key, model, models, input_tokens, output_tokens, "
+                   "cache_read_tokens, cost_usd, duration_ms, turns, prompt_chars, outcome, attrs) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (now - hours * HOUR, purpose, key, alias, json.dumps(models if outcome != "cached" else {}),
+                    tin, tout, tread, cost, 0 if outcome == "cached" else 4200 + tout * 3, 1 if purpose != "fix" else 9,
+                    tin * 4, outcome, json.dumps({"source": "demo"})))
+
+
+def _seed_recent(db, now: float) -> None:
+    """A few finished updates and one Claude Code fix for Today's Recent card. None of them is in the list any more:
+    updated means it is no longer waiting."""
+    for hours, key, frm, to, actor in ((0.5, "brew:git", "2.47.0", "2.47.1", "autopilot"),
+                                       (0.6, "brew:ffmpeg", "7.1", "7.1.1", "autopilot"),
+                                       (3, "brew-cask:slack", "4.41.97", "4.41.105", "user"),
+                                       (26, "brew:node", "23.2.0", "23.3.0", "autopilot")):
+        package = key.split(":", 1)[1]
+        db.execute("INSERT INTO jobs (item_key, argv, status, output, started, finished, actor) VALUES (?,?,?,?,?,?,?)",
+                   (key, json.dumps(["brew", "upgrade", package]), "succeeded", f"{package} {frm} -> {to}",
+                    now - hours * HOUR - 40, now - hours * HOUR, actor))
+    key = "repo:npm:markdown-lite@" + TIDEPOOL
+    db.execute("INSERT INTO fixes (item_key, project, status, branch, worktree, result, started, finished, actor) "
+               "VALUES (?,?,?,?,?,?,?,?,?)",
+               (key, TIDEPOOL, "fixed", "bosun/fix-markdown-lite", "/Users/demo/code/tidepool-web",
+                json.dumps({"keys": [key], "summary": "Updated markdown-lite to 3.0.2 and the two call sites that "
+                            "used the removed option; the tests pass", "tests": "passed"}),
+                now - 20 * HOUR - 600, now - 20 * HOUR, "user"))
+
+
 def seed(store: Store, now: float | None = None) -> int:
     """Write one snapshot of the made-up computer, with a coverage line and a name. Returns the snapshot id."""
     now = time.time() if now is None else now
@@ -140,6 +202,8 @@ def seed(store: Store, now: float | None = None) -> int:
             if d.get("available") and d["key"] != WAITING:
                 db.execute("INSERT OR REPLACE INTO offers (item_key, version, first_seen) VALUES (?,?,?)",
                            (d["key"], d["available"], now - 10 * DAY))
+        _seed_usage(db, now)
+        _seed_recent(db, now)
     store.set_setting("machine_name", MACHINE_NAME)
     store.set_setting("coverage_mac_apps", json.dumps({
         "apps": 52, "unchecked": ["Demo Calculator Pro", "Pocket Ledger", "Small Tools Suite", "Tidy Desk"]}))

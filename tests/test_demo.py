@@ -77,3 +77,22 @@ def test_the_demo_never_starts_on_a_port_something_else_holds(tmp_path, monkeypa
         assert cli.cmd_demo(None, s) == 1
     said = capsys.readouterr()
     assert f"Port {taken} is in use" in said.err and "login?code=" not in said.out
+
+
+def test_demo_ai_usage_shows_made_up_spend_inside_the_budgets(client):
+    usage = client.get("/api/usage?days=30").json()
+    totals = usage["totals"]
+    assert totals["calls"] >= 20 and 0 < totals["cost_usd"] < 10
+    assert {p["purpose"] for p in usage["by_purpose"]} >= {"summarize", "assistant", "fix"}
+    assert usage["cache"]["summaries_from_cache"] > 0
+    day = client.get("/api/usage?days=1").json()["totals"]
+    assert 0 < (day["cost_usd"] or 0) < 10  # inside the demo's 24-hour budget
+
+
+def test_demo_today_has_recent_updates_and_a_fix(client):
+    body = client.get("/api/state").json()
+    jobs, fixes = client.get("/api/jobs").json(), client.get("/api/fixes").json()
+    assert any(j["status"] == "succeeded" for j in jobs)
+    assert any(f["status"] == "fixed" for f in fixes)
+    current = {i["key"] for i in body["snapshot"]["items"]}
+    assert not {j["item_key"] for j in jobs if j["status"] == "succeeded"} & current  # updated means gone from the list
