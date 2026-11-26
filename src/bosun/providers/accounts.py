@@ -3,6 +3,8 @@
 Every installed CLI has its default login: its own config folder, the one a terminal uses. A CLI with a
 login-folder variable (`ProviderSpec.home_env`) may have added logins, each a folder the CLI is pointed at
 through that variable. A login can be excluded (one kept for work, say) and is then never routed to.
+Every login — including the default one — unsets its CLI's `override_env` (API keys, auth tokens, custom base URLs
+and cloud-backend flags) so a subscription bucket never silently bills an API key or routes to another endpoint.
 Bosun never opens a file in a login folder and never reads a token: the folder is only ever an environment value.
 The list is stored in `settings` as JSON and cleaned on every read (Coho's `cleanCliAccounts`), so a hand-edited
 or older value can never put a malformed login in front of a CLI.
@@ -137,12 +139,11 @@ def logins(store: Store, usable: bool = False) -> tuple[Login, ...]:
 
 def login_env(login: Login) -> tuple[dict[str, str], tuple[str, ...]]:
     """What a login adds to its CLI's environment, and the variables its call must not inherit: an added login's
-    folder in the CLI's variable, with the keys that would sign the CLI in some other way removed. Nothing for a
-    default login (Coho's `accountEnv`). Pass both to `proc.run(env=..., unset=...)`."""
+    folder in the CLI's variable, and on every login (default included) the keys and endpoint overrides that would
+    bill an API key or route away from the subscription. Pass both to `proc.run(env=..., unset=...)`."""
     s = CATALOG[login.provider]
-    if login.id == DEFAULT or not login.home or s.home_env is None:
-        return {}, ()
-    return {s.home_env: login.home}, s.override_env
+    env = {s.home_env: login.home} if login.id != DEFAULT and login.home and s.home_env is not None else {}
+    return env, s.override_env
 
 
 # Grok subcommands and flags that start no leader process, so take no --leader-socket.

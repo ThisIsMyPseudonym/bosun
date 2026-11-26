@@ -20,6 +20,12 @@ def test_every_cli_has_a_spec_with_its_login_folder_variable():
         "claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "gemini": "GEMINI_CLI_HOME", "grok": "GROK_HOME",
         "antigravity": None, "muse": None}
     assert "ANTHROPIC_API_KEY" in spec("claude").override_env and spec("antigravity").override_env == ()
+    assert {"ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY"} <= set(spec("claude").override_env)
+    assert "OPENAI_BASE_URL" in spec("codex").override_env
+    assert {"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_PROJECT"} <= set(spec("gemini").override_env)
+    assert "XAI_API_KEY" in spec("grok").override_env and "META_API_KEY" in spec("muse").override_env
     assert spec("antigravity").binary == "agy" and spec("claude").light_model == "haiku"
     assert spec("claude").windows == "output" and spec("codex").windows == "output"
     assert spec("antigravity").windows == "probe" and spec("gemini").windows == "estimated"

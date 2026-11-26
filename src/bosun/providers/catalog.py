@@ -2,7 +2,9 @@
 
 A CLI is offered a job only when it has every capability the job needs. Capabilities are what Bosun can make the
 CLI do safely, not what the CLI can do at all: `mcp` means Bosun can hand it an MCP server for one call without
-touching the user's own CLI settings, which is verified for Claude and Codex only.
+touching the user's own CLI settings, which is verified for Claude and Codex only. Each spec's `override_env` lists
+the API-key and endpoint-override variables unset on every login (default included) so a subscription bucket never
+silently bills an API key or routes to another backend.
 """
 
 from __future__ import annotations
@@ -56,7 +58,7 @@ class ProviderSpec:
     help_args: tuple[str, ...]  # what prints the help that lists the lockdown flags
     lockdown_flags: tuple[str, ...]  # every flag Bosun's calls rely on; a version whose help lacks one gets no prompt
     home_env: str | None  # the variable that moves the CLI's config folder, and so its login
-    override_env: tuple[str, ...]  # variables that would sign in some other way: an added login's call drops them
+    override_env: tuple[str, ...]  # API keys and endpoint overrides dropped on every login (default included)
     default_home: str | None  # the default login's folder (never opened by Bosun)
     light_model: str  # "" means the CLI's own default
     strong_model: str
@@ -99,17 +101,21 @@ def _catalog(*specs: ProviderSpec) -> Mapping[str, ProviderSpec]:
 CATALOG: Mapping[str, ProviderSpec] = _catalog(
     ProviderSpec("claude", "Claude Code", "claude", frozenset({C.TEXT, C.JSON, C.SANDBOXED_AGENT, C.MCP, C.VISION}),
                  HELP, CLAUDE_FLAGS, "CLAUDE_CONFIG_DIR",
-                 ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), "~/.claude",
+                 ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                  "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"), "~/.claude",
                  "haiku", "sonnet", "output", ("api.anthropic.com",), fixer_flags=CLAUDE_FIXER_FLAGS),
     ProviderSpec("codex", "Codex", "codex", frozenset({C.TEXT, C.JSON, C.VISION}), EXEC_HELP, CODEX_FLAGS,
-                 "CODEX_HOME", ("CODEX_API_KEY", "OPENAI_API_KEY"), "~/.codex",
+                 "CODEX_HOME", ("CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"), "~/.codex",
                  "gpt-5.6-luna", "gpt-5.6-terra", "output", ("chatgpt.com", "api.openai.com"),
                  features_args=("features", "list", "-c", 'web_search="disabled"'),
                  lockdown_features=CODEX_DISABLED_FEATURES),
     ProviderSpec("gemini", "Gemini CLI", "gemini", ONE_SHOT, HELP, GEMINI_FLAGS, "GEMINI_CLI_HOME",
-                 ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "~/.gemini", "gemini-3.8-flash", "gemini-3.1-pro", "estimated",
+                 ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI",
+                  "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT"), "~/.gemini", "gemini-3.8-flash",
+                 "gemini-3.1-pro", "estimated",
                  ("generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com", "oauth2.googleapis.com")),
-    ProviderSpec("grok", "Grok", "grok", ONE_SHOT, HELP, GROK_FLAGS, "GROK_HOME", ("XAI_API_KEY",), "~/.grok",
+    ProviderSpec("grok", "Grok", "grok", ONE_SHOT, HELP, GROK_FLAGS, "GROK_HOME",
+                 ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY"), "~/.grok",
                  "grok-4.7-build-fast", "grok-4.7", "estimated", ("api.x.ai",)),
     # Antigravity holds one login per machine; its Argon model draws far more quota, so both tiers use Flash.
     # Neither `agy help` nor `agy changelog` documents a per-call flag or `--settings` key that disables built-in
@@ -117,7 +123,9 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
     ProviderSpec("antigravity", "Antigravity", "agy", ONE_SHOT, HELP, AGY_FLAGS, None, (), None,
                  "gemini-3.8-flash", "gemini-3.8-flash", "probe",
                  ("cloudcode-pa.googleapis.com", "oauth2.googleapis.com"), locked_down=False),
-    ProviderSpec("muse", "Muse", "muse", ONE_SHOT, EXEC_HELP, MUSE_FLAGS, None, (), None, "", "", "estimated", ()),
+    # `muse login --help`: META_API_KEY always takes priority over the account login.
+    ProviderSpec("muse", "Muse", "muse", ONE_SHOT, EXEC_HELP, MUSE_FLAGS, None, ("META_API_KEY",), None, "", "",
+                 "estimated", ()),
 )
 
 

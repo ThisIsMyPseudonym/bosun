@@ -87,13 +87,19 @@ def test_unset_beats_a_value_passed_in_env(monkeypatch):
     assert r.stdout.strip() == "None"
 
 
-def test_an_added_login_points_the_cli_at_its_folder_and_drops_other_sign_ins():
+def test_every_login_drops_override_keys_and_added_logins_point_at_their_folder():
+    from bosun.providers.catalog import spec
+
     work = accounts.Login("claude", "work", "Work", "/Users/me/.claude-work", False, "claude")
     env, unset = accounts.login_env(work)
     assert env == {"CLAUDE_CONFIG_DIR": "/Users/me/.claude-work"}
-    assert set(unset) == {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
-    assert accounts.login_env(accounts.default("claude", "claude")) == ({}, ())
-    assert accounts.login_env(accounts.Login("muse", "x1", "X", "/m", False, "muse")) == ({}, ())  # no variable
+    assert set(unset) == set(spec("claude").override_env)
+    # Default logins also drop override_env so a subscription bucket never silently bills an API key
+    assert accounts.login_env(accounts.default("claude", "claude")) == ({}, spec("claude").override_env)
+    assert accounts.login_env(accounts.default("codex", "codex")) == ({}, spec("codex").override_env)
+    assert accounts.login_env(accounts.default("muse", "muse")) == ({}, ("META_API_KEY",))
+    assert accounts.login_env(accounts.Login("muse", "x1", "X", "/m", False, "muse")) == ({}, ("META_API_KEY",))
+    assert accounts.login_env(accounts.default("antigravity", "agy")) == ({}, ())
 
 
 def test_an_added_grok_login_gets_its_own_leader_socket():
