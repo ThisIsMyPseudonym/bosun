@@ -251,3 +251,20 @@ def test_a_read_only_store_or_none_still_gets_an_answer(tmp_path, monkeypatch):
     with Store(tmp_path / "db.sqlite", read_only=True) as ro:
         assert contract.check(ro, "claude", "/bin/claude").ok
     assert contract.check(None, "codex", "/bin/codex").missing  # Claude's help lacks Codex's flags
+
+
+@pytest.mark.parametrize("raw_value", [
+    "{not json",
+    "[]",
+    '{"ok": false, "readable": false, "at": "yesterday"}',
+    '{"ok": true, "readable": true, "at": "not-a-number"}',
+    '{"ok": true, "at": 1000.0, "missing": "not-a-list"}',
+])
+def test_a_corrupt_cache_row_is_treated_as_absent(store, monkeypatch, raw_value):
+    with store._tx(write=True) as db:
+        db.execute("INSERT OR REPLACE INTO cache VALUES (?,?,?,?)",
+                   (contract.CACHE_KIND, "claude|2.1.332", raw_value, 1000.0))
+    run = help_runner()
+    monkeypatch.setattr(proc, "run", run)
+    got = contract.check(store, "claude", "/bin/claude", now=lambda: 1010.0)
+    assert got.ok and sum(1 for c in run.calls if c[-1] == "--help") == 1

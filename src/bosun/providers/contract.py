@@ -8,6 +8,8 @@ prompt and the dashboard names the flag. No model call is ever spent finding out
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import re
 import time
@@ -133,10 +135,19 @@ def _judge(s: ProviderSpec, version: str, binary: str) -> tuple[ContractStatus, 
 def _cached(store: Store | None, key: str, at: float) -> dict[str, Any] | None:
     if store is None:
         return None
-    found = store.cache_get(CACHE_KIND, key)
+    try:
+        found = store.cache_get(CACHE_KIND, key)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
     if not isinstance(found, dict):
         return None
-    if not found.get("readable", True) and at - float(found.get("at") or 0) >= UNREADABLE_TTL:
+    raw_at = found.get("at")
+    if isinstance(raw_at, bool) or not isinstance(raw_at, (int, float)) or not math.isfinite(raw_at):
+        return None
+    raw_missing = found.get("missing")
+    if raw_missing is not None and not isinstance(raw_missing, list):
+        return None
+    if not found.get("readable", True) and at - float(raw_at) >= UNREADABLE_TTL:
         return None  # an unreadable help may be a busy machine, not a verdict on the version
     return found
 
