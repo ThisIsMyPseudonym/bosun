@@ -1,6 +1,6 @@
 # Error triage: a cause and one next step for every failure
 
-Status: design, draft 2026-11-25. Project 2 of 4. Builds on
+Status: design, agreed 2026-11-25. Project 2 of 4. Builds on
 [the provider layer](2026-11-25-ai-providers-design.md) (project 1) and changes none of it.
 
 ## Why
@@ -257,19 +257,15 @@ Test first, 80% coverage or better.
 3. Automatic triage: the tick, dedup, daily limit, `waiting_quota`; then Today, notifications, `diagnose`.
 4. Eval set and live evals.
 
-## Open questions for Matt
+## Decisions (agreed 2026-11-25)
 
-1. **Automatic model triage on by default?** Recommend on, light model, 10 a day, background only below 75%.
-   Rules run either way.
-2. **Should a verdict change Autopilot?** For example, stop retrying an item whose verdict says `needs_person`.
-   Recommend no in this project: `_NEEDS_PERSON` already does that by rule, and verdict-driven actions belong to
-   project 3's automations with their approval model.
-3. **Share one verdict across items with the same signature?** Recommend yes, with the step re-checked per item;
-   the alternative costs a model call per item in a burst.
-4. **Rules in code or in runbook front matter?** Recommend code (`triage/rules.py`), tested against the runbooks,
-   so a typo in a Markdown file can't change a verdict.
-5. **Send output to a provider for runs you didn't watch?** Redacted output already goes to Claude when you ask
-   Bosun about a run. Recommend the same for automatic triage, with the off switch above.
+| Question | Decision |
+|---|---|
+| Automatic model triage on by default? | Yes: light model, at most 10 a day, background only below 75%. Rules run either way. Owner-only off switch under AI usage. |
+| Should a verdict change Autopilot? | Not in this project. `_NEEDS_PERSON` already stops retries by rule; verdict-driven actions belong to project 3, with approval. |
+| Share one verdict across items with the same signature? | Yes, with the next step re-checked for each item. |
+| Rules in code or in runbook front matter? | Code (`triage/rules.py`), tested against the runbooks. |
+| Send redacted output to a provider for runs nobody watched? | Yes, as Ask Bosun does; turning automatic triage off keeps output on the machine unless you click. |
 
 ## Future work
 
