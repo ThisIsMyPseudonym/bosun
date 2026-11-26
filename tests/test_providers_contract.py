@@ -107,3 +107,36 @@ def test_a_dropped_flag_fails_closed_and_names_it(store, monkeypatch):
     monkeypatch.setattr(contract, "_versions", {})
     monkeypatch.setattr(proc, "run", help_runner(version="2.1.333"))
     assert contract.check(store, "claude", "/bin/claude").ok  # a new version is judged afresh
+
+
+@pytest.mark.parametrize("rc,text", [(124, "half a help"), (127, ""), (0, "  \n")])
+def test_unreadable_help_fails_closed_and_is_retried_after_a_minute(store, monkeypatch, rc, text):
+    clock = [1000.0]
+    run = help_runner(help_text=text, rc=rc); monkeypatch.setattr(proc, "run", run)
+    got = contract.check(store, "claude", "/bin/claude", now=lambda: clock[0])
+    assert not got.ok and got.missing == ()  # a cut-off help lists no flags; that is not a release that dropped them
+    assert got.finding == "Claude Code 2.1.332: its --help could not be read to check its safety flags"
+    clock[0] += 30
+    assert not contract.check(store, "claude", "/bin/claude", now=lambda: clock[0]).ok
+    assert sum(1 for c in run.calls if c[-1] == "--help") == 1
+    clock[0] += 31
+    monkeypatch.setattr(proc, "run", help_runner())
+    assert contract.check(store, "claude", "/bin/claude", now=lambda: clock[0]).ok
+
+
+def test_a_version_that_cannot_be_read_fails_closed_and_is_asked_again_later(store, monkeypatch):
+    clock, calls = [1000.0], []
+    monkeypatch.setattr(proc, "run", lambda argv, **kw: calls.append(argv) or proc.Result(tuple(argv), 127, "", "nope"))
+    got = contract.check(store, "claude", "/bin/claude", now=lambda: clock[0])
+    assert not got.ok and got.version is None and got.finding == "Claude Code: its --version could not be read"
+    clock[0] += 61
+    contract.check(store, "claude", "/bin/claude", now=lambda: clock[0])
+    assert len(calls) == 2  # a CLI installed a moment ago is not ignored for ten minutes
+
+
+def test_a_read_only_store_or_none_still_gets_an_answer(tmp_path, monkeypatch):
+    Store(tmp_path / "db.sqlite").close()
+    monkeypatch.setattr(proc, "run", help_runner())
+    with Store(tmp_path / "db.sqlite", read_only=True) as ro:
+        assert contract.check(ro, "claude", "/bin/claude").ok
+    assert contract.check(None, "codex", "/bin/codex").missing  # Claude's help lacks Codex's flags
