@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from bosun.providers import argv
-from bosun.providers.catalog import spec
+from bosun.providers.catalog import CATALOG, spec
 
 
 def test_claude_json_call_has_no_tools_and_reports_windows(tmp_path):
@@ -17,6 +17,7 @@ def test_claude_json_call_has_no_tools_and_reports_windows(tmp_path):
     assert a[a.index("--output-format") + 1] == "stream-json" and "--verbose" in a
     for flag in ("--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands"):
         assert flag in a
+    assert a[a.index("--permission-mode") + 1] == "dontAsk"
     assert a[a.index("--setting-sources") + 1] == "" and a[a.index("--model") + 1] == "haiku"
     assert inv.stdin == "P" and inv.env == {"DISABLE_PROMPT_CACHING": "1"}
     assert json.loads(a[a.index("--json-schema") + 1]) == {"type": "object"}
@@ -28,15 +29,24 @@ def test_a_provider_with_no_builder_is_refused(tmp_path):
         argv.build("nope", binary="x", model="m", schema={}, system="S", prompt="P", workdir=tmp_path)
 
 
-@pytest.mark.parametrize("provider", ["codex", "gemini", "grok", "antigravity", "muse"])
-def test_every_lockdown_flag_bosun_requires_is_passed(provider, tmp_path):
+@pytest.mark.parametrize("provider", list(CATALOG))
+def test_every_lockdown_flag_bosun_requires_is_passed_and_every_long_flag_is_checked(provider, tmp_path):
     inv = argv.build(provider, binary=provider, model="m", schema={"type": "object"}, system="S",
                      prompt="SECRET-PROMPT", workdir=tmp_path)
-    for flag in spec(provider).lockdown_flags:
+    lockdown = set(spec(provider).lockdown_flags)
+    for flag in lockdown:
         assert flag in inv.argv, flag
+    emitted_long = {a for a in inv.argv if a.startswith("--")}
+    assert emitted_long <= lockdown, f"{provider} emits unchecked long flags: {sorted(emitted_long - lockdown)}"
     assert not any("SECRET-PROMPT" in a for a in inv.argv)
     assert inv.argv[0] == provider and "m" in inv.argv
     assert all(f.parent == tmp_path and f.exists() for f in inv.files)
+
+
+def test_claude_fixer_only_flags_live_in_fixer_flags_not_one_shot_lockdown():
+    cl = spec("claude")
+    assert set(cl.fixer_flags) == {"--restricted", "--permission-prompts"}
+    assert not (set(cl.fixer_flags) & set(cl.lockdown_flags))
 
 
 def test_codex_reads_its_schema_from_a_file_and_the_prompt_from_stdin(tmp_path):

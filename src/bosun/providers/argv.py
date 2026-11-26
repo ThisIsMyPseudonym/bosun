@@ -57,6 +57,7 @@ def _claude(c: Call) -> Invocation:
          "--setting-sources", "",  # skip user/project settings, hooks, plugins
          "--no-session-persistence",
          "--disable-slash-commands",
+         "--permission-mode", "dontAsk",
          *_model("--model", c.model),
          "--system-prompt", c.system)
     return Invocation(a, c.prompt, dict(ONE_SHOT_ENV))

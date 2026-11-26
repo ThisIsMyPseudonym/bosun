@@ -70,9 +70,16 @@ def test_every_recorded_version_lists_every_lockdown_flag(provider, version):
     text = (FIXTURES / provider / version / "help.txt").read_text()
     assert parse_version((FIXTURES / provider / version / "version.txt").read_text()) == version
     assert missing_flags(text, spec(provider).lockdown_flags) == ()
+    assert missing_flags(text, spec(provider).fixer_flags) == ()
     if spec(provider).lockdown_features:
         features = (FIXTURES / provider / version / "features.txt").read_text()
         assert missing_features(features, spec(provider).lockdown_features) == ()
+
+
+def test_dropping_a_fixer_only_flag_does_not_block_one_shots(store, monkeypatch):
+    no_restricted = _drop_option(_drop_option(CLAUDE_HELP, "--restricted"), "--permission-prompts")
+    monkeypatch.setattr(proc, "run", help_runner(help_text=no_restricted))
+    assert contract.check(store, "claude", "/bin/claude").ok
 
 
 def test_codex_features_must_exist_and_not_be_removed(store, monkeypatch):

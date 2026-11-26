@@ -65,21 +65,25 @@ class ProviderSpec:
     locked_down: bool = True  # False: no proven per-call way to switch tools and MCP off; never gets untrusted text
     features_args: tuple[str, ...] = ()  # e.g. ("features", "list", ...) to verify feature flags exist
     lockdown_features: tuple[str, ...] = ()  # feature names passed to --disable; a version lacking one fails closed
+    fixer_flags: tuple[str, ...] = ()  # flags used only by the fixer, kept separate so one-shots aren't blocked
 
 
 CLAUDE_FLAGS = ("--tools", "--disallowedTools", "--strict-mcp-config", "--setting-sources", "--no-session-persistence",
-                "--json-schema", "--output-format", "--verbose", "--disable-slash-commands", "--restricted",
-                "--permission-prompts")
+                "--json-schema", "--output-format", "--verbose", "--disable-slash-commands", "--permission-mode",
+                "--model", "--system-prompt")
+CLAUDE_FIXER_FLAGS = ("--restricted", "--permission-prompts")
 CODEX_DISABLED_FEATURES = ("shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins")
 CODEX_FLAGS = ("--sandbox", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
                "--strict-config", "--disable", "-c", "--output-schema", "--json")
 GEMINI_FLAGS = ("--approval-mode", "--policy", "--output-format", "--allowed-mcp-server-names", "--extensions")
 GROK_FLAGS = ("--permission-mode", "--disable-web-search", "--tools", "--disallowed-tools", "--no-subagents",
-              "--no-memory", "--verbatim", "--prompt-file", "--json-schema")
+              "--no-plan", "--no-memory", "--verbatim", "--prompt-file", "--output-format", "--json-schema",
+              "--system-prompt-override")
 AGY_FLAGS = ("--sandbox", "--disable-slash-commands", "--input-format", "--output-format", "--print-timeout",
-             "--json-schema", "--mode", "--print")
-MUSE_FLAGS = ("--json", "--prompt-file", "--workspace", "--disable-shell", "--disable-write", "--disable-web-tools",
-              "--no-session-log", "--no-foreign-personal-context", "--disable-request-user-input")
+             "--json-schema", "--mode", "--model", "--print")
+MUSE_FLAGS = ("--provider", "--json", "--prompt-file", "--workspace", "--disable-shell", "--disable-write",
+              "--disable-web-tools", "--no-session-log", "--no-foreign-personal-context",
+              "--disable-request-user-input", "--output-schema", "--model")
 
 ONE_SHOT = frozenset({C.TEXT, C.JSON})
 HELP = ("--help",)
@@ -96,7 +100,7 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
     ProviderSpec("claude", "Claude Code", "claude", frozenset({C.TEXT, C.JSON, C.SANDBOXED_AGENT, C.MCP, C.VISION}),
                  HELP, CLAUDE_FLAGS, "CLAUDE_CONFIG_DIR",
                  ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"), "~/.claude",
-                 "haiku", "sonnet", "output", ("api.anthropic.com",)),
+                 "haiku", "sonnet", "output", ("api.anthropic.com",), fixer_flags=CLAUDE_FIXER_FLAGS),
     ProviderSpec("codex", "Codex", "codex", frozenset({C.TEXT, C.JSON, C.VISION}), EXEC_HELP, CODEX_FLAGS,
                  "CODEX_HOME", ("CODEX_API_KEY", "OPENAI_API_KEY"), "~/.codex",
                  "gpt-5.6-luna", "gpt-5.6-terra", "output", ("chatgpt.com", "api.openai.com"),
