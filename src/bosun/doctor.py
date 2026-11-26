@@ -162,8 +162,9 @@ def _ai_clis(probe: Probe, s: Settings) -> list[Line]:
             out.append(Line(OPTIONAL, f"{sp.label}: not found", f"{why} (see {runbook})"))
             continue
         status = probe.ai_contract(s.db_path, provider, binary)
+        detail = status.finding if status.finding.startswith(sp.label) else f"{sp.label}: {status.finding}"
         out.append(Line(OK, f"{sp.label}: {status.version}") if status.ok else
-                   Line(OPTIONAL, f"{sp.label}: {status.finding}; Bosun sends it no prompt until it passes",
+                   Line(OPTIONAL, f"{detail}; Bosun sends it no prompt until it passes",
                         f"update it, or check that `{sp.binary} --help` runs (see {runbook})"))
     return out
 

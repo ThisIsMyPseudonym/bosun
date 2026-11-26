@@ -178,12 +178,15 @@ def test_a_path_under_the_home_folder_is_shown_without_the_user_name():
 def test_doctor_lists_each_ai_cli_its_version_and_contract(s, monkeypatch):
     monkeypatch.setattr(contract, "check", lambda store, p, b: ContractStatus(p, "1.0", p != "grok",
                         ("--no-memory",) if p == "grok" else (), "Grok 1.0 dropped `--no-memory`" if p == "grok" else ""))
-    found = [str(ln) for ln in lines(s)]
-    assert any("Claude Code: 1.0" in ln for ln in found)
-    assert any("Grok" in ln and "dropped `--no-memory`" in ln and "update it" in ln for ln in found)
-    assert mark_of(lines(s), "Grok") == OPTIONAL and mark_of(lines(s), "Codex") == OK
-    assert {ln.fact.split(":")[0] for ln in lines(s) if ln.fact.split(":")[0] in
-            {sp.label for sp in CATALOG.values()}} == {sp.label for sp in CATALOG.values()}
+    found = lines(s)
+    rendered = [str(ln) for ln in found]
+    assert "[ok] Claude Code: 1.0" in rendered
+    assert (
+        "[--] Grok 1.0 dropped `--no-memory`; Bosun sends it no prompt until it passes\n"
+        "     -> update it, or check that `grok --help` runs (see docs/runbooks/grok-setup.md)"
+    ) in rendered
+    assert mark_of(found, "Grok") == OPTIONAL and mark_of(found, "Codex") == OK
+    assert all(any(ln.fact.startswith(sp.label) for ln in found) for sp in CATALOG.values())
 
 
 def test_a_missing_ai_cli_is_optional_and_says_how_to_get_started(s):
