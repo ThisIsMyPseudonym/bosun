@@ -13,11 +13,19 @@ from bosun.store import Store
 pytestmark = pytest.mark.real_contract  # these test the check itself, not the suite's shortcut (conftest.py)
 
 
-def test_only_whole_flag_tokens_count():
-    help_text = "  --tools <tools>  Tools\n  --strict-mcp-config\n  see --setting-sources-extra"
-    assert missing_flags(help_text, ("--tools", "--strict-mcp-config", "--setting-sources")) == ("--setting-sources",)
-    assert missing_flags("[--sandbox|--json]", ("--sandbox", "--json")) == ()
-    assert missing_flags("  --json-schema=<s>", ("--json",)) == ("--json",)  # a longer flag is not the flag
+def test_only_option_definitions_count():
+    help_text = (
+        "  --tools <tools>  Tools\n"
+        "  -c, --config <k=v>  Config\n"
+        "  --disallowedTools, --disallowed-tools <t>  Deny\n"
+        "  --restricted  Ignores settings; add\n"
+        "                                        --strict-mcp-config to skip MCP servers\n"
+        "  --other  Mentions --setting-sources and --json in prose\n"
+        "  --json-schema=<s>  Schema\n"
+    )
+    assert missing_flags(help_text, ("--tools", "-c", "--config", "--disallowedTools", "--disallowed-tools")) == ()
+    assert missing_flags(help_text, ("--strict-mcp-config", "--setting-sources", "--json")) == (
+        "--strict-mcp-config", "--setting-sources", "--json")
     assert missing_flags("", ("--json",)) == ("--json",)
 
 
@@ -149,7 +157,7 @@ def test_an_in_place_binary_upgrade_rechecks_version_immediately(store, tmp_path
     binary.write_text("v2-upgraded")
     os.utime(binary, ns=(2_000_000_000, 2_000_000_000))
     clock[0] += 5.0
-    run_v2 = help_runner(version="2.1.333", help_text=CLAUDE_HELP.replace("--strict-mcp-config", ""))
+    run_v2 = help_runner(version="2.1.333", help_text=_drop_option(CLAUDE_HELP, "--strict-mcp-config"))
     monkeypatch.setattr(proc, "run", run_v2)
     got = contract.check(store, "claude", str(binary), now=lambda: clock[0])
     assert not got.ok and got.version == "2.1.333" and got.missing == ("--strict-mcp-config",)
@@ -164,13 +172,21 @@ def test_an_in_place_binary_upgrade_rechecks_version_immediately(store, tmp_path
     monkeypatch.setattr(proc, "run", help_runner(version="2.1.332"))
     assert contract.check(store, "claude", str(link), now=lambda: clock[0]).ok
     link.unlink(); link.symlink_to(target2)
-    monkeypatch.setattr(proc, "run", help_runner(version="2.1.334", help_text=CLAUDE_HELP.replace("--tools", "")))
+    monkeypatch.setattr(proc, "run", help_runner(version="2.1.334", help_text=_drop_option(CLAUDE_HELP, "--tools")))
     got2 = contract.check(store, "claude", str(link), now=lambda: clock[0])
     assert not got2.ok and got2.version == "2.1.334"
 
 
+def _drop_option(help_text: str, flag: str) -> str:
+    """Remove only the option-definition line for `flag`, leaving any prose mentions in other options intact."""
+    return "\n".join(ln for ln in help_text.splitlines() if not ln.lstrip().startswith(flag) or len(ln) - len(ln.lstrip()) > 8)
+
+
 def test_a_dropped_flag_fails_closed_and_names_it(store, monkeypatch):
-    monkeypatch.setattr(proc, "run", help_runner(help_text=CLAUDE_HELP.replace("--strict-mcp-config", "")))
+    # Dropping the definition of --strict-mcp-config leaves it mentioned in --restricted's description prose
+    dropped = _drop_option(CLAUDE_HELP, "--strict-mcp-config")
+    assert "--strict-mcp-config" in dropped  # still survives in --restricted's prose
+    monkeypatch.setattr(proc, "run", help_runner(help_text=dropped))
     got = contract.check(store, "claude", "/bin/claude")
     assert not got.ok and got.missing == ("--strict-mcp-config",)
     assert got.finding == "Claude Code 2.1.332 dropped `--strict-mcp-config`"

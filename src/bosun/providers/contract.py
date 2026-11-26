@@ -41,11 +41,22 @@ class ContractStatus:
     finding: str  # what was found, for the dashboard and doctor; "" when ok
 
 
+_FLAG_TOKEN = r"(?:-[A-Za-z]|--[A-Za-z0-9][A-Za-z0-9-]*)"
+# Option definitions sit at the left margin (1-8 spaces of indent), optionally with comma-separated aliases
+# (`-c, --config`, `--disallowedTools, --disallowed-tools`). Wrapped prose sits deeper (>= 10 spaces) or follows words.
+_OPTION_LINE = re.compile(rf"^ {{1,8}}({_FLAG_TOKEN}(?:,\s*{_FLAG_TOKEN})*)(?=$|[\s=<\[\|])", re.M)
+
+
+def defined_flags(help_text: str) -> frozenset[str]:
+    """Every flag defined as an option in `help_text`; prose mentions in descriptions are ignored."""
+    return frozenset(tok.strip() for m in _OPTION_LINE.finditer(help_text) for tok in m.group(1).split(","))
+
+
 def missing_flags(help_text: str, flags: Iterable[str]) -> tuple[str, ...]:
-    """The flags the help does not list. Only whole flag tokens count, so a change of wording does not matter and
-    `--json-schema` is not `--json`."""
-    return tuple(f for f in flags
-                 if not re.search(rf"(?:^|[\s,\[(|]){re.escape(f)}(?=$|[\s,=<\[\]()|])", help_text, re.M))
+    """The flags the help does not define as options, so prose mentions inside another option's description never
+    count as present and `--json-schema` is not `--json`."""
+    present = defined_flags(help_text)
+    return tuple(f for f in flags if f not in present)
 
 
 def _parse_features(text: str) -> dict[str, str]:
