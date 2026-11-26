@@ -83,11 +83,14 @@ def _no_real_store_apps(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def providers_ready(request, monkeypatch):
-    """Every AI CLI passes its contract check without a process being started: tests never run a real CLI's
-    --version or --help. A test of the check itself is marked `real_contract` (tests/test_providers_contract.py)."""
+    """Every AI CLI is installed and passes its contract check without a process being started or PATH being read:
+    tests never run a real CLI's --version or --help. A test of the check itself is marked `real_contract`
+    (tests/test_providers_contract.py)."""
     if request.node.get_closest_marker("real_contract"):
         return
-    from bosun.providers import contract
+    from bosun.providers import accounts, contract
+    from bosun.providers.catalog import CATALOG
 
     monkeypatch.setattr(contract, "check", lambda store, provider, binary, now=None:
                         contract.ContractStatus(provider, "test", True, (), ""))
+    monkeypatch.setattr(accounts, "installed", lambda: {p: f"/test/bin/{s.binary}" for p, s in CATALOG.items()})
