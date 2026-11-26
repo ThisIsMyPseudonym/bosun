@@ -99,10 +99,30 @@ def _gemini(c: Call) -> Invocation:
     return Invocation(a, with_system(c.system, c.prompt), files=(policy,))
 
 
+# Grok: `--tools ""` means no restriction, and a deny list alone left the terminal and X search tools. The allow
+# list holds one harmless tool (a scratch to-do list); the deny list on top names every other tool Grok
+# advertised, so a new default cannot widen it; dontAsk refuses anything else without asking (Coho, 2026-08-25).
+GROK_DENIED = ("read_file,list_dir,grep,run_terminal_command,search_replace,write,spawn_subagent,"
+               "kill_command_or_subagent,get_command_or_subagent_output,x_user_search,x_semantic_search,"
+               "x_keyword_search,x_thread_fetch,web_search,web_fetch,use_tool,search_tool,workflow,monitor,"
+               "scheduler_create,scheduler_delete,scheduler_list,image_gen,image_edit,image_to_video,"
+               "reference_to_video,enter_plan_mode,exit_plan_mode,ask_user_question")
+GROK_NO_TOOLS = ("--permission-mode", "dontAsk", "--disable-web-search", "--no-subagents", "--no-plan", "--no-memory",
+                 "--verbatim", "--tools", "todo_write", "--disallowed-tools", GROK_DENIED)
+
+
+def _grok(c: Call) -> Invocation:
+    prompt = _write(c.workdir, "prompt.txt", c.prompt)
+    a = (c.binary, "--prompt-file", str(prompt), "--output-format", "json", *GROK_NO_TOOLS,
+         "--json-schema", _compact(c.schema), "--system-prompt-override", c.system, *_model("-m", c.model))
+    return Invocation(a, None, files=(prompt,))
+
+
 BUILDERS: Mapping[str, Callable[[Call], Invocation]] = {
     "claude": _claude,
     "codex": _codex,
     "gemini": _gemini,
+    "grok": _grok,
 }
 
 

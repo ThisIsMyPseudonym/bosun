@@ -28,7 +28,7 @@ def test_a_provider_with_no_builder_is_refused(tmp_path):
         argv.build("nope", binary="x", model="m", schema={}, system="S", prompt="P", workdir=tmp_path)
 
 
-@pytest.mark.parametrize("provider", ["codex", "gemini"])
+@pytest.mark.parametrize("provider", ["codex", "gemini", "grok"])
 def test_every_lockdown_flag_bosun_requires_is_passed(provider, tmp_path):
     inv = argv.build(provider, binary=provider, model="m", schema={"type": "object"}, system="S",
                      prompt="SECRET-PROMPT", workdir=tmp_path)
@@ -66,3 +66,17 @@ def test_gemini_gets_a_copy_of_the_no_tools_policy_and_the_prompt_on_stdin(tmp_p
             "save_memory", "read_mcp_resource"} <= denied
     assert a[a.index("--approval-mode") + 1] == "plan" and a[a.index("--output-format") + 1] == "json"
     assert a[a.index("-p") + 1] == " " and inv.stdin == "S\n\n---\n\nP"
+
+
+def test_grok_takes_the_prompt_from_a_file_in_the_temp_folder(tmp_path):
+    inv = argv.build("grok", binary="grok", model="grok-x", schema={"type": "object"}, system="S", prompt="P",
+                     workdir=tmp_path)
+    a = inv.argv
+    prompt = Path(a[a.index("--prompt-file") + 1])
+    assert prompt.parent == tmp_path and prompt.read_text() == "P" and inv.files == (prompt,) and inv.stdin is None
+    assert a[a.index("--tools") + 1] == "todo_write"  # `--tools ""` would mean no restriction at all
+    denied = set(a[a.index("--disallowed-tools") + 1].split(","))
+    assert {"run_terminal_command", "read_file", "web_search", "web_fetch", "write", "spawn_subagent"} <= denied
+    assert a[a.index("--permission-mode") + 1] == "dontAsk" and a[a.index("--system-prompt-override") + 1] == "S"
+    assert json.loads(a[a.index("--json-schema") + 1]) == {"type": "object"}
+    assert a[a.index("--output-format") + 1] == "json" and a[a.index("-m") + 1] == "grok-x"
