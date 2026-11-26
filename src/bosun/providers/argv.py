@@ -86,9 +86,23 @@ def _codex(c: Call) -> Invocation:
     return Invocation(a, with_system(c.system, c.prompt), files=(schema,))
 
 
+GEMINI_POLICY = Path(__file__).with_name("gemini-no-tools.toml")
+
+
+def _gemini(c: Call) -> Invocation:
+    # Plan mode alone leaves the web tools on; the policy denies every built-in tool by name. It is copied into
+    # the call's folder so the path in argv (and so in a trace) holds no user name. Gemini has no schema option:
+    # Bosun validates the reply itself. `-p " "` is headless mode with the prompt appended from stdin.
+    policy = _write(c.workdir, GEMINI_POLICY.name, GEMINI_POLICY.read_text(encoding="utf-8"))
+    a = (c.binary, "-p", " ", "--approval-mode", "plan", "--policy", str(policy), "--output-format", "json",
+         *_model("-m", c.model))
+    return Invocation(a, with_system(c.system, c.prompt), files=(policy,))
+
+
 BUILDERS: Mapping[str, Callable[[Call], Invocation]] = {
     "claude": _claude,
     "codex": _codex,
+    "gemini": _gemini,
 }
 
 

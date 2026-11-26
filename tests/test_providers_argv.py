@@ -28,7 +28,7 @@ def test_a_provider_with_no_builder_is_refused(tmp_path):
         argv.build("nope", binary="x", model="m", schema={}, system="S", prompt="P", workdir=tmp_path)
 
 
-@pytest.mark.parametrize("provider", ["codex"])
+@pytest.mark.parametrize("provider", ["codex", "gemini"])
 def test_every_lockdown_flag_bosun_requires_is_passed(provider, tmp_path):
     inv = argv.build(provider, binary=provider, model="m", schema={"type": "object"}, system="S",
                      prompt="SECRET-PROMPT", workdir=tmp_path)
@@ -50,3 +50,19 @@ def test_codex_reads_its_schema_from_a_file_and_the_prompt_from_stdin(tmp_path):
     disabled = {inv.argv[i + 1] for i, a in enumerate(inv.argv) if a == "--disable"}
     assert disabled == {"shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins"}
     assert 'web_search="disabled"' in inv.argv
+
+
+def test_gemini_gets_a_copy_of_the_no_tools_policy_and_the_prompt_on_stdin(tmp_path):
+    import tomllib
+
+    inv = argv.build("gemini", binary="gemini", model="g", schema={"type": "object"}, system="S", prompt="P",
+                     workdir=tmp_path)
+    a = inv.argv
+    policy = Path(a[a.index("--policy") + 1])
+    assert policy.parent == tmp_path and inv.files == (policy,)  # no user name in the path a trace records
+    denied = {n for rule in tomllib.loads(policy.read_text())["rule"] if rule["decision"] == "deny"
+              for n in rule["toolName"]}
+    assert {"run_shell_command", "read_file", "write_file", "replace", "web_fetch", "google_web_search",
+            "save_memory", "read_mcp_resource"} <= denied
+    assert a[a.index("--approval-mode") + 1] == "plan" and a[a.index("--output-format") + 1] == "json"
+    assert a[a.index("-p") + 1] == " " and inv.stdin == "S\n\n---\n\nP"
