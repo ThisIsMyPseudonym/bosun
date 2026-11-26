@@ -134,6 +134,41 @@ def test_a_new_version_reads_help_once_and_passes(store, monkeypatch):
     assert sum(1 for c in run.calls if c[-1] == "--version") == 1  # and the version for ten minutes
 
 
+def test_an_in_place_binary_upgrade_rechecks_version_immediately(store, tmp_path, monkeypatch):
+    import os
+
+    binary = tmp_path / "claude"
+    binary.write_text("v1")
+    os.utime(binary, ns=(1_000_000_000, 1_000_000_000))
+    clock = [1000.0]
+    run_v1 = help_runner(version="2.1.332")
+    monkeypatch.setattr(proc, "run", run_v1)
+    assert contract.check(store, "claude", str(binary), now=lambda: clock[0]).ok
+
+    # Same path, within the 10-minute window, but the binary changed on disk (in-place upgrade)
+    binary.write_text("v2-upgraded")
+    os.utime(binary, ns=(2_000_000_000, 2_000_000_000))
+    clock[0] += 5.0
+    run_v2 = help_runner(version="2.1.333", help_text=CLAUDE_HELP.replace("--strict-mcp-config", ""))
+    monkeypatch.setattr(proc, "run", run_v2)
+    got = contract.check(store, "claude", str(binary), now=lambda: clock[0])
+    assert not got.ok and got.version == "2.1.333" and got.missing == ("--strict-mcp-config",)
+
+    # Symlink retargeting also invalidates the cache immediately
+    link = tmp_path / "claude-link"
+    target1, target2 = tmp_path / "bin-1", tmp_path / "bin-2"
+    target1.write_text("same"); target2.write_text("same")
+    os.utime(target1, ns=(3_000_000_000, 3_000_000_000))
+    os.utime(target2, ns=(3_000_000_000, 3_000_000_000))
+    link.symlink_to(target1)
+    monkeypatch.setattr(proc, "run", help_runner(version="2.1.332"))
+    assert contract.check(store, "claude", str(link), now=lambda: clock[0]).ok
+    link.unlink(); link.symlink_to(target2)
+    monkeypatch.setattr(proc, "run", help_runner(version="2.1.334", help_text=CLAUDE_HELP.replace("--tools", "")))
+    got2 = contract.check(store, "claude", str(link), now=lambda: clock[0])
+    assert not got2.ok and got2.version == "2.1.334"
+
+
 def test_a_dropped_flag_fails_closed_and_names_it(store, monkeypatch):
     monkeypatch.setattr(proc, "run", help_runner(help_text=CLAUDE_HELP.replace("--strict-mcp-config", "")))
     got = contract.check(store, "claude", "/bin/claude")

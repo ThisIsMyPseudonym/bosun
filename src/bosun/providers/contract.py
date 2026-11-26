@@ -8,6 +8,7 @@ prompt and the dashboard names the flag. No model call is ever spent finding out
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from collections.abc import Callable, Iterable
@@ -27,8 +28,8 @@ UNREADABLE_TTL = 60.0  # a help or version that could not be read is asked again
 UNREADABLE = (124, 127)  # proc.run's timed out and command not found
 TIMEOUT = 20.0
 
-# binary path -> (when asked, version or None); per process, like the CLI on disk it describes
-_versions: dict[str, tuple[float, str | None]] = {}
+# (resolved path, st_mtime_ns, st_size) -> (when asked, version or None); per process, like the CLI on disk
+_versions: dict[tuple[str, int, int], tuple[float, str | None]] = {}
 
 
 @dataclass(frozen=True)
@@ -72,13 +73,24 @@ def parse_version(output: str) -> str | None:
     return first[:40] or None
 
 
+def _binary_key(binary: str) -> tuple[str, int, int]:
+    """Identity of a binary on disk: resolved path, mtime_ns and size so an in-place upgrade misses the cache."""
+    try:
+        real = os.path.realpath(binary)
+        st = os.stat(real)
+        return (real, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (binary, 0, 0)
+
+
 def _version(binary: str, at: float) -> str | None:
-    known = _versions.get(binary)
+    key = _binary_key(binary)
+    known = _versions.get(key)
     if known is not None and at - known[0] < (VERSION_TTL if known[1] is not None else UNREADABLE_TTL):
         return known[1]
     r = proc.run([binary, "--version"], timeout=TIMEOUT)
     version = parse_version(r.stdout or r.stderr) if r.ok else None
-    _versions[binary] = (at, version)
+    _versions[key] = (at, version)
     return version
 
 
