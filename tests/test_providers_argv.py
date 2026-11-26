@@ -112,6 +112,14 @@ def test_antigravity_gets_one_stream_json_message_with_the_text_only_line(tmp_pa
     assert json.loads(a[a.index("--json-schema") + 1]) == {"type": "object"} and inv.files == ()
 
 
+def test_antigravity_runs_in_print_mode_with_nothing_after_the_valueless_flag(tmp_path):
+    # `--print` takes an optional prompt; the prompt is on stdin, so nothing may follow it to be read as one
+    # (agy 1.1.18 changelog: "a valueless prompt flag swallowing the next flag as its prompt")
+    a = argv.build("antigravity", binary="agy", model="flash", schema={"type": "object"}, system="S", prompt="P",
+                   workdir=tmp_path).argv
+    assert a[-1] == "--print" and a.count("--print") == 1 and "--print" in spec("antigravity").lockdown_flags
+
+
 def test_muse_takes_the_prompt_from_a_file_and_works_in_the_temp_folder(tmp_path):
     inv = argv.build("muse", binary="muse", model="", schema={"type": "object"}, system="S", prompt="P",
                      workdir=tmp_path)

@@ -28,6 +28,7 @@ class Job:
     name: str
     needs: frozenset[Capability]
     background: bool  # started by Bosun itself, not by a click: it keeps off a login past the 75% line
+    untrusted: bool = False  # prompt carries untrusted text (release notes, logs): only locked-down CLIs may run it
 
 
 def _jobs(*jobs: Job) -> Mapping[str, Job]:
@@ -37,9 +38,9 @@ def _jobs(*jobs: Job) -> Mapping[str, Job]:
 C = Capability
 # triage is background work that can also be clicked; the router treats a click as foreground (phase 3).
 JOBS: Mapping[str, Job] = _jobs(
-    Job("summarize", frozenset({C.JSON}), background=True),
-    Job("explain", frozenset({C.JSON}), background=False),
-    Job("triage", frozenset({C.MCP}), background=True),
+    Job("summarize", frozenset({C.JSON}), background=True, untrusted=True),
+    Job("explain", frozenset({C.JSON}), background=False, untrusted=True),
+    Job("triage", frozenset({C.MCP}), background=True, untrusted=True),
     Job("fix", frozenset({C.SANDBOXED_AGENT}), background=False),
     Job("assistant", frozenset({C.MCP}), background=False),
     Job("computer_use", frozenset({C.MCP, C.VISION}), background=False),
@@ -61,6 +62,7 @@ class ProviderSpec:
     strong_model: str
     windows: Literal["output", "probe", "estimated"]  # where the plan's usage windows are read (phase 2)
     api_hosts: tuple[str, ...]  # what a whole-process jail lets it reach (phase 7)
+    locked_down: bool = True  # False: no proven per-call way to switch tools and MCP off; never gets untrusted text
 
 
 CLAUDE_FLAGS = ("--tools", "--disallowedTools", "--strict-mcp-config", "--setting-sources", "--no-session-persistence",
@@ -72,7 +74,7 @@ GEMINI_FLAGS = ("--approval-mode", "--policy", "--output-format", "--allowed-mcp
 GROK_FLAGS = ("--permission-mode", "--disable-web-search", "--tools", "--disallowed-tools", "--no-subagents",
               "--no-memory", "--verbatim", "--prompt-file", "--json-schema")
 AGY_FLAGS = ("--sandbox", "--disable-slash-commands", "--input-format", "--output-format", "--print-timeout",
-             "--json-schema", "--mode")
+             "--json-schema", "--mode", "--print")
 MUSE_FLAGS = ("--json", "--prompt-file", "--workspace", "--disable-shell", "--disable-write", "--disable-web-tools",
               "--no-session-log", "--no-foreign-personal-context", "--disable-request-user-input")
 
@@ -101,9 +103,11 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
     ProviderSpec("grok", "Grok", "grok", ONE_SHOT, HELP, GROK_FLAGS, "GROK_HOME", ("XAI_API_KEY",), "~/.grok",
                  "grok-4.7-build-fast", "grok-4.7", "estimated", ("api.x.ai",)),
     # Antigravity holds one login per machine; its Argon model draws far more quota, so both tiers use Flash.
+    # Neither `agy help` nor `agy changelog` documents a per-call flag or `--settings` key that disables built-in
+    # tools and MCP servers, so `locked_down=False` keeps it off jobs carrying untrusted text.
     ProviderSpec("antigravity", "Antigravity", "agy", ONE_SHOT, HELP, AGY_FLAGS, None, (), None,
                  "gemini-3.8-flash", "gemini-3.8-flash", "probe",
-                 ("cloudcode-pa.googleapis.com", "oauth2.googleapis.com")),
+                 ("cloudcode-pa.googleapis.com", "oauth2.googleapis.com"), locked_down=False),
     ProviderSpec("muse", "Muse", "muse", ONE_SHOT, EXEC_HELP, MUSE_FLAGS, None, (), None, "", "", "estimated", ()),
 )
 
@@ -113,10 +117,11 @@ def spec(provider: str) -> ProviderSpec:
     return CATALOG[provider]
 
 
-def capable(job: str) -> tuple[str, ...]:
-    """The CLIs that have every capability a job needs, in catalog order. An unknown job: KeyError."""
-    needs = JOBS[job].needs
-    return tuple(p for p, s in CATALOG.items() if needs <= s.capabilities)
+def capable(job: str, catalog: Mapping[str, ProviderSpec] = CATALOG) -> tuple[str, ...]:
+    """The CLIs that have every capability a job needs (and are locked down when the job carries untrusted text),
+    in catalog order. An unknown job: KeyError."""
+    j = JOBS[job]
+    return tuple(p for p, s in catalog.items() if j.needs <= s.capabilities and (s.locked_down or not j.untrusted))
 
 
 def model(provider: str, tier: Literal["light", "strong"], env: Mapping[str, str] | None = None) -> str:

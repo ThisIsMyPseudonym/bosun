@@ -38,9 +38,25 @@ def test_a_cli_is_offered_only_the_jobs_its_capabilities_allow():
 
     from bosun.providers.catalog import capable
 
-    assert capable("summarize") == ("claude", "codex", "gemini", "grok", "antigravity", "muse")
+    assert capable("summarize") == ("claude", "codex", "gemini", "grok", "muse")
     assert capable("fix") == ("claude",)
     assert capable("assistant") == ("claude",)
     assert capable("computer_use") == ("claude",)
     with pytest.raises(KeyError):
         capable("no-such-job")
+
+
+def test_a_cli_that_is_not_locked_down_never_gets_untrusted_text():
+    from dataclasses import replace
+
+    from bosun.providers.catalog import CATALOG, capable, spec
+
+    assert {j for j, job in JOBS.items() if job.untrusted} == {"summarize", "explain", "triage"}
+    assert not spec("antigravity").locked_down  # no proven per-call way to turn its tools and MCP off
+    assert all(s.locked_down for p, s in CATALOG.items() if p != "antigravity")
+    for job in ("summarize", "explain", "triage"):
+        assert "antigravity" not in capable(job)
+    every = frozenset(C)
+    loose = {"loose": replace(spec("claude"), id="loose", capabilities=every, locked_down=False)}
+    assert capable("summarize", loose) == () and capable("triage", loose) == ()
+    assert capable("assistant", loose) == ("loose",)  # its own job, with no release-note text in it

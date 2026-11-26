@@ -122,10 +122,11 @@ def _grok(c: Call) -> Invocation:
     return Invocation(a, None, files=(prompt,))
 
 
-# Antigravity has no flag that removes its tools. Headless, a tool needing approval fails the whole call, but
-# unprompted the model may reach for one; the leading line stops the attempts, and the reply parser (phase 4)
-# refuses a reply that used a tool anyway. The prompt goes on stdin as one stream-json message: the event stream
-# names every step, so a tool call can be seen.
+# Antigravity has no flag that removes its tools, so `catalog` marks it not locked down and it is never given a
+# job that carries untrusted text. Headless, a tool needing approval fails the whole call, but unprompted the
+# model may reach for one; the leading line stops the attempts, and the reply parser (phase 4) refuses a reply
+# that used a tool anyway. The prompt goes on stdin as one stream-json message: the event stream names every
+# step, so a tool call can be seen. `--print` takes an optional prompt, so it comes last, with nothing after it.
 AGY_TEXT_ONLY = "Reply with text only. Do not use any tools, files, commands or the browser.\n\n"
 AGY_ARGS = ("--sandbox", "--disable-slash-commands", "--mode", "plan", "--print-timeout", "4m",
             "--input-format", "stream-json", "--output-format", "stream-json")
@@ -134,7 +135,7 @@ AGY_ARGS = ("--sandbox", "--disable-slash-commands", "--mode", "plan", "--print-
 def _antigravity(c: Call) -> Invocation:
     content = AGY_TEXT_ONLY + with_system(c.system, c.prompt)
     stdin = json.dumps({"event": "user", "message": {"role": "user", "content": content}}) + "\n"
-    a = (c.binary, *AGY_ARGS, "--json-schema", _compact(c.schema), *_model("--model", c.model))
+    a = (c.binary, *AGY_ARGS, "--json-schema", _compact(c.schema), *_model("--model", c.model), "--print")
     return Invocation(a, stdin)
 
 
