@@ -1,9 +1,23 @@
 # Bosun's policy for one-shot Gemini CLI calls (summaries, "Will this break?"). It is copied into the call's own
 # empty folder and passed with --policy; it is never written into the user's ~/.gemini settings.
 # A global deny (no argument filter) removes the tool from the model, and --policy loads at user tier, which
-# outranks plan mode's default allows. Wildcards are unverified for 0.71.1, so every built-in tool is named
-# (names from the 0.71.1 bundle; an unknown name is harmless). Policy engine:
-# https://geminicli.com/docs/reference/policy-engine.md
+# outranks plan mode's default allows. The policy engine docs shipped with 0.71.1 (docs/reference/policy-engine.md)
+# define `toolName = "*"` as any tool, built-in or MCP, and `mcpName = "*"` as every tool of any MCP server; both
+# are denied, and every built-in tool is also named (names from the 0.71.1 bundle; an unknown name is harmless) in
+# case a wildcard ever stops matching. Policy engine: https://geminicli.com/docs/reference/policy-engine.md
+
+[[rule]]
+toolName = "*"
+decision = "deny"
+priority = 900
+deny_message = "Bosun's one-shot calls reply with text only: no tools."
+
+[[rule]]
+toolName = "*"
+mcpName = "*"
+decision = "deny"
+priority = 900
+deny_message = "Bosun's one-shot calls reply with text only: no MCP tools."
 
 [[rule]]
 toolName = ["run_shell_command"]

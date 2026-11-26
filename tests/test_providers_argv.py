@@ -68,6 +68,23 @@ def test_gemini_gets_a_copy_of_the_no_tools_policy_and_the_prompt_on_stdin(tmp_p
     assert a[a.index("-p") + 1] == " " and inv.stdin == "S\n\n---\n\nP"
 
 
+def test_gemini_loads_no_mcp_server_or_extension_and_its_policy_denies_every_tool(tmp_path):
+    import tomllib
+
+    inv = argv.build("gemini", binary="gemini", model="", schema={"type": "object"}, system="S", prompt="P",
+                     workdir=tmp_path)
+    a = inv.argv
+    # plan mode still allows read-only MCP tools, so no user server or extension may load at all
+    assert a[a.index("--allowed-mcp-server-names") + 1] == argv.GEMINI_NO_MCP_SERVER
+    assert "_" not in argv.GEMINI_NO_MCP_SERVER  # an underscore would split the policy's server name
+    assert a[a.index("--extensions") + 1] == "none"  # 0.71.1 docs: `gemini -e none` disables all extensions
+    rules = tomllib.loads(Path(a[a.index("--policy") + 1]).read_text())["rule"]
+    deny_all = [r for r in rules if r["decision"] == "deny" and r.get("toolName") in ("*", ["*"])]
+    assert any("mcpName" not in r for r in deny_all)  # every tool, built-in or MCP
+    assert any(r.get("mcpName") == "*" for r in deny_all)  # and every tool of any MCP server, by the docs' syntax
+    assert {"--allowed-mcp-server-names", "--extensions"} <= set(spec("gemini").lockdown_flags)
+
+
 def test_grok_takes_the_prompt_from_a_file_in_the_temp_folder(tmp_path):
     inv = argv.build("grok", binary="grok", model="grok-x", schema={"type": "object"}, system="S", prompt="P",
                      workdir=tmp_path)

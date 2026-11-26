@@ -87,15 +87,19 @@ def _codex(c: Call) -> Invocation:
 
 
 GEMINI_POLICY = Path(__file__).with_name("gemini-no-tools.toml")
+# Plan mode still allows read-only MCP tools, and user MCP servers and extensions load unless told otherwise. The
+# allow list names one server no one has (no underscore: Gemini splits MCP names on it), and `-e none` is the
+# documented way to load no extension (0.71.1 docs/reference/configuration.md).
+GEMINI_NO_MCP_SERVER = "bosun-no-mcp-server-allowed"
 
 
 def _gemini(c: Call) -> Invocation:
-    # Plan mode alone leaves the web tools on; the policy denies every built-in tool by name. It is copied into
+    # Plan mode alone leaves the web tools on; the policy denies every tool, built-in or MCP. It is copied into
     # the call's folder so the path in argv (and so in a trace) holds no user name. Gemini has no schema option:
     # Bosun validates the reply itself. `-p " "` is headless mode with the prompt appended from stdin.
     policy = _write(c.workdir, GEMINI_POLICY.name, GEMINI_POLICY.read_text(encoding="utf-8"))
     a = (c.binary, "-p", " ", "--approval-mode", "plan", "--policy", str(policy), "--output-format", "json",
-         *_model("-m", c.model))
+         "--allowed-mcp-server-names", GEMINI_NO_MCP_SERVER, "--extensions", "none", *_model("-m", c.model))
     return Invocation(a, with_system(c.system, c.prompt), files=(policy,))
 
 

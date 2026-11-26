@@ -68,7 +68,7 @@ CLAUDE_FLAGS = ("--tools", "--disallowedTools", "--strict-mcp-config", "--settin
                 "--permission-prompts")
 CODEX_FLAGS = ("--sandbox", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
                "--disable", "--output-schema", "--json")
-GEMINI_FLAGS = ("--approval-mode", "--policy", "--output-format")
+GEMINI_FLAGS = ("--approval-mode", "--policy", "--output-format", "--allowed-mcp-server-names", "--extensions")
 GROK_FLAGS = ("--permission-mode", "--disable-web-search", "--tools", "--disallowed-tools", "--no-subagents",
               "--no-memory", "--verbatim", "--prompt-file", "--json-schema")
 AGY_FLAGS = ("--sandbox", "--disable-slash-commands", "--input-format", "--output-format", "--print-timeout",
