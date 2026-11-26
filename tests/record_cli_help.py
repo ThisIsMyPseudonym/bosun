@@ -50,6 +50,10 @@ def record(provider: str) -> Path | None:
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "version.txt").write_text((version_text or "").strip() + "\n", encoding="utf-8")
     (folder / "help.txt").write_text(help_text, encoding="utf-8")
+    if s.features_args:
+        features_text = _run([binary, *s.features_args])
+        if features_text and features_text.strip():
+            (folder / "features.txt").write_text(features_text, encoding="utf-8")
     print(f"{provider}: {version} -> {folder.relative_to(Path.cwd()) if folder.is_relative_to(Path.cwd()) else folder}")
     return folder
 

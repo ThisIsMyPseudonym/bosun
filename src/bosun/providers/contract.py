@@ -47,6 +47,22 @@ def missing_flags(help_text: str, flags: Iterable[str]) -> tuple[str, ...]:
                  if not re.search(rf"(?:^|[\s,\[(|]){re.escape(f)}(?=$|[\s,=<\[\]()|])", help_text, re.M))
 
 
+def _parse_features(text: str) -> dict[str, str]:
+    """Feature name -> stage from a feature-list table (lines of `<name> <stage...> <true|false>`)."""
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[-1] in ("true", "false"):
+            found[parts[0]] = " ".join(parts[1:-1]).lower()
+    return found
+
+
+def missing_features(features_text: str, features: Iterable[str]) -> tuple[str, ...]:
+    """Features that are absent or marked `removed` in the CLI's feature table."""
+    known = _parse_features(features_text)
+    return tuple(f for f in features if known.get(f, "removed") == "removed")
+
+
 def parse_version(output: str) -> str | None:
     """The version a CLI printed for --version ("2.1.332 (Claude Code)", "codex-cli 0.172.0"); None for nothing."""
     m = VERSION.search(output)
@@ -74,8 +90,20 @@ def _judge(s: ProviderSpec, version: str, binary: str) -> tuple[ContractStatus, 
         finding = f"{s.label} {version}: its --help could not be read to check its safety flags"
         return ContractStatus(s.id, version, False, (), finding), False
     missing = missing_flags(text, s.lockdown_flags)
-    finding = f"{s.label} {version} dropped " + ", ".join(f"`{f}`" for f in missing) if missing else ""
-    return ContractStatus(s.id, version, not missing, missing, finding), True
+    if missing:
+        finding = f"{s.label} {version} dropped " + ", ".join(f"`{f}`" for f in missing)
+        return ContractStatus(s.id, version, False, missing, finding), True
+    if s.features_args and s.lockdown_features:
+        rf = proc.run([binary, *s.features_args], timeout=TIMEOUT)
+        ftext = f"{rf.stdout}\n{rf.stderr}"
+        if not rf.ok or not _parse_features(ftext):
+            finding = f"{s.label} {version}: its features list could not be read to check its safety flags"
+            return ContractStatus(s.id, version, False, (), finding), False
+        bad = missing_features(ftext, s.lockdown_features)
+        if bad:
+            finding = f"{s.label} {version} dropped " + ", ".join(f"`{f}`" for f in bad)
+            return ContractStatus(s.id, version, False, bad, finding), True
+    return ContractStatus(s.id, version, True, (), ""), True
 
 
 def _cached(store: Store | None, key: str, at: float) -> dict[str, Any] | None:

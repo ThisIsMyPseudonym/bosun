@@ -7,7 +7,7 @@ import pytest
 from bosun import proc
 from bosun.providers import contract
 from bosun.providers.catalog import CATALOG, spec
-from bosun.providers.contract import missing_flags, parse_version
+from bosun.providers.contract import missing_features, missing_flags, parse_version
 from bosun.store import Store
 
 pytestmark = pytest.mark.real_contract  # these test the check itself, not the suite's shortcut (conftest.py)
@@ -62,6 +62,40 @@ def test_every_recorded_version_lists_every_lockdown_flag(provider, version):
     text = (FIXTURES / provider / version / "help.txt").read_text()
     assert parse_version((FIXTURES / provider / version / "version.txt").read_text()) == version
     assert missing_flags(text, spec(provider).lockdown_flags) == ()
+    if spec(provider).lockdown_features:
+        features = (FIXTURES / provider / version / "features.txt").read_text()
+        assert missing_features(features, spec(provider).lockdown_features) == ()
+
+
+def test_codex_features_must_exist_and_not_be_removed(store, monkeypatch):
+    codex_help = (FIXTURES / "codex" / "0.172.0" / "help.txt").read_text()
+    codex_features = (FIXTURES / "codex" / "0.172.0" / "features.txt").read_text()
+    assert "-c" in spec("codex").lockdown_flags and "--strict-config" in spec("codex").lockdown_flags
+    assert missing_features(codex_features, spec("codex").lockdown_features) == ()
+    assert missing_features("shell_tool  removed  false\napps  stable  true\n", ("shell_tool", "apps")) == ("shell_tool",)
+
+    def runner(features_text=codex_features, features_rc=0):
+        def run(argv, timeout=300, **kw):
+            if argv[-1] == "--version":
+                return proc.Result(tuple(argv), 0, "codex-cli 0.172.0", "")
+            if "--help" in argv:
+                return proc.Result(tuple(argv), 0, codex_help, "")
+            return proc.Result(tuple(argv), features_rc, features_text, "")
+        return run
+
+    monkeypatch.setattr(proc, "run", runner())
+    assert contract.check(store, "codex", "/bin/codex").ok
+
+    # A renamed/missing feature fails closed and names it
+    renamed = "\n".join(ln for ln in codex_features.splitlines() if not ln.startswith("shell_tool "))
+    monkeypatch.setattr(proc, "run", runner(features_text=renamed))
+    got = contract.check(None, "codex", "/bin/codex")
+    assert not got.ok and got.missing == ("shell_tool",) and got.finding == "Codex 0.172.0 dropped `shell_tool`"
+
+    # A rejected config/unreadable features list fails closed (retryable)
+    monkeypatch.setattr(proc, "run", runner(features_text="unknown variant in web_search", features_rc=1))
+    bad = contract.check(None, "codex", "/bin/codex")
+    assert not bad.ok and bad.missing == () and "features" in bad.finding
 
 
 # --- the check itself: --version, then --help once per version, cached in the store --------------------------------

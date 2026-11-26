@@ -63,13 +63,16 @@ class ProviderSpec:
     windows: Literal["output", "probe", "estimated"]  # where the plan's usage windows are read (phase 2)
     api_hosts: tuple[str, ...]  # what a whole-process jail lets it reach (phase 7)
     locked_down: bool = True  # False: no proven per-call way to switch tools and MCP off; never gets untrusted text
+    features_args: tuple[str, ...] = ()  # e.g. ("features", "list", ...) to verify feature flags exist
+    lockdown_features: tuple[str, ...] = ()  # feature names passed to --disable; a version lacking one fails closed
 
 
 CLAUDE_FLAGS = ("--tools", "--disallowedTools", "--strict-mcp-config", "--setting-sources", "--no-session-persistence",
                 "--json-schema", "--output-format", "--verbose", "--disable-slash-commands", "--restricted",
                 "--permission-prompts")
+CODEX_DISABLED_FEATURES = ("shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins")
 CODEX_FLAGS = ("--sandbox", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
-               "--disable", "--output-schema", "--json")
+               "--strict-config", "--disable", "-c", "--output-schema", "--json")
 GEMINI_FLAGS = ("--approval-mode", "--policy", "--output-format", "--allowed-mcp-server-names", "--extensions")
 GROK_FLAGS = ("--permission-mode", "--disable-web-search", "--tools", "--disallowed-tools", "--no-subagents",
               "--no-memory", "--verbatim", "--prompt-file", "--json-schema")
@@ -96,7 +99,9 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
                  "haiku", "sonnet", "output", ("api.anthropic.com",)),
     ProviderSpec("codex", "Codex", "codex", frozenset({C.TEXT, C.JSON, C.VISION}), EXEC_HELP, CODEX_FLAGS,
                  "CODEX_HOME", ("CODEX_API_KEY", "OPENAI_API_KEY"), "~/.codex",
-                 "gpt-5.6-luna", "gpt-5.6-terra", "output", ("chatgpt.com", "api.openai.com")),
+                 "gpt-5.6-luna", "gpt-5.6-terra", "output", ("chatgpt.com", "api.openai.com"),
+                 features_args=("features", "list", "-c", 'web_search="disabled"'),
+                 lockdown_features=CODEX_DISABLED_FEATURES),
     ProviderSpec("gemini", "Gemini CLI", "gemini", ONE_SHOT, HELP, GEMINI_FLAGS, "GEMINI_CLI_HOME",
                  ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "~/.gemini", "gemini-3.8-flash", "gemini-3.1-pro", "estimated",
                  ("generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com", "oauth2.googleapis.com")),

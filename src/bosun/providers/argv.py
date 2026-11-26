@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..llm import ONE_SHOT_ENV
+from .catalog import CODEX_DISABLED_FEATURES
 
 
 @dataclass(frozen=True)
@@ -73,10 +74,11 @@ def _write(workdir: Path, name: str, text: str) -> Path:
 
 
 # `--sandbox read-only` still lets Codex read files through its shell tools, so those are switched off as well,
-# and the user's config and exec-policy rules are skipped while the login in CODEX_HOME is kept.
+# and the user's config and exec-policy rules are skipped while the login in CODEX_HOME is kept. `--strict-config`
+# refuses unknown config keys, so a renamed `web_search` option fails closed rather than being silently ignored.
 CODEX_NO_TOOLS = ("--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
-                  "--ignore-rules", "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "apps",
-                  "--disable", "browser_use", "--disable", "computer_use", "--disable", "plugins",
+                  "--ignore-rules", "--strict-config",
+                  *(arg for feature in CODEX_DISABLED_FEATURES for arg in ("--disable", feature)),
                   "-c", 'web_search="disabled"')
 
 
