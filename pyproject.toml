@@ -46,6 +46,7 @@ addopts = "-m 'not contract and not upgrade'"
 markers = [
     "contract: asks a real outside service whether it still answers the way Bosun reads it (not run by default)",
     "upgrade: upgrades from the previous release to this code, with its data and its updater (not run by default; CI runs `-m upgrade`)",
+    "real_contract: runs the real AI CLI contract check (with proc.run patched) instead of the suite's shortcut that passes every CLI",
 ]
 
 [tool.ruff]

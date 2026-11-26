@@ -10,6 +10,8 @@ from bosun.providers.catalog import CATALOG, spec
 from bosun.providers.contract import missing_flags, parse_version
 from bosun.store import Store
 
+pytestmark = pytest.mark.real_contract  # these test the check itself, not the suite's shortcut (conftest.py)
+
 
 def test_only_whole_flag_tokens_count():
     help_text = "  --tools <tools>  Tools\n  --strict-mcp-config\n  see --setting-sources-extra"
