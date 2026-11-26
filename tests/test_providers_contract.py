@@ -196,12 +196,18 @@ def test_a_dropped_flag_fails_closed_and_names_it(store, monkeypatch):
     assert contract.check(store, "claude", "/bin/claude").ok  # a new version is judged afresh
 
 
-@pytest.mark.parametrize("rc,text", [(124, "half a help"), (127, ""), (0, "  \n")])
+@pytest.mark.parametrize("rc,text", [
+    (124, "half a help"),
+    (127, ""),
+    (0, "  \n"),
+    (1, "Error: failed to load keyring"),
+    (2, "crash: unexpected EOF"),
+])
 def test_unreadable_help_fails_closed_and_is_retried_after_a_minute(store, monkeypatch, rc, text):
     clock = [1000.0]
     run = help_runner(help_text=text, rc=rc); monkeypatch.setattr(proc, "run", run)
     got = contract.check(store, "claude", "/bin/claude", now=lambda: clock[0])
-    assert not got.ok and got.missing == ()  # a cut-off help lists no flags; that is not a release that dropped them
+    assert not got.ok and got.missing == ()  # a cut-off or error output is not a release that dropped flags
     assert got.finding == "Claude Code 2.1.332: its --help could not be read to check its safety flags"
     clock[0] += 30
     assert not contract.check(store, "claude", "/bin/claude", now=lambda: clock[0]).ok
@@ -209,6 +215,17 @@ def test_unreadable_help_fails_closed_and_is_retried_after_a_minute(store, monke
     clock[0] += 31
     monkeypatch.setattr(proc, "run", help_runner())
     assert contract.check(store, "claude", "/bin/claude", now=lambda: clock[0]).ok
+
+
+def test_non_zero_help_that_parses_as_help_is_still_judged(store, monkeypatch):
+    # Some CLIs exit 2 after printing full usage text; if it defines flags, judge it normally
+    monkeypatch.setattr(proc, "run", help_runner(help_text=CLAUDE_HELP, rc=2))
+    assert contract.check(store, "claude", "/bin/claude").ok
+    monkeypatch.setattr(proc, "run", help_runner(version="2.1.333",
+                                                 help_text=_drop_option(CLAUDE_HELP, "--strict-mcp-config"), rc=2))
+    monkeypatch.setattr(contract, "_versions", {})
+    got = contract.check(store, "claude", "/bin/claude")
+    assert not got.ok and got.missing == ("--strict-mcp-config",)
 
 
 def test_a_version_that_cannot_be_read_fails_closed_and_is_asked_again_later(store, monkeypatch):

@@ -109,7 +109,8 @@ def _judge(s: ProviderSpec, version: str, binary: str) -> tuple[ContractStatus, 
     """The verdict on one version's help, and whether the help could be read at all."""
     r = proc.run([binary, *s.help_args], timeout=TIMEOUT)
     text = f"{r.stdout}\n{r.stderr}"
-    if r.returncode in UNREADABLE or not text.strip():  # a cut-off help lists no flags: not the same as dropping them
+    if r.returncode in UNREADABLE or not text.strip() or (not r.ok and not defined_flags(text)):
+        # a cut-off help or crash error lists no flags: not the same as a release that dropped them
         finding = f"{s.label} {version}: its --help could not be read to check its safety flags"
         return ContractStatus(s.id, version, False, (), finding), False
     missing = missing_flags(text, s.lockdown_flags)
