@@ -84,19 +84,19 @@ def worse(a: Status, b: Status) -> Status:
     return a if _RANK[a] >= _RANK[b] else b
 
 
-def json_lines(raw: str, marker: str) -> tuple[dict[str, Any], ...]:
-    """Each line holding `marker` that is a JSON object."""
-    out: list[dict[str, Any]] = []
-    for line in raw.splitlines():
-        if marker not in line:
-            continue
-        try:
-            value = json.loads(line.strip())
-        except ValueError:
-            continue
-        if isinstance(value, dict):
-            out.append(value)
-    return tuple(out)
+def json_object(line: str) -> dict[str, Any] | None:
+    """A line that is a JSON object, else None."""
+    try:
+        value = json.loads(line.strip())
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def json_lines(raw: str, marker: re.Pattern[str]) -> tuple[dict[str, Any], ...]:
+    """Each line matching `marker` that is a JSON object."""
+    found = (json_object(line) for line in raw.splitlines() if marker.search(line))
+    return tuple(o for o in found if o is not None)
 
 
 def latest_per_window(readings: list[Reading]) -> tuple[Reading, ...]:
@@ -139,6 +139,9 @@ def _claude_event(info: dict[str, Any], at: float) -> list[Reading]:
     return list(out.values())
 
 
+_CLAUDE_MARK = re.compile("rate_limit_event")
+
+
 def parse_claude(raw: str, at: float) -> tuple[Reading, ...]:
     """Every `rate_limit_event` in Claude Code's stream-json (and the Agent SDK's), latest per window.
 
@@ -146,8 +149,77 @@ def parse_claude(raw: str, at: float) -> tuple[Reading, ...]:
     one entry per window with its own utilization, reset and status.
     """
     readings: list[Reading] = []
-    for ev in json_lines(raw, "rate_limit_event"):
+    for ev in json_lines(raw, _CLAUDE_MARK):
         info = ev.get("rate_limit_info")
         if ev.get("type") == "rate_limit_event" and isinstance(info, dict):
             readings.extend(_claude_event(info, at))
+    return latest_per_window(readings)
+
+
+# --- Codex -------------------------------------------------------------------------------------------------------
+
+CODEX_WARNING = 0.9  # Codex sends no status: at or past 90% is a warning, at 100% a refusal
+_MINUTES = {300: "five_hour", 10_080: "seven_day", 1_440: "one_day"}
+
+
+def window_for_minutes(minutes: object) -> str:
+    """A window's name from its length: Codex says minutes, not a type."""
+    m = _number(minutes)
+    if m is None or m <= 0:
+        return "window"
+    return _MINUTES.get(round(m), f"{round(m)}_min")
+
+
+def _pick(o: dict[str, Any], *keys: str) -> object:
+    for k in keys:
+        if o.get(k) is not None:
+            return o[k]
+    return None
+
+
+def _codex_slot(w: dict[str, Any], at: float) -> Reading | None:
+    percent = _number(_pick(w, "usedPercent", "used_percent"))
+    used = min(1.0, percent / 100) if percent is not None and percent >= 0 else None
+    in_seconds = _number(_pick(w, "resets_in_seconds", "resetsInSeconds"))
+    resets = epoch(_pick(w, "resetsAt", "resets_at"))
+    if resets is None and in_seconds is not None and in_seconds >= 0:
+        resets = at + in_seconds
+    if used is None and resets is None:
+        return None
+    status: Status = ("rejected" if used is not None and used >= 1
+                      else "allowed_warning" if used is not None and used >= CODEX_WARNING else "allowed")
+    minutes = _pick(w, "windowDurationMins", "window_duration_mins", "window_minutes", "windowMinutes")
+    return Reading(window_for_minutes(minutes), status, used, resets, at)
+
+
+def _codex_snapshot(value: object) -> dict[str, Any] | None:
+    """The object holding `primary`/`secondary`, from a token_count event or an app-server message."""
+    if not isinstance(value, dict):
+        return None
+    inner = _pick(value, "rateLimits", "rate_limits", "result")
+    inner = inner if isinstance(inner, dict) else value
+    nested = _pick(inner, "rateLimits", "rate_limits")
+    snapshot = nested if nested is not None else inner
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def parse_codex_snapshot(value: object, at: float) -> tuple[Reading, ...]:
+    """Codex's rate-limit snapshot: `primary` is the short window (5 hours on ChatGPT plans), `secondary` the week."""
+    snapshot = _codex_snapshot(value)
+    if snapshot is None:
+        return ()
+    slots = (snapshot.get(k) for k in ("primary", "secondary"))
+    found = (_codex_slot(w, at) for w in slots if isinstance(w, dict))
+    return tuple(r for r in found if r is not None)
+
+
+_CODEX_MARK = re.compile(r"rate_?[lL]imits")
+
+
+def parse_codex(raw: str, at: float) -> tuple[Reading, ...]:
+    """Every rate-limit snapshot in Codex's JSON lines (`exec --json` token_count events, app-server messages)."""
+    readings: list[Reading] = []
+    for ev in json_lines(raw, _CODEX_MARK):
+        payload = _pick(ev, "payload", "msg", "params", "result")
+        readings.extend(parse_codex_snapshot(payload if payload is not None else ev, at))
     return latest_per_window(readings)

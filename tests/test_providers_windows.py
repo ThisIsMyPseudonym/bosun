@@ -60,3 +60,37 @@ def test_claude_lines_that_are_not_events_are_ignored():
     ])
     assert windows.parse_claude(raw, at=1.0) == ()
     assert windows.parse_claude("", at=1.0) == ()
+
+
+# --- Codex -------------------------------------------------------------------------------------------------------
+
+
+def test_codex_primary_is_five_hours_and_secondary_weekly():
+    line = json.dumps({"type": "token_count", "rate_limits": {
+        "primary": {"used_percent": 42.0, "window_minutes": 300, "resets_at": 1800000000},
+        "secondary": {"used_percent": 100, "window_minutes": 10080, "resets_in_seconds": 3600}}})
+    got = {r.window: r for r in windows.parse_codex(line, at=1000.0)}
+    assert got["five_hour"].used == 0.42 and got["five_hour"].status == "allowed"
+    assert got["seven_day"].status == "rejected" and got["seven_day"].resets_at == 4600.0
+
+
+def test_codex_camel_case_app_server_shape_is_read_too():
+    reply = json.dumps({"id": 3, "result": {"rateLimits": {
+        "primary": {"usedPercent": 91, "windowDurationMins": 1440, "resetsAt": "2027-01-01T00:00:00Z"},
+        "secondary": {"usedPercent": 5, "windowDurationMins": 90}}}})
+    note = json.dumps({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+        "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1800000000}}}})
+    got = {r.window: r for r in windows.parse_codex(reply + "\n" + note, at=1.0)}
+    assert got["one_day"] == R("one_day", "allowed_warning", 0.91, 1798761600.0, 1.0)
+    assert got["90_min"].used == 0.05 and got["90_min"].resets_at is None
+    assert got["five_hour"].used == 0.1
+
+
+def test_codex_recorded_shape_and_junk():
+    raw = (FIX / "codex/handmade/exec-json.jsonl").read_text()
+    assert {r.window: r.used for r in windows.parse_codex(raw, at=1.0)} == {"five_hour": 0.12, "seven_day": 0.315}
+    junk = json.dumps({"rate_limits": {"primary": {"used_percent": "lots"}, "secondary": None}})
+    nameless = json.dumps({"rate_limits": {"primary": {"used_percent": 3, "window_minutes": -1}}})
+    assert windows.parse_codex(junk + "\nrate_limits {\n", at=1.0) == ()
+    assert windows.parse_codex(nameless, at=1.0) == (R("window", "allowed", 0.03, None, 1.0),)
+    assert windows.parse_codex(json.dumps({"rate_limits": []}), at=1.0) == ()
