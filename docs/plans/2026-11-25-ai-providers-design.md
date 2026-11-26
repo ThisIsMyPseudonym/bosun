@@ -41,6 +41,11 @@ A new package, `src/bosun/providers/`. Every AI call goes through it; nothing el
 
 ### Jobs
 
+`mcp` means Bosun can give the CLI an MCP server for one call without touching the user's own CLI
+settings. Verified for Claude (`--mcp-config` + `--strict-mcp-config`) and Codex (`-c`). Antigravity's
+`--settings` (session-only) is the candidate for it; Gemini CLI, Grok and Muse have only persistent `mcp add`,
+so they get no `mcp` until a per-call way is verified. Bosun never writes a CLI's own configuration.
+
 Jobs replace today's purposes. Each declares what it needs and whether it is background work.
 
 | Job | Needs | Started by |
@@ -70,10 +75,14 @@ next candidate is tried, up to three. A job keeps its login for the whole attemp
 
 **Readings.** Each call's own output is parsed for the plan's windows:
 
-- Claude: `rate_limit_event` in `--output-format stream-json` and in the Agent SDK, including `unifiedWindows`.
+- Claude: `rate_limit_event` in `--output-format stream-json` (which needs `--verbose`) and in the Agent SDK,
+  including `unifiedWindows`.
 - Codex: the `rate_limits` snapshot in `exec --json` (`primary` is the 5-hour window, `secondary` the weekly).
-- Antigravity: its `/usage` report.
-- Gemini CLI, Grok, Muse: no windows are reported, so use is counted from calls and tokens and marked estimated.
+  Not yet recorded on this machine: until a real reading confirms it, Codex counts as estimated.
+- Antigravity: its `/usage` report, as a separate read at most every 15 minutes (prompt calls pass
+  `--disable-slash-commands`), once it is confirmed to use no quota.
+- Gemini CLI, Grok, Muse: counted from calls and tokens and marked estimated. Grok has `grok usage --json`; it
+  becomes a reading once its output has been recorded.
 
 The latest reading per window and login goes in a new `quota_windows` table. A reading past its reset time, or
 undated and a week old, is unknown, never "0% used". A share above 1 is capped. An unknown window name is kept
@@ -106,7 +115,8 @@ model.
 Seatbelt or bubblewrap sandbox. Another CLI is eligible only inside a whole-process jail built from the same
 profiles: writes only to the worktree, a throwaway cache and that CLI's own login folder; network only to the
 package registries and the provider's API host; no `~/.ssh`, cloud credentials or Bosun data. Each CLI also runs in
-its tightest mode (for example `codex exec --sandbox workspace-write`). Bosun still commits; nothing is pushed
+its tightest mode (for example `codex exec --sandbox workspace-write`). Seatbelt can't filter by host name, so
+the jail sends traffic through a small local proxy that allows only the listed hosts. Bosun still commits; nothing is pushed
 until you click. `fix` is pinned to Claude by default.
 
 **Ask Bosun** runs behind an `AssistantEngine` interface (`start_turn`, `stream`, `stop`):
@@ -120,8 +130,9 @@ until you click. `fix` is pinned to Claude by default.
 - History is sent with every turn (`compose()`), so a conversation does not depend on any CLI's session and can
   move to another login.
 
-**Usage rows.** `llm_calls` gains `provider`, `account`, `job`, `window_draw` and `estimated`; a migration maps the
-old `purpose` values to jobs. `v_llm_calls` and `data-model.md` follow.
+**Usage rows.** `llm_calls` gains `provider`, `account`, `job`, `window_draw` and `estimated`; a migration copies the
+old `purpose` values (each is already a job name). `v_llm_spend` stays for older queries; a new `v_ai_spend`
+view and `data-model.md` follow.
 
 ## Failures and edge cases
 

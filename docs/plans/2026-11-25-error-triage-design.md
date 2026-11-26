@@ -94,6 +94,8 @@ the 75% line apply unchanged.
 - **Prompt.** The trimmed `diagnose` bundle is in the prompt (failed steps and output tails first, about 12,000
   characters), with the rule-table categories and the next-step kinds. Most verdicts need no tool call; tools are
   for related runs, the item and runbooks.
+- **Without `mcp`.** A CLI with only `json` can still triage: the bundle is in the prompt, so it answers with no
+  tools. The router prefers CLIs with `mcp` and uses the others when none has room.
 - **Limits.** Light model in the background, strong model on a click. At most 8 tool calls and 120 seconds. One
   triage at a time; it does not wait for or block the upgrade queue.
 - **Result.** JSON validated against `Verdict` (Claude also gets `--json-schema`). A schema failure fails over, as

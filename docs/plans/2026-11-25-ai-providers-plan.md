@@ -1416,7 +1416,8 @@ allow-list needs a proxy), R16 (a CLI's own login folder must be writable inside
    the first live check shows no `rate_limits` in `exec --json`, mark it estimated until a probe exists.
 5. **Per-call MCP for Gemini, Grok, Antigravity, Muse.** Only persistent `mcp add` commands exist (Muse's `-c` is
    unverified). *Recommend:* `CliMcpEngine` for Claude CLI and Codex only in phase 6; never write the user's CLI
-   configuration.
+   configuration. Check first whether `agy --settings '<json with mcpServers>'` (session-only, never
+   saved) gives Antigravity a per-call server; if it does, Antigravity gets `mcp` too.
 6. **Antigravity on untrusted input.** It has no flag that removes tools. *Recommend:* allow it for `summarize` and
    `explain` with `--sandbox --mode plan`, the text-only line and refusal of any reply with a tool step (Coho's
    rule), last in the default order.
