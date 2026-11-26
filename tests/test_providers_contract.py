@@ -4,8 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from bosun import proc
+from bosun.providers import contract
 from bosun.providers.catalog import CATALOG, spec
 from bosun.providers.contract import missing_flags, parse_version
+from bosun.store import Store
 
 
 def test_only_whole_flag_tokens_count():
@@ -57,3 +60,39 @@ def test_every_recorded_version_lists_every_lockdown_flag(provider, version):
     text = (FIXTURES / provider / version / "help.txt").read_text()
     assert parse_version((FIXTURES / provider / version / "version.txt").read_text()) == version
     assert missing_flags(text, spec(provider).lockdown_flags) == ()
+
+
+# --- the check itself: --version, then --help once per version, cached in the store --------------------------------
+CLAUDE_HELP = (FIXTURES / "claude" / "2.1.332" / "help.txt").read_text()
+
+
+@pytest.fixture
+def store(tmp_path):
+    with Store(tmp_path / "db.sqlite") as s:
+        yield s
+
+
+@pytest.fixture(autouse=True)
+def _fresh_versions(monkeypatch):
+    monkeypatch.setattr(contract, "_versions", {})  # the --version cache lives for the process
+
+
+def help_runner(version="2.1.332", help_text=None, rc=0):
+    calls = []
+
+    def run(argv, timeout=300, **kw):
+        calls.append(tuple(argv))
+        if argv[-1] == "--version":
+            return proc.Result(tuple(argv), 0, f"{version} (Claude Code)", "")
+        return proc.Result(tuple(argv), rc, help_text if help_text is not None else CLAUDE_HELP, "")
+    run.calls = calls
+    return run
+
+
+def test_a_new_version_reads_help_once_and_passes(store, monkeypatch):
+    run = help_runner(); monkeypatch.setattr(proc, "run", run)
+    first = contract.check(store, "claude", "/bin/claude")
+    assert first.ok and first.version == "2.1.332" and first.missing == () and first.finding == ""
+    assert contract.check(store, "claude", "/bin/claude").ok
+    assert sum(1 for c in run.calls if c[-1] == "--help") == 1   # cached per version in the store
+    assert sum(1 for c in run.calls if c[-1] == "--version") == 1  # and the version for ten minutes
