@@ -93,4 +93,6 @@ def providers_ready(request, monkeypatch):
 
     monkeypatch.setattr(contract, "check", lambda store, provider, binary, now=None:
                         contract.ContractStatus(provider, "test", True, (), ""))
+    monkeypatch.setattr(contract, "cached", lambda store, provider, binary, now=None:
+                        contract.ContractStatus(provider, "test", True, (), ""))
     monkeypatch.setattr(accounts, "installed", lambda: {p: f"/test/bin/{s.binary}" for p, s in CATALOG.items()})

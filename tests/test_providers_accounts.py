@@ -121,3 +121,95 @@ def test_an_added_grok_login_gets_a_short_per_login_leader_socket():
     assert accounts.login_args(accounts.default("grok", "grok"), prompt_call) == prompt_call
     claude = accounts.Login("claude", "work", "Work", "/c", False, "claude")
     assert accounts.login_args(claude, ("-p",)) == ("-p",)
+
+
+# --- non-blocking overview + end-to-end contract verdict ------------------------------------------------------------
+@pytest.mark.real_contract
+def test_overview_serves_cached_state_immediately_and_refreshes_in_background(store, monkeypatch):
+    import threading
+    from pathlib import Path
+
+    from bosun import proc
+    from bosun.providers import contract
+
+    fixtures = Path(__file__).parent / "fixtures" / "cli"
+    claude_help = (fixtures / "claude" / "2.1.332" / "help.txt").read_text()
+    codex_help = (fixtures / "codex" / "0.172.0" / "help.txt").read_text()
+    codex_features = (fixtures / "codex" / "0.172.0" / "features.txt").read_text()
+
+    monkeypatch.setattr(contract, "_versions", {})
+    monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/bin/claude", "codex": "/bin/codex"})
+
+    started, release = threading.Event(), threading.Event()
+    calls: list[tuple[str, ...]] = []
+
+    def blocking_run(argv, timeout=300, **kw):
+        calls.append(tuple(argv))
+        started.set()
+        assert release.wait(timeout=5), "background contract refresh was never released"
+        bin_name = argv[0]
+        if bin_name == "/bin/claude":
+            if argv[-1] == "--version":
+                return proc.Result(tuple(argv), 0, "2.1.332 (Claude Code)", "")
+            return proc.Result(tuple(argv), 0, claude_help, "")
+        if argv[-1] == "--version":
+            return proc.Result(tuple(argv), 0, "codex-cli 0.172.0", "")
+        if "--help" in argv:
+            return proc.Result(tuple(argv), 0, codex_help, "")
+        return proc.Result(tuple(argv), 0, codex_features, "")
+
+    monkeypatch.setattr(proc, "run", blocking_run)
+    # Cold cache: returns immediately while proc.run is blocked; does NOT wait on any CLI
+    first = accounts.overview(store)
+    by_bucket = {lg["bucket"]: lg for lg in first["logins"]}
+    assert by_bucket["claude"]["version"] is None and by_bucket["claude"]["contract"] == {"ok": False, "finding": "checking"}
+    assert by_bucket["codex"]["version"] is None and by_bucket["codex"]["contract"] == {"ok": False, "finding": "checking"}
+    assert started.wait(timeout=2)  # background refresh actually kicked off
+
+    release.set()
+    contract.wait_pending(timeout=5)
+    assert calls
+
+    # Warm cache: serves results with zero further subprocesses
+    monkeypatch.setattr(proc, "run", lambda *a, **kw: (_ for _ in ()).throw(AssertionError(f"spawned {a}")))
+    second = accounts.overview(store)
+    warm = {lg["bucket"]: lg for lg in second["logins"]}
+    assert warm["claude"]["version"] == "2.1.332" and warm["claude"]["contract"] == {"ok": True, "finding": ""}
+    assert warm["codex"]["version"] == "0.172.0" and warm["codex"]["contract"] == {"ok": True, "finding": ""}
+
+
+@pytest.mark.real_contract
+def test_overview_end_to_end_surfaces_a_failing_contract_verdict(store, monkeypatch):
+    from pathlib import Path
+
+    from bosun import proc
+    from bosun.providers import contract
+
+    fixtures = Path(__file__).parent / "fixtures" / "cli"
+    claude_help = (fixtures / "claude" / "2.1.332" / "help.txt").read_text()
+    broken_claude = "\n".join(
+        ln for ln in claude_help.splitlines()
+        if not (ln.lstrip().startswith("--strict-mcp-config") and len(ln) - len(ln.lstrip()) <= 8)
+    )
+    grok_old_help = (fixtures / "grok" / "1.0.70" / "help.txt").read_text()
+
+    monkeypatch.setattr(contract, "_versions", {})
+    monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/bin/claude", "grok": "/bin/grok"})
+
+    def fake_run(argv, timeout=300, **kw):
+        if argv[0] == "/bin/claude":
+            if argv[-1] == "--version":
+                return proc.Result(tuple(argv), 0, "2.1.332 (Claude Code)", "")
+            return proc.Result(tuple(argv), 0, broken_claude, "")
+        if argv[-1] == "--version":
+            return proc.Result(tuple(argv), 0, "grok 1.0.70 (abc) [stable]", "")
+        return proc.Result(tuple(argv), 0, grok_old_help, "")
+
+    monkeypatch.setattr(proc, "run", fake_run)
+    accounts.overview(store)
+    contract.wait_pending(timeout=5)
+    got = {lg["bucket"]: lg for lg in accounts.overview(store)["logins"]}
+    assert got["claude"]["version"] == "2.1.332"
+    assert got["claude"]["contract"] == {"ok": False, "finding": "Claude Code 2.1.332 dropped `--strict-mcp-config`"}
+    assert got["grok"]["version"] == "1.0.70"
+    assert got["grok"]["contract"] == {"ok": False, "finding": "Grok 1.0.70 dropped `--no-memory`"}

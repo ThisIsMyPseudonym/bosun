@@ -12,12 +12,14 @@ import json
 import math
 import os
 import re
+import sqlite3
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .. import proc
+from .. import proc, trace
 from .catalog import ProviderSpec, spec
 
 if TYPE_CHECKING:
@@ -32,6 +34,9 @@ TIMEOUT = 20.0
 
 # (resolved path, st_mtime_ns, st_size) -> (when asked, version or None); per process, like the CLI on disk
 _versions: dict[tuple[str, int, int], tuple[float, str | None]] = {}
+_refresh_lock = threading.Lock()
+_refreshing: set[tuple[str, str]] = set()
+_refresh_threads: set[threading.Thread] = set()
 
 
 @dataclass(frozen=True)
@@ -159,6 +164,27 @@ def _remember(store: Store | None, key: str, status: ContractStatus, readable: b
                                       "readable": readable, "at": at})
 
 
+def _status_from_cache(provider: str, version: str, found: dict[str, Any]) -> ContractStatus:
+    missing = tuple(str(f) for f in found.get("missing") or ())
+    return ContractStatus(provider, version, bool(found.get("ok")), missing, str(found.get("finding") or ""))
+
+
+def cached(store: Store | None, provider: str, binary: str,
+           now: Callable[[], float] = time.time) -> ContractStatus | None:
+    """The cached verdict for `binary` without starting a subprocess; None on a cold or expired cache."""
+    s, at = spec(provider), now()
+    known = _versions.get(_binary_key(binary))
+    if known is None:
+        return None
+    checked_at, version = known
+    if at - checked_at >= (VERSION_TTL if version is not None else UNREADABLE_TTL):
+        return None
+    if version is None:
+        return ContractStatus(provider, None, False, (), f"{s.label}: its --version could not be read")
+    found = _cached(store, f"{provider}|{version}", at)
+    return _status_from_cache(provider, version, found) if found is not None else None
+
+
 def check(store: Store | None, provider: str, binary: str,
           now: Callable[[], float] = time.time) -> ContractStatus:
     """Whether this CLI, as installed at `binary`, may be given a prompt. Never raises for a CLI's behaviour."""
@@ -169,8 +195,43 @@ def check(store: Store | None, provider: str, binary: str,
     key = f"{provider}|{version}"
     found = _cached(store, key, at)
     if found is not None:
-        missing = tuple(str(f) for f in found.get("missing") or ())
-        return ContractStatus(provider, version, bool(found.get("ok")), missing, str(found.get("finding") or ""))
+        return _status_from_cache(provider, version, found)
     status, readable = _judge(s, version, binary)
     _remember(store, key, status, readable, at)
     return status
+
+
+def refresh_async(store: Store | None, targets: Iterable[tuple[str, str]],
+                  now: Callable[[], float] = time.time) -> threading.Thread | None:
+    """Check uncached (provider, binary) pairs in a background thread so page loads never wait on CLIs."""
+    with _refresh_lock:
+        todo = [pair for pair in dict.fromkeys(targets) if pair not in _refreshing]
+        if not todo:
+            return None
+        _refreshing.update(todo)
+
+    def _work() -> None:
+        try:
+            for provider, binary in todo:
+                try:
+                    check(store, provider, binary, now=now)
+                except sqlite3.Error:
+                    break  # store closed on shutdown or test teardown
+        finally:
+            with _refresh_lock:
+                _refreshing.difference_update(todo)
+                _refresh_threads.discard(threading.current_thread())
+
+    t = threading.Thread(target=trace.bound(_work), name="cli-contract", daemon=True)
+    with _refresh_lock:
+        _refresh_threads.add(t)
+    t.start()
+    return t
+
+
+def wait_pending(timeout: float = 5.0) -> None:
+    """Wait for any in-flight background contract refreshes to finish."""
+    with _refresh_lock:
+        threads = list(_refresh_threads)
+    for t in threads:
+        t.join(timeout=timeout)

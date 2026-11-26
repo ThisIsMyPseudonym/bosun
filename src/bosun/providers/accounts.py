@@ -273,20 +273,37 @@ def _tilde(path: str | None) -> str | None:
     return path
 
 
+_UNSET = object()
+
+
 # --- what the dashboard shows --------------------------------------------------------------------------------------
-def describe(store: Store, login: Login) -> dict[str, Any]:
-    """One login for the dashboard: its CLI's version and whether that version passed its lockdown check."""
-    status = contract.check(store, login.provider, login.binary) if login.binary else None
+def describe(store: Store, login: Login, status: contract.ContractStatus | None | object = _UNSET) -> dict[str, Any]:
+    """One login for the dashboard: its CLI's cached version and lockdown verdict, never blocking on a CLI."""
+    if not login.binary:
+        verdict = {"ok": False, "finding": "not installed"}
+        version = None
+    else:
+        if status is _UNSET:
+            status = contract.cached(store, login.provider, login.binary)
+            if status is None:
+                contract.refresh_async(store, [(login.provider, login.binary)])
+        if isinstance(status, contract.ContractStatus):
+            version, verdict = status.version, {"ok": status.ok, "finding": status.finding}
+        else:
+            version, verdict = None, {"ok": False, "finding": "checking"}
     return {"provider": login.provider, "id": login.id, "bucket": login.bucket, "label": login.label,
             "home": _tilde(login.home), "excluded": login.excluded, "installed": bool(login.binary),
-            "version": status.version if status else None,
-            "contract": {"ok": status.ok, "finding": status.finding} if status else {"ok": False,
-                                                                                     "finding": "not installed"}}
+            "version": version, "contract": verdict}
 
 
 def overview(store: Store) -> dict[str, Any]:
-    """Every installed CLI's logins, and each catalog CLI: installed, and whether it can hold more logins."""
+    """Every installed CLI's logins, and each catalog CLI: installed, and whether it can hold more logins.
+    Serves cached contract verdicts immediately and refreshes any missing entries in the background."""
     found = installed()
+    statuses = {p: contract.cached(store, p, binary) for p, binary in found.items()}
+    missing = [(p, binary) for p, binary in found.items() if statuses[p] is None]
+    if missing:
+        contract.refresh_async(store, missing)
     clis = [{"provider": p, "label": s.label, "installed": p in found, "can_add": s.home_env is not None,
              "home_env": s.home_env} for p, s in CATALOG.items()]
-    return {"logins": [describe(store, lg) for lg in logins(store)], "clis": clis}
+    return {"logins": [describe(store, lg, status=statuses.get(lg.provider)) for lg in logins(store)], "clis": clis}
