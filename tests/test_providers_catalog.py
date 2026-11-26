@@ -31,3 +31,16 @@ def test_a_clis_models_can_be_overridden_per_tier():
     assert model("codex", "light", env={}) == "gpt-5.6-luna" and model("codex", "strong", env={}) == "gpt-5.6-terra"
     assert model("grok", "strong", env={"BOSUN_MODEL_GROK_STRONG": "grok-9"}) == "grok-9"
     assert model("muse", "light", env={"BOSUN_MODEL_MUSE_LIGHT": "  "}) == ""  # blank: the CLI's own default
+
+
+def test_a_cli_is_offered_only_the_jobs_its_capabilities_allow():
+    import pytest
+
+    from bosun.providers.catalog import capable
+
+    assert capable("summarize") == ("claude", "codex", "gemini", "grok", "antigravity", "muse")
+    assert capable("fix") == ("claude",)
+    assert capable("assistant") == ("claude",)
+    assert capable("computer_use") == ("claude",)
+    with pytest.raises(KeyError):
+        capable("no-such-job")

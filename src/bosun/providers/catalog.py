@@ -113,6 +113,12 @@ def spec(provider: str) -> ProviderSpec:
     return CATALOG[provider]
 
 
+def capable(job: str) -> tuple[str, ...]:
+    """The CLIs that have every capability a job needs, in catalog order. An unknown job: KeyError."""
+    needs = JOBS[job].needs
+    return tuple(p for p, s in CATALOG.items() if needs <= s.capabilities)
+
+
 def model(provider: str, tier: Literal["light", "strong"], env: Mapping[str, str] | None = None) -> str:
     """The model a tier runs on: BOSUN_MODEL_<PROVIDER>_LIGHT|STRONG, else the spec's constant."""
     s = spec(provider)
