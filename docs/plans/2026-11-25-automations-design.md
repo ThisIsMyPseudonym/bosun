@@ -1,6 +1,6 @@
 # Automations: when this happens, do that
 
-Status: design, draft 2026-11-26. Project 3 of 4. Builds on [the provider layer](2026-11-25-ai-providers-design.md)
+Status: design, agreed 2026-11-26. Project 3 of 4. Builds on [the provider layer](2026-11-25-ai-providers-design.md)
 (project 1) and [error triage](2026-11-25-error-triage-design.md) (project 2) and changes neither.
 
 ## Why
@@ -242,19 +242,18 @@ Test first, 80% coverage or better.
 3. `verdict` trigger (needs project 2), delays, merging, chain limit; preset "Retry when busy".
 4. Offers ("asks first"); `in_app_update` and its preset with project 4.
 
-## Open questions for Matt
+## Decisions on review (agreed 2026-11-26)
 
-1. **Do presets ship off?** Recommendation: yes, all four. Each is one click to turn on, with its sentence shown.
-2. **Should "runs on its own" grants for INSTALL expire?** Recommendation: yes, after 90 days, with one click to
-   renew ("Still want this?"). LOCAL grants never expire.
-3. **May an automation's install skip the three-day wait?** Recommendation: no. It is an install nobody clicked
-   for, like Autopilot's; a click on the item is the way past the wait.
-4. **SYSTEM actions on their own** (relaunch a browser at 03:00)? Recommendation: not in v1; "asks first" only.
-5. **How many retries per failure?** Recommendation: one (the chain limit). Revisit with data from the firings.
-6. **"What changed" written by a model?** Recommendation: no, a code-built digest; a `summarize` wording can come later.
-7. **May agents or the assistant pause an automation?** Recommendation: no, all automation changes stay `user_only`
-   for v1, though pausing is the safe direction.
-8. **Schedules: daily and weekdays only?** Recommendation: yes, no cron syntax.
+| Question | Decision |
+|---|---|
+| Do presets ship off? | Yes, all four. |
+| Do "runs on its own" INSTALL grants expire? | Yes, after 90 days, with one click to renew ("Still want this?"). LOCAL grants never expire. |
+| May an automation's install skip the three-day wait? | No, same as Autopilot. A click on the item is the way past the wait. |
+| SYSTEM actions on their own? | No. Quitting, reopening apps and in-app updates always ask first. |
+| Retries per failure | One (the chain limit). Revisit with data from the firings. |
+| "What changed" written by a model? | No, a code-built digest. Model wording can come later. |
+| May agents or the assistant pause an automation? | No. Every automation change is `user_only`. |
+| Schedules | Daily and chosen weekdays only; no cron syntax. |
 
 ## Future work
 
