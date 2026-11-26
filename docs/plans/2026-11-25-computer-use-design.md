@@ -1,6 +1,6 @@
 # Computer use: updating apps from their own menu
 
-Status: design, draft for review 2026-11-25. Project 4 of 4. Builds on
+Status: design, agreed 2026-11-25. Project 4 of 4. Builds on
 [AI providers](2026-11-25-ai-providers-design.md): the `computer_use` job, its router, quota and approvals.
 
 ## Why
@@ -229,22 +229,17 @@ Test first, 80% coverage or better.
 5. Tier 2 MCP server, guards and the live panel.
 6. Screenshots (Screen Recording).
 
-## Open questions for Matt
+## Decisions on review (agreed 2026-11-25)
 
-1. **How the helper is signed.** Ad-hoc, rebuilt only when its source changes (you re-grant then), or a self-signed
-   identity made at install so grants survive rebuilds (needs a keychain prompt)? *Recommend ad-hoc*: rebuilds will
-   be rare, and a changed binary losing its grant is a safety property.
-2. **Screen Recording.** Required for tier 2, or optional? *Recommend optional*, asked for only on the first
-   **Try with AI**: most update windows are in the tree, and the monthly re-prompt is a nuisance.
-3. **Put the copy back on a changed signer.** Quit the app and restore, as `caskguard` does, or only report it, as
-   `appwatch` does? *Recommend restore*: Bosun started this update, so it holds it to the cask rule.
-4. **Restart in tier 1.** Covered by your first click (button says "and restart"), or a second confirmation?
-   *Recommend the first click*: it is the whole point of the button.
-5. **Screenshots in the record.** Keep none, keep thumbnails for a day, or keep them with the run? *Recommend none*:
-   chat apps show private messages; the text trace is enough to diagnose.
-6. **Browsers in tier 2.** *Recommend excluded* for now.
-7. **Agents starting tier 1.** Under the existing "quit and reopen apps" switch, or a new switch? *Recommend the
-   existing switch*: it is the same kind of act.
+| Question | Decision |
+|---|---|
+| How the helper is signed | Ad-hoc, rebuilt only when its source changes. A changed binary losing its grant is a safety property. |
+| Screen Recording | Optional, asked for on the first **Try with AI**. |
+| New version signed by a different developer | Quit the app and put the kept copy back, as `caskguard` does, and say why. |
+| Restart in tier 1 | Covered by the first click; the button says "and restart". |
+| Screenshots in the record | None kept. They go to the provider for that step only; the run keeps a text trace. |
+| Browsers in tier 2 | Excluded for now; browsers use tier 1 only. |
+| Agents starting tier 1 | Under the existing "Let agents quit and reopen apps" switch. |
 
 ## Future work
 
