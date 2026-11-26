@@ -89,11 +89,49 @@ def test_the_default_login_can_be_excluded_and_brought_back(client, app):
 
 def test_at_most_eight_added_logins_per_cli(client, tmp_path):
     for i in range(accounts.MAX_PER_CLI):
-        body = {"provider": "gemini", "id": f"acct-{i}", "label": f"A{i}", "home": str(tmp_path)}
+        folder = tmp_path / f"acct-{i}"; folder.mkdir()
+        body = {"provider": "gemini", "id": f"acct-{i}", "label": f"A{i}", "home": str(folder)}
         assert client.post("/api/ai/logins", json=body, headers=H).status_code == 200
-    body = {"provider": "gemini", "id": "acct-x", "label": "X", "home": str(tmp_path)}
+    extra = tmp_path / "acct-x"; extra.mkdir()
+    body = {"provider": "gemini", "id": "acct-x", "label": "X", "home": str(extra)}
     r = client.post("/api/ai/logins", json=body, headers=H)
     assert r.status_code == 400 and "8" in r.json()["detail"]
+
+
+def test_added_login_folders_are_normalized_and_unsafe_or_duplicate_folders_rejected(client, app, tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+
+    fake_home = tmp_path / "home"
+    default_claude = fake_home / ".claude"
+    work = fake_home / ".claude-work"
+    symlink_to_work = fake_home / "work-link"
+    default_claude.mkdir(parents=True)
+    work.mkdir()
+    symlink_to_work.symlink_to(work)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    # Reject `..`, `/`, user's home itself, and the CLI's default folder
+    for bad_home, word in (
+        (f"{work}/../.claude-work", ".."),
+        ("/", "root"),
+        (str(fake_home), "home"),
+        (str(default_claude), "default"),
+    ):
+        r = client.post("/api/ai/logins", json={"provider": "claude", "id": "bad", "label": "Bad", "home": bad_home},
+                        headers=H)
+        assert r.status_code == 400 and word in r.json()["detail"].lower(), (bad_home, r.status_code, r.text)
+
+    # Adding through a symlink normalizes to realpath in storage
+    r = client.post("/api/ai/logins", json={"provider": "claude", "id": "work", "label": "Work",
+                                            "home": str(symlink_to_work)}, headers=H)
+    assert r.status_code == 200
+    assert accounts.stored(app.store)[0].home == os.path.realpath(work)
+
+    # Duplicate folder (direct path matching previously symlinked login) is rejected
+    dup = client.post("/api/ai/logins", json={"provider": "claude", "id": "work2", "label": "Work2",
+                                              "home": str(work)}, headers=H)
+    assert dup.status_code == 400 and "already" in dup.json()["detail"].lower()
 
 
 def test_login_folders_under_home_are_returned_with_tilde(client, tmp_path, monkeypatch):

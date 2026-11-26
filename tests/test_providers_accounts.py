@@ -32,6 +32,8 @@ def test_each_installed_cli_has_its_default_login_and_added_ones_follow(store, m
     {"provider": "claude", "id": "work", "label": "", "home": "/a"},                   # no label
     {"provider": "claude", "id": "work", "label": "a\nb", "home": "/a"},               # control character
     {"provider": "claude", "id": "work", "label": "W", "home": "relative/path"},       # not absolute
+    {"provider": "claude", "id": "work", "label": "W", "home": "/a/../b"},             # parent traversal
+    {"provider": "claude", "id": "work", "label": "W", "home": "/"},                   # filesystem root
     {"provider": "claude", "id": "work", "label": "W", "home": None},                  # no folder
     {"provider": "nope", "id": "work", "label": "W", "home": "/a"},                    # not a catalog CLI
     "not an object",
@@ -102,11 +104,18 @@ def test_every_login_drops_override_keys_and_added_logins_point_at_their_folder(
     assert accounts.login_env(accounts.default("antigravity", "agy")) == ({}, ())
 
 
-def test_an_added_grok_login_gets_its_own_leader_socket():
-    work = accounts.Login("grok", "work", "Work", "/Users/me/.grok-work/", False, "grok")
+def test_an_added_grok_login_gets_a_short_per_login_leader_socket():
+    deep_home = "/Users/me/" + "/".join(["very-long-directory-segment"] * 6) + "/.grok-work/"
+    work = accounts.Login("grok", "work", "Work", deep_home, False, "grok")
+    other = accounts.Login("grok", "side", "Side", "/Users/me/.grok-side", False, "grok")
     prompt_call = ("--prompt-file", "/tmp/p", "--output-format", "json")
-    assert accounts.login_args(work, prompt_call) == ("--leader-socket", "/Users/me/.grok-work/leader.sock",
-                                                      *prompt_call)
+    got = accounts.login_args(work, prompt_call)
+    got_other = accounts.login_args(other, prompt_call)
+    assert got[0] == "--leader-socket" and got[2:] == prompt_call
+    assert got[1] == accounts.login_args(work, prompt_call)[1]  # deterministic per login
+    assert got[1] != got_other[1]  # distinct per login
+    # Must stay comfortably under the 104-byte Unix domain socket limit (even with Grok's `.daemon` suffix)
+    assert len((got[1] + ".daemon").encode()) < 104
     assert accounts.login_args(work, ("--version",)) == ("--version",)  # only a prompt call starts a leader
     assert accounts.login_args(work, ("usage", "--json")) == ("usage", "--json")
     assert accounts.login_args(accounts.default("grok", "grok"), prompt_call) == prompt_call
