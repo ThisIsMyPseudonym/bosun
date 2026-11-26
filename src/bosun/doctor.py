@@ -1,7 +1,9 @@
 """`bosun doctor`: what this machine has and lacks for Bosun to work, in plain words.
 
-It only looks. It never creates the data folder, opens the database, starts the dashboard, installs a service or
+It only looks. It never creates the data folder or the database, starts the dashboard, installs a service or
 downloads a tool, so it is safe to run on a machine where Bosun isn't set up yet (that is when it is most useful).
+The one thing it reads from an existing database, opened read-only, is each AI CLI's cached contract verdict; it
+asks the CLIs themselves only `--version` and `--help`, never a prompt.
 Everything it asks the machine goes through `Probe`, so a test can describe a machine without having one.
 """
 
@@ -10,6 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import sqlite3
 import sys
 from importlib import metadata
 from dataclasses import dataclass
@@ -17,6 +20,8 @@ from pathlib import Path
 
 from . import diagnose, launcher, machine, proc, selfupdate
 from .config import PROJECT_ROOT, Settings
+from .providers import accounts, contract
+from .providers.catalog import CATALOG
 
 OK, MISSING, OPTIONAL = "[ok]", "[!!]", "[--]"  # plain ASCII: a Windows console may not print a tick
 MIN_PYTHON = (3, 13)
@@ -81,6 +86,21 @@ class Probe:
             return True, proc.run(["systemctl", "--user", "is-active", "bosun-serve.service"], timeout=15).stdout.strip() == "active"
         return (launcher.start_menu() / "Startup" / launcher.STARTUP_NAME).exists(), None
 
+    def ai_clis(self) -> dict[str, str]:
+        """provider -> binary, for each AI CLI Bosun can use that is on PATH."""
+        return accounts.installed()
+
+    def ai_contract(self, db: Path, provider: str, binary: str) -> contract.ContractStatus:
+        """Whether that CLI's version honours Bosun's lockdown flags: only --version and --help are run, and the
+        cached verdict comes from a database that already exists, opened read-only (or none)."""
+        from .store import Store
+
+        try:
+            with Store(db, read_only=True) as store:
+                return contract.check(store, provider, binary)
+        except (FileNotFoundError, sqlite3.Error):  # no database yet, or one this machine can't read: ask afresh
+            return contract.check(None, provider, binary)
+
     def signing(self, root: Path) -> list[str]:
         """What stops self-update from verifying a commit here; empty when nothing does."""
         problems = []
@@ -125,6 +145,29 @@ def _managers(probe: Probe, tools: dict[str, str], s: Settings) -> list[Line]:
     return lines
 
 
+CLAUDE_WHY = ("optional. Bosun works without it; it adds plain-language release-note summaries, the Ask Bosun "
+              "assistant, 'Let Claude Code try it' on a project, and the Claude Code link (`bosun mcp install`)")
+
+
+def _ai_clis(probe: Probe, s: Settings) -> list[Line]:
+    """One line per AI CLI Bosun can use: its version, or why Bosun won't send it a prompt."""
+    found, out = probe.ai_clis(), []
+    for provider, sp in CATALOG.items():
+        runbook = f"docs/runbooks/{provider}-setup.md"
+        binary = found.get(provider)
+        if binary is None:
+            why = CLAUDE_WHY if provider == "claude" else (
+                f"optional. Install it and sign in to let Bosun use your {sp.label} plan for release-note summaries "
+                "and 'Will this break?'")
+            out.append(Line(OPTIONAL, f"{sp.label}: not found", f"{why} (see {runbook})"))
+            continue
+        status = probe.ai_contract(s.db_path, provider, binary)
+        out.append(Line(OK, f"{sp.label}: {status.version}") if status.ok else
+                   Line(OPTIONAL, f"{sp.label}: {status.finding}; Bosun sends it no prompt until it passes",
+                        f"update it, or check that `{sp.binary} --help` runs (see {runbook})"))
+    return out
+
+
 def check(s: Settings, probe: Probe | None = None, root: Path = PROJECT_ROOT) -> list[Line]:
     p = probe or Probe()
     tools = p.tools()
@@ -158,10 +201,7 @@ def check(s: Settings, probe: Probe | None = None, root: Path = PROJECT_ROOT) ->
 
     out += _managers(p, tools, s)
 
-    out.append(Line(OK, f"Claude Code: {tools['claude']}") if "claude" in tools else
-               Line(OPTIONAL, "Claude Code: not found",
-                    "optional. Bosun works without it; it adds plain-language release-note summaries, the Ask Bosun "
-                    "assistant, 'Let Claude Code try it' on a project, and the Claude Code link (`bosun mcp install`)"))
+    out += _ai_clis(p, s)
 
     scanner = s.osv_scanner
     out.append(Line(OK, f"osv-scanner: {_tilde(scanner)}") if scanner.exists() else

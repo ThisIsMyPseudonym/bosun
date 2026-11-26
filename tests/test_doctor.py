@@ -7,6 +7,9 @@ import pytest
 from bosun import cli, doctor, machine
 from bosun.config import load_settings
 from bosun.doctor import MISSING, OK, OPTIONAL
+from bosun.providers import contract
+from bosun.providers.catalog import CATALOG
+from bosun.providers.contract import ContractStatus
 
 
 class FakeMachine(doctor.Probe):
@@ -15,7 +18,8 @@ class FakeMachine(doctor.Probe):
     def __init__(self, tools=None, python=(3, 13, 1), uv="/bin/uv", pip="pip 26.0", folder="writable", busy=False,
                  bosun_up=False, service=(True, True), signing=()):
         self._t = tools if tools is not None else {"uv": "uv 0.9", "git": "git version 2.50", "brew": "Homebrew 5",
-                                                   "npm": "11.0", "claude": "2.1 (Claude Code)"}
+                                                   "npm": "11.0", "claude": "2.1 (Claude Code)", "codex": "0.1",
+                                                   "gemini": "0.1", "grok": "1.0", "agy": "1.5", "muse": "1.4"}
         self._a = dict(python=python, uv=uv, pip=pip, folder=folder, busy=busy, up=bosun_up, service=service, signing=list(signing))
 
     def python(self): return self._a["python"]
@@ -27,6 +31,7 @@ class FakeMachine(doctor.Probe):
     def bosun_answers(self, url): return self._a["up"]
     def service(self): return self._a["service"]
     def signing(self, root): return self._a["signing"]
+    def ai_clis(self): return {p: f"/bin/{sp.binary}" for p, sp in CATALOG.items() if sp.binary in self._t}
 
 
 @pytest.fixture
@@ -168,3 +173,35 @@ def test_a_path_under_the_home_folder_is_shown_without_the_user_name():
     assert doctor._tilde(Path.home() / "Library" / "Bosun") == "~/Library/Bosun".replace("/", __import__("os").sep)
     assert doctor._tilde(Path.home()) == "~" and doctor._tilde("/opt/tool") == "/opt/tool"
     assert doctor._tilde(str(Path.home()) + "x/y") == str(Path.home()) + "x/y"  # a neighbour's folder is not home
+
+
+def test_doctor_lists_each_ai_cli_its_version_and_contract(s, monkeypatch):
+    monkeypatch.setattr(contract, "check", lambda store, p, b: ContractStatus(p, "1.0", p != "grok",
+                        ("--no-memory",) if p == "grok" else (), "Grok 1.0 dropped `--no-memory`" if p == "grok" else ""))
+    found = [str(ln) for ln in lines(s)]
+    assert any("Claude Code: 1.0" in ln for ln in found)
+    assert any("Grok" in ln and "dropped `--no-memory`" in ln and "update it" in ln for ln in found)
+    assert mark_of(lines(s), "Grok") == OPTIONAL and mark_of(lines(s), "Codex") == OK
+    assert {ln.fact.split(":")[0] for ln in lines(s) if ln.fact.split(":")[0] in
+            {sp.label for sp in CATALOG.values()}} == {sp.label for sp in CATALOG.values()}
+
+
+def test_a_missing_ai_cli_is_optional_and_says_how_to_get_started(s):
+    found = lines(s, tools={"uv": "u", "git": "g", "claude": "2.1"})
+    for label in ("Codex", "Gemini CLI", "Grok", "Antigravity", "Muse"):
+        [line] = [ln for ln in found if ln.fact.startswith(label + ":")]
+        assert line.mark == OPTIONAL and "not found" in line.fact and "-setup.md" in line.fix
+    assert doctor.report(found)[1] == 0  # no AI CLI is required
+
+
+def test_doctor_reads_the_contract_cache_read_only_and_never_writes_it(s, tmp_path, monkeypatch):
+    from bosun.store import Store
+
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path / "data"))
+    own = load_settings()
+    Store(own.db_path).close()
+    seen = []
+    monkeypatch.setattr(contract, "check", lambda store, p, b: seen.append(store.read_only if store else None)
+                        or ContractStatus(p, "1.0", True, (), ""))
+    lines(own)
+    assert len(seen) == len(CATALOG) and all(ro is True for ro in seen)
