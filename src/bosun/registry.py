@@ -451,7 +451,8 @@ ASSISTANT = "assistant"  # the built-in Ask Bosun assistant (assistant.py)
 # What `bosun demo` refuses, besides everything that installs, upgrades, pins, fixes, quits, opens or restores
 # (Risk.INSTALL and above): the small actions that would look at, or run something on, the real computer.
 DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "discard_fix", "watch_app", "check_app",
-                          "assistant_ask", "terminal_input", "terminal_stop"})
+                          "assistant_ask", "terminal_input", "terminal_stop",
+                          "ai_logins", "add_ai_login", "set_ai_login"})
 
 
 def is_agent(actor: Actor) -> bool:

@@ -47,9 +47,13 @@ def test_demo_refuses_an_install(client):
 
 
 def test_demo_refuses_actions_that_open_or_look_at_the_machine(client):
-    for path, body in (("/api/open-updates", {}), ("/api/refresh", {})):
+    for path, body in (("/api/open-updates", {}), ("/api/refresh", {}),
+                       ("/api/ai/logins", {"provider": "claude", "id": "work", "label": "Work", "home": "/tmp"}),
+                       ("/api/ai/logins/claude/default", {"excluded": True})):
         r = client.post(path, json=body)
         assert r.status_code == 403 and "This is demo data" in r.text
+    r = client.get("/api/ai/logins")
+    assert r.status_code == 403 and "This is demo data" in r.text
 
 
 def test_demo_still_lets_you_read_and_put_an_item_away(client):

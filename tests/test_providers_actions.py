@@ -94,3 +94,19 @@ def test_at_most_eight_added_logins_per_cli(client, tmp_path):
     body = {"provider": "gemini", "id": "acct-x", "label": "X", "home": str(tmp_path)}
     r = client.post("/api/ai/logins", json=body, headers=H)
     assert r.status_code == 400 and "8" in r.json()["detail"]
+
+
+def test_login_folders_under_home_are_returned_with_tilde(client, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    fake_home = tmp_path / "home"
+    work = fake_home / ".claude-work"
+    work.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    body = {"provider": "claude", "id": "work", "label": "Work", "home": str(work)}
+    added = client.post("/api/ai/logins", json=body, headers=H)
+    assert added.status_code == 200 and added.json()["home"] == "~/.claude-work"
+    listed = next(lg for lg in client.get("/api/ai/logins").json()["logins"] if lg["bucket"] == "claude@work")
+    assert listed["home"] == "~/.claude-work"
+    toggled = client.post("/api/ai/logins/claude/work", json={"excluded": True}, headers=H)
+    assert toggled.status_code == 200 and toggled.json()["home"] == "~/.claude-work"

@@ -18,6 +18,7 @@ import re
 import shutil
 import threading
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..registry import Invalid, NotFound
@@ -219,12 +220,22 @@ def set_excluded(store: Store, provider: str, login_id: str, excluded: bool) -> 
     return describe(store, Login(provider, login_id, new.label, new.home, excluded, installed().get(provider, "")))
 
 
+def _tilde(path: str | None) -> str | None:
+    """A path with the home folder written as ~, so API replies do not leak the user name."""
+    if not path:
+        return path
+    for home in dict.fromkeys((str(Path.home()), os.path.realpath(Path.home()))):
+        if path == home or path.startswith(home + os.sep):
+            return "~" + path[len(home):]
+    return path
+
+
 # --- what the dashboard shows --------------------------------------------------------------------------------------
 def describe(store: Store, login: Login) -> dict[str, Any]:
     """One login for the dashboard: its CLI's version and whether that version passed its lockdown check."""
     status = contract.check(store, login.provider, login.binary) if login.binary else None
     return {"provider": login.provider, "id": login.id, "bucket": login.bucket, "label": login.label,
-            "home": login.home, "excluded": login.excluded, "installed": bool(login.binary),
+            "home": _tilde(login.home), "excluded": login.excluded, "installed": bool(login.binary),
             "version": status.version if status else None,
             "contract": {"ok": status.ok, "finding": status.finding} if status else {"ok": False,
                                                                                      "finding": "not installed"}}
