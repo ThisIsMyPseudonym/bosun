@@ -223,3 +223,91 @@ def parse_codex(raw: str, at: float) -> tuple[Reading, ...]:
         payload = _pick(ev, "payload", "msg", "params", "result")
         readings.extend(parse_codex_snapshot(payload if payload is not None else ev, at))
     return latest_per_window(readings)
+
+
+# --- Antigravity -------------------------------------------------------------------------------------------------
+
+_SLUG = re.compile(r"[^a-z0-9.-]+")
+_PERCENT_CELL = re.compile(r"^\d+(\.\d+)?%$|^0?\.\d+$|^1(\.0+)?$")
+_DATE_CELL = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def quota_window(name: object) -> str:
+    """`quota:<model>` from a model's display name, or plain `quota` when it has none."""
+    slug = _SLUG.sub("-", name.strip().lower())[:40].strip("-") if isinstance(name, str) else ""
+    return f"quota:{slug}" if slug else "quota"
+
+
+def _remaining(value: object) -> float | None:
+    """A remaining share, 0-1, from a fraction, a percentage or a string such as "10%"."""
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            value = float(text[:-1]) / 100 if text.endswith("%") else float(text)
+        except ValueError:
+            return None
+    f = _number(value)
+    if f is None or f < 0:
+        return None
+    return min(1.0, f / 100 if f > 1 else f)
+
+
+def _quota(name: object, remaining: object, reset: object, at: float) -> Reading | None:
+    left = _remaining(remaining)
+    if left is None:
+        return None
+    used = 1.0 - left
+    status: Status = "rejected" if used >= 1 else "allowed_warning" if used >= CODEX_WARNING else "allowed"
+    return Reading(quota_window(name), status, used, epoch(reset), at, "probe")
+
+
+def _agy_entries(parsed: object) -> list[object]:
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        return next((v for v in parsed.values() if isinstance(v, list)), [parsed])
+    return []
+
+
+def _agy_json(parsed: object, at: float) -> list[Reading]:
+    out: list[Reading] = []
+    for item in _agy_entries(parsed):
+        if not isinstance(item, dict):
+            continue
+        q = _pick(item, "quotaInfo", "quota_info")
+        q = q if isinstance(q, dict) else item
+        remaining = _pick(q, "remainingFraction", "remaining_fraction")
+        if remaining is None:
+            percent = _number(_pick(q, "remainingPercentage", "remaining_percentage"))
+            remaining = percent / 100 if percent is not None else None
+        r = _quota(_pick(item, "model", "label", "name", "displayName"), remaining,
+                   _pick(q, "resetTime", "reset_time", "resetsAt"), at)
+        if r is not None:
+            out.append(r)
+    return out
+
+
+def _agy_lines(text: str, at: float) -> list[Reading]:
+    out: list[Reading] = []
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.split("\t")]
+        share_cell = next((c for c in cells[1:] if _PERCENT_CELL.match(c)), None)
+        if len(cells) < 2 or share_cell is None:
+            continue
+        reset = next((c for c in cells if _DATE_CELL.search(c) and epoch(c) is not None), None)
+        r = _quota(cells[0], share_cell, reset, at)
+        if r is not None:
+            out.append(r)
+    return out
+
+
+def parse_antigravity(raw: str, at: float) -> tuple[Reading, ...]:
+    """Antigravity's `/usage` report: JSON quota entries (a remaining fraction and a reset time), or lines of
+    `name<TAB>remaining<TAB>reset`. Built from its changelog's description; no recorded reply exists yet."""
+    text = raw.strip()
+    if text.startswith(("{", "[")):
+        try:
+            return latest_per_window(_agy_json(json.loads(text), at))
+        except ValueError:
+            pass  # not JSON after all: read it as lines
+    return latest_per_window(_agy_lines(text, at))

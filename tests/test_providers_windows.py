@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from bosun.providers import windows
 
 FIX = Path(__file__).parent / "fixtures" / "cli"
@@ -94,3 +96,28 @@ def test_codex_recorded_shape_and_junk():
     assert windows.parse_codex(junk + "\nrate_limits {\n", at=1.0) == ()
     assert windows.parse_codex(nameless, at=1.0) == (R("window", "allowed", 0.03, None, 1.0),)
     assert windows.parse_codex(json.dumps({"rate_limits": []}), at=1.0) == ()
+
+
+# --- Antigravity -------------------------------------------------------------------------------------------------
+
+
+def test_antigravity_usage_json_and_tab_lines_give_remaining_as_used():
+    js = json.dumps([{"model": "Gemini 3.8 Flash", "quotaInfo": {"remainingFraction": 0.25,
+                                                                 "resetTime": "2026-11-26T00:00:00Z"}}])
+    (r,) = windows.parse_antigravity(js, at=5.0)
+    assert r == R("quota:gemini-3.8-flash", "allowed", 0.75, 1795651200.0, 5.0, "probe")
+    (t,) = windows.parse_antigravity("Model\tRemaining\tResets\nGemini 3.8 Flash\t10%\t2026-11-26T00:00:00Z\n", at=5.0)
+    assert t.window == "quota:gemini-3.8-flash" and t.used == pytest.approx(0.9) and t.status == "allowed_warning"
+    assert t.resets_at == 1795651200.0
+
+
+def test_antigravity_other_shapes_and_junk():
+    wrapped = json.dumps({"quotas": [{"label": "Argon", "remainingPercentage": 0},
+                                     {"name": "x", "quota_info": {"remaining_fraction": "lots"}}, "junk"]})
+    (argon,) = windows.parse_antigravity(wrapped, at=1.0)
+    assert argon == R("quota:argon", "rejected", 1.0, None, 1.0, "probe")
+    single = json.dumps({"remainingFraction": 0.5})
+    assert windows.parse_antigravity(single, at=1.0) == (R("quota", "allowed", 0.5, None, 1.0, "probe"),)
+    assert windows.parse_antigravity("{broken\nFlash\t0.4\n", at=1.0)[0].used == pytest.approx(0.6)
+    assert windows.parse_antigravity("Third-party quota reached. Resets in 2h55m54s.", at=1.0) == ()
+    assert windows.parse_antigravity("a\tb\n\n", at=1.0) == ()
