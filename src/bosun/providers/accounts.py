@@ -11,12 +11,16 @@ or older value can never put a malformed login in front of a CLI.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
-from dataclasses import dataclass
+import threading
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
-from .catalog import CATALOG
+from ..registry import Invalid, NotFound
+from . import contract
+from .catalog import CATALOG, ProviderSpec
 
 if TYPE_CHECKING:
     from ..store import Store
@@ -155,3 +159,79 @@ def login_args(login: Login, args: tuple[str, ...]) -> tuple[str, ...]:
         return args
     sep = "\\" if "\\" in login.home else "/"
     return ("--leader-socket", f"{login.home.rstrip('/' + sep)}{sep}leader.sock", *args)
+
+
+# --- the owner's changes (registry: add_ai_login, set_ai_login, both user_only) --------------------------------------
+_writing = threading.Lock()  # one read-modify-write of the setting at a time
+
+
+def _save(store: Store, entries: list[Stored]) -> None:
+    store.set_setting(SETTING, json.dumps([asdict(e) for e in entries]))
+
+
+def _spec_for(provider: str, missing: type[Exception] = Invalid) -> ProviderSpec:
+    if provider not in CATALOG:
+        raise missing("Unknown AI CLI; choose from " + ", ".join(CATALOG))
+    return CATALOG[provider]
+
+
+def add(store: Store, provider: str, login_id: str, label: str, home: str) -> dict[str, Any]:
+    """Add a login: a folder the CLI was signed in with. The folder must exist; nothing in it is read."""
+    s = _spec_for(provider)
+    if s.home_env is None:
+        raise Invalid(f"{s.label} holds one login per machine, so it can't have another")
+    if login_id == DEFAULT:
+        raise Invalid("`default` is the CLI's own login; choose another id")
+    home = home.strip()
+    if not _absolute(home):
+        raise Invalid("The login folder must be an absolute path")
+    if not os.path.isdir(home):  # a stat, not a read: Bosun never opens a file in a login folder
+        raise Invalid(f"No folder at {home}; sign in with {s.home_env} set to it first")
+    with _writing:
+        entries = list(stored(store))
+        if any(e.provider == provider and e.id == login_id for e in entries):
+            raise Invalid(f"{s.label} already has a login called {login_id}")
+        if sum(1 for e in entries if e.provider == provider and e.id != DEFAULT) >= MAX_PER_CLI:
+            raise Invalid(f"{s.label} can have at most {MAX_PER_CLI} added logins")
+        entry = _one({"provider": provider, "id": login_id, "label": label, "home": home}, entries)
+        if entry is None:
+            raise Invalid("That login is malformed: check its id, label and folder")
+        _save(store, [*entries, entry])
+    return describe(store, Login(provider, login_id, entry.label, home, False, installed().get(provider, "")))
+
+
+def set_excluded(store: Store, provider: str, login_id: str, excluded: bool) -> dict[str, Any]:
+    """Exclude a login from every job, or bring it back. The default login is stored only when renamed or excluded."""
+    _spec_for(provider, NotFound)
+    with _writing:
+        entries = list(stored(store))
+        at = next((i for i, e in enumerate(entries) if e.provider == provider and e.id == login_id), None)
+        if at is None and login_id != DEFAULT:
+            raise NotFound(f"No {provider} login called {login_id}")
+        old = entries[at] if at is not None else Stored(provider, DEFAULT, "Default", None, False)
+        new = Stored(old.provider, old.id, old.label, old.home, excluded)
+        if at is None:
+            entries.append(new)
+        else:
+            entries[at] = new
+        _save(store, entries)
+    return describe(store, Login(provider, login_id, new.label, new.home, excluded, installed().get(provider, "")))
+
+
+# --- what the dashboard shows --------------------------------------------------------------------------------------
+def describe(store: Store, login: Login) -> dict[str, Any]:
+    """One login for the dashboard: its CLI's version and whether that version passed its lockdown check."""
+    status = contract.check(store, login.provider, login.binary) if login.binary else None
+    return {"provider": login.provider, "id": login.id, "bucket": login.bucket, "label": login.label,
+            "home": login.home, "excluded": login.excluded, "installed": bool(login.binary),
+            "version": status.version if status else None,
+            "contract": {"ok": status.ok, "finding": status.finding} if status else {"ok": False,
+                                                                                     "finding": "not installed"}}
+
+
+def overview(store: Store) -> dict[str, Any]:
+    """Every installed CLI's logins, and each catalog CLI: installed, and whether it can hold more logins."""
+    found = installed()
+    clis = [{"provider": p, "label": s.label, "installed": p in found, "can_add": s.home_env is not None,
+             "home_env": s.home_env} for p, s in CATALOG.items()]
+    return {"logins": [describe(store, lg) for lg in logins(store)], "clis": clis}

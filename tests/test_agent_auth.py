@@ -1,6 +1,8 @@
 """A local agent's way into the dashboard: a credential from the key file, an actor in the audit trail, and a
 policy in the server that the agent cannot change."""
 
+import tempfile
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -20,7 +22,10 @@ AGENT = auth.AgentAuth(SESSION_KEY)  # signs each request
 USER = {"x-bosun-token": TOKEN}
 USER_ONLY = {"set_autopilot": {"on": True}, "set_llm_budget": {"daily_usd": 9999, "refresh_usd": 999},
              "set_agent_policy": {"system": True, "external": True},
-             "set_pref": {"key": "winget:Git.Git", "ignored": True}, "set_notify": {"on": False}}
+             "set_pref": {"key": "winget:Git.Git", "ignored": True}, "set_notify": {"on": False},
+             # which AI CLI and whose plan sees this machine's data (a folder that exists anywhere will do)
+             "add_ai_login": {"provider": "claude", "id": "work", "label": "Work", "home": tempfile.gettempdir()},
+             "set_ai_login": {"provider": "claude", "id": "default", "excluded": True}}
 YOURS_ALONE = {"restore_app"}  # not a limit: it replaces an app with an older copy, which only a person decides
 PANEL = {n for n, sp in SPECS.items() if sp.panel}  # the Ask Bosun panel's own actions: tests/test_assistant.py
 
@@ -157,7 +162,8 @@ def test_which_actions_are_user_only():
 @pytest.mark.parametrize("name", sorted(USER_ONLY))
 def test_nobody_but_the_user_loosens_a_limit(app, agent, user, name):
     spec, before = SPECS[name], dict(app.store._db.execute("SELECT key, value FROM settings").fetchall())
-    r = agent.post(spec.path, json=USER_ONLY[name], auth=AGENT)
+    path = spec.path.format(**USER_ONLY[name])  # an action with ids in its path (set_ai_login) takes them from the body
+    r = agent.post(path, json=USER_ONLY[name], auth=AGENT)
     assert r.status_code == 403 and "only be done by you" in r.json()["detail"]
     for actor in ("agent:claude-code", "assistant", "autopilot", "schedule"):
         with pytest.raises(Forbidden):
@@ -165,7 +171,7 @@ def test_nobody_but_the_user_loosens_a_limit(app, agent, user, name):
     assert dict(app.store._db.execute("SELECT key, value FROM settings").fetchall()) == before
     refused = app.store.audit(limit=1)[0]  # the attempt is on record
     assert refused["action"] == name and refused["outcome"] == "error" and refused["error"].startswith("Forbidden")
-    assert user.post(spec.path, json=USER_ONLY[name], headers=USER).status_code == 200
+    assert user.post(path, json=USER_ONLY[name], headers=USER).status_code == 200
 
 
 def test_agents_get_three_tiers_and_the_user_opens_the_other_two(app):

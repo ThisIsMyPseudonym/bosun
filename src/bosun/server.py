@@ -49,9 +49,10 @@ from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
                        NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TypeIn, ViewIn, UsageIn, BudgetIn)
+                       TraceIn, TypeIn, ViewIn, UsageIn, BudgetIn, AiLoginIn, AiLoginSetIn)
 from .serialize import compact, item_from_dict
 from .store import Store
+from .providers import accounts as ai_accounts
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -940,6 +941,18 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if body.assistant_usd is not None:
             store.set_setting(llm.SETTING_ASSISTANT, str(body.assistant_usd))
         return llm.budgets(store)
+
+    @actions.bind("ai_logins")
+    def ai_logins(ctx: ActionContext, body: Empty):
+        return ai_accounts.overview(store)
+
+    @actions.bind("add_ai_login")
+    def add_ai_login(ctx: ActionContext, body: AiLoginIn):
+        return ai_accounts.add(store, body.provider, body.id, body.label, body.home)
+
+    @actions.bind("set_ai_login")
+    def set_ai_login(ctx: ActionContext, body: AiLoginSetIn):
+        return ai_accounts.set_excluded(store, body.provider, body.id, body.excluded)
 
     @actions.bind("set_pref")
     def prefs(ctx: ActionContext, body: PrefIn):
