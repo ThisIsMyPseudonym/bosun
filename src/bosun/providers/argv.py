@@ -61,8 +61,34 @@ def _claude(c: Call) -> Invocation:
     return Invocation(a, c.prompt, dict(ONE_SHOT_ENV))
 
 
+def with_system(system: str, prompt: str) -> str:
+    """For a CLI with no system-prompt flag: the system text first, then a rule, then the prompt."""
+    return f"{system}\n\n---\n\n{prompt}" if system else prompt
+
+
+def _write(workdir: Path, name: str, text: str) -> Path:
+    path = workdir / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+# `--sandbox read-only` still lets Codex read files through its shell tools, so those are switched off as well,
+# and the user's config and exec-policy rules are skipped while the login in CODEX_HOME is kept.
+CODEX_NO_TOOLS = ("--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+                  "--ignore-rules", "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "apps",
+                  "--disable", "browser_use", "--disable", "computer_use", "--disable", "plugins",
+                  "-c", 'web_search="disabled"')
+
+
+def _codex(c: Call) -> Invocation:
+    schema = _write(c.workdir, "schema.json", _compact(c.schema))
+    a = (c.binary, "exec", "--json", *CODEX_NO_TOOLS, "--output-schema", str(schema), *_model("-m", c.model), "-")
+    return Invocation(a, with_system(c.system, c.prompt), files=(schema,))
+
+
 BUILDERS: Mapping[str, Callable[[Call], Invocation]] = {
     "claude": _claude,
+    "codex": _codex,
 }
 
 
