@@ -67,7 +67,8 @@ def _version(binary: str, at: float) -> str | None:
 def _judge(s: ProviderSpec, version: str, binary: str) -> ContractStatus:
     r = proc.run([binary, *s.help_args], timeout=TIMEOUT)
     missing = missing_flags(f"{r.stdout}\n{r.stderr}", s.lockdown_flags)
-    return ContractStatus(s.id, version, not missing, missing, "")
+    finding = f"{s.label} {version} dropped " + ", ".join(f"`{f}`" for f in missing) if missing else ""
+    return ContractStatus(s.id, version, not missing, missing, finding)
 
 
 def _cached(store: Store | None, key: str) -> dict[str, Any] | None:

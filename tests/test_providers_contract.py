@@ -96,3 +96,14 @@ def test_a_new_version_reads_help_once_and_passes(store, monkeypatch):
     assert contract.check(store, "claude", "/bin/claude").ok
     assert sum(1 for c in run.calls if c[-1] == "--help") == 1   # cached per version in the store
     assert sum(1 for c in run.calls if c[-1] == "--version") == 1  # and the version for ten minutes
+
+
+def test_a_dropped_flag_fails_closed_and_names_it(store, monkeypatch):
+    monkeypatch.setattr(proc, "run", help_runner(help_text=CLAUDE_HELP.replace("--strict-mcp-config", "")))
+    got = contract.check(store, "claude", "/bin/claude")
+    assert not got.ok and got.missing == ("--strict-mcp-config",)
+    assert got.finding == "Claude Code 2.1.332 dropped `--strict-mcp-config`"
+    assert contract.check(store, "claude", "/bin/claude") == got  # the cached verdict reads back the same
+    monkeypatch.setattr(contract, "_versions", {})
+    monkeypatch.setattr(proc, "run", help_runner(version="2.1.333"))
+    assert contract.check(store, "claude", "/bin/claude").ok  # a new version is judged afresh
