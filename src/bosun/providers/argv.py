@@ -134,12 +134,27 @@ def _antigravity(c: Call) -> Invocation:
     return Invocation(a, stdin)
 
 
+# Muse: shell, writes, web, the session log, personal rules and questions to the user all off, its workspace the
+# call's empty folder. `--output-schema` shapes the reply on the meta provider, which is the one Bosun names.
+MUSE_NO_TOOLS = ("--disable-shell", "--disable-write", "--disable-web-tools", "--no-session-log",
+                 "--no-foreign-personal-context", "--disable-request-user-input")
+
+
+def _muse(c: Call) -> Invocation:
+    prompt = _write(c.workdir, "prompt.txt", with_system(c.system, c.prompt))
+    schema = _write(c.workdir, "schema.json", _compact(c.schema))
+    a = (c.binary, "exec", "--provider", "meta", "--json", "--prompt-file", str(prompt), "--workspace", str(c.workdir),
+         *MUSE_NO_TOOLS, "--output-schema", str(schema), *_model("--model", c.model))
+    return Invocation(a, None, files=(prompt, schema))
+
+
 BUILDERS: Mapping[str, Callable[[Call], Invocation]] = {
     "claude": _claude,
     "codex": _codex,
     "gemini": _gemini,
     "grok": _grok,
     "antigravity": _antigravity,
+    "muse": _muse,
 }
 
 
