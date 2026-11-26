@@ -55,3 +55,54 @@ def test_an_unreadable_setting_means_only_the_default_logins(store, monkeypatch)
     monkeypatch.setattr(accounts, "installed", lambda: {"grok": "/x/grok"})
     store.set_setting(accounts.SETTING, "{not json")
     assert [lg.bucket for lg in accounts.logins(store)] == ["grok"]
+
+
+# --- an added login's environment ------------------------------------------------------------------------------------
+def test_proc_run_can_remove_a_variable(monkeypatch):
+    import sys
+
+    from bosun import proc, trace
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    spans = []
+    real_span = trace.span
+
+    def recording(kind, name, **attrs):
+        spans.append(attrs)
+        return real_span(kind, name, **attrs)
+    monkeypatch.setattr(trace, "span", recording)
+    r = proc.run([sys.executable, "-c", "import os; print(os.environ.get('ANTHROPIC_API_KEY'))"],
+                 unset=("ANTHROPIC_API_KEY",))
+    assert r.stdout.strip() == "None"
+    assert spans[-1]["unset"] == ["ANTHROPIC_API_KEY"] and "sk-x" not in repr(spans)  # names, never values
+
+
+def test_unset_beats_a_value_passed_in_env(monkeypatch):
+    import sys
+
+    from bosun import proc
+
+    r = proc.run([sys.executable, "-c", "import os; print(os.environ.get('X_TEST'))"], env={"X_TEST": "1"},
+                 unset=("X_TEST",))
+    assert r.stdout.strip() == "None"
+
+
+def test_an_added_login_points_the_cli_at_its_folder_and_drops_other_sign_ins():
+    work = accounts.Login("claude", "work", "Work", "/Users/me/.claude-work", False, "claude")
+    env, unset = accounts.login_env(work)
+    assert env == {"CLAUDE_CONFIG_DIR": "/Users/me/.claude-work"}
+    assert set(unset) == {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+    assert accounts.login_env(accounts.default("claude", "claude")) == ({}, ())
+    assert accounts.login_env(accounts.Login("muse", "x1", "X", "/m", False, "muse")) == ({}, ())  # no variable
+
+
+def test_an_added_grok_login_gets_its_own_leader_socket():
+    work = accounts.Login("grok", "work", "Work", "/Users/me/.grok-work/", False, "grok")
+    prompt_call = ("--prompt-file", "/tmp/p", "--output-format", "json")
+    assert accounts.login_args(work, prompt_call) == ("--leader-socket", "/Users/me/.grok-work/leader.sock",
+                                                      *prompt_call)
+    assert accounts.login_args(work, ("--version",)) == ("--version",)  # only a prompt call starts a leader
+    assert accounts.login_args(work, ("usage", "--json")) == ("usage", "--json")
+    assert accounts.login_args(accounts.default("grok", "grok"), prompt_call) == prompt_call
+    claude = accounts.Login("claude", "work", "Work", "/c", False, "claude")
+    assert accounts.login_args(claude, ("-p",)) == ("-p",)

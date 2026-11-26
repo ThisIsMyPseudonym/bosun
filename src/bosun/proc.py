@@ -24,8 +24,10 @@ class Result:
 
 def run(argv: list[str] | tuple[str, ...], timeout: float = 300, cwd: str | None = None,
         stdin: str | None = None, env: dict[str, str] | None = None, private: tuple[int, ...] = (),
-        ok_codes: tuple[int, ...] = (0,)) -> Result:
+        ok_codes: tuple[int, ...] = (0,), unset: tuple[str, ...] = ()) -> Result:
     """`private`: positions in argv that must not be recorded (a config blob that may hold keys).
+    `unset`: variables the command must not inherit, even when `env` sets them (an added AI login drops the keys
+    that would sign its CLI in some other way); the run's record lists their names, never their values.
     `ok_codes`: exit codes that are an answer and not a failure for this command (`brew vulns` exits 1 when it
     has findings); the run's record doesn't mark those as errors.
     Every command is a span in the current trace: argv (redacted), exit code, how long, and on failure the
@@ -34,9 +36,10 @@ def run(argv: list[str] | tuple[str, ...], timeout: float = 300, cwd: str | None
 
     name = os.path.basename(str(argv[0])) if argv else "?"
     shown = ["[not recorded]" if i in private else a for i, a in enumerate(argv)]
+    extra = {"unset": sorted(unset)} if unset else {}
     with trace.span("subprocess", name, argv=trace.redact.argv(shown), cwd=cwd, timeout=timeout,
-                    stdin_chars=len(stdin) if stdin is not None else None) as sp:
-        r = _run(argv, timeout, cwd, stdin, env, shown=shown)
+                    stdin_chars=len(stdin) if stdin is not None else None, **extra) as sp:
+        r = _run(argv, timeout, cwd, stdin, env, shown=shown, unset=unset)
         sp.set(returncode=r.returncode, stdout_chars=len(r.stdout), stderr_chars=len(r.stderr))
         if r.returncode not in ok_codes:
             sp.status = "error"
@@ -90,8 +93,11 @@ def git(path: str | os.PathLike, *args: str, timeout: float = 120) -> Result:
 
 
 def _run(argv: list[str] | tuple[str, ...], timeout: float, cwd: str | None, stdin: str | None,
-         env: dict[str, str] | None, shown: list[str] | tuple[str, ...] | None = None) -> Result:
+         env: dict[str, str] | None, shown: list[str] | tuple[str, ...] | None = None,
+         unset: tuple[str, ...] = ()) -> Result:
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1", **(env or {})}
+    for name in unset:
+        env.pop(name, None)
     try:
         cp = subprocess.run(
             list(argv),

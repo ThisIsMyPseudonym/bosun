@@ -129,3 +129,29 @@ def logins(store: Store, usable: bool = False) -> tuple[Login, ...]:
         out.append(default(provider, binary, named.label, named.excluded) if named else default(provider, binary))
         out += [Login(provider, e.id, e.label, e.home, e.excluded, binary) for e in mine if e.id != DEFAULT]
     return tuple(lg for lg in out if not (usable and lg.excluded))
+
+
+def login_env(login: Login) -> tuple[dict[str, str], tuple[str, ...]]:
+    """What a login adds to its CLI's environment, and the variables its call must not inherit: an added login's
+    folder in the CLI's variable, with the keys that would sign the CLI in some other way removed. Nothing for a
+    default login (Coho's `accountEnv`). Pass both to `proc.run(env=..., unset=...)`."""
+    s = CATALOG[login.provider]
+    if login.id == DEFAULT or not login.home or s.home_env is None:
+        return {}, ()
+    return {s.home_env: login.home}, s.override_env
+
+
+# Grok subcommands and flags that start no leader process, so take no --leader-socket.
+GROK_NO_LEADER = frozenset({"--version", "-V", "--help", "-h", "models", "login", "logout", "usage", "inspect",
+                            "leader", "help"})
+
+
+def login_args(login: Login, args: tuple[str, ...]) -> tuple[str, ...]:
+    """The arguments a call runs with: an added Grok login's prompt calls get the login's own leader socket, or
+    they would talk to the default login's running leader (Coho's `accountArgs`)."""
+    if login.provider != "grok" or login.id == DEFAULT or not login.home:
+        return args
+    if not args or args[0] in GROK_NO_LEADER:
+        return args
+    sep = "\\" if "\\" in login.home else "/"
+    return ("--leader-socket", f"{login.home.rstrip('/' + sep)}{sep}leader.sock", *args)
