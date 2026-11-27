@@ -12,9 +12,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from bosun.providers.catalog import CATALOG
-from bosun.providers.windows import Reading, reset_horizon, valid_reset, window_hours
+from bosun.providers.windows import MAX_RESET_S, Reading, reset_horizon, valid_reset, window_hours
 
 UNDATED_STALE_S = 7 * 86400  # an undated reading says nothing about now after a week
+REJECTED_UNDATED_S = 3600  # ...but a refusal with no usable reset holds the login off an hour, as a limit naming none
 WARNING_SHARE = 0.8  # a warning with no figure counts as at least this much used
 MIN_ELAPSED = 0.05  # the first 15 minutes of a 5-hour window: pace there is bounded, not share / almost nothing
 
@@ -24,10 +25,15 @@ def _reset(r: Reading) -> float | None:
 
 
 def stale(r: Reading, now: float) -> bool:
-    """Whether a reading says nothing about now: its reset has come, or (with no valid reset) it is a week old."""
+    """Whether a reading says nothing about now: its reset has come, or (with no valid reset) it is a week old, or
+    an hour old for a refusal (so a refusal whose reset was dropped still holds the login off, then is asked again)."""
     resets = _reset(r)
     if resets is not None:
         return resets <= now
+    if r.status == "rejected":
+        return now - r.at > REJECTED_UNDATED_S
+    if r.resets_at is not None and r.resets_at <= r.at:
+        return True  # a reset before the reading itself: its figure can't be trusted to say anything about now
     return now - r.at > UNDATED_STALE_S
 
 
@@ -51,17 +57,15 @@ def share(r: Reading) -> float | None:
 def pace(r: Reading, now: float) -> float | None:
     """Share used over the share of the window's time gone: 1.0 is on track to use it all exactly at the reset.
 
-    When the share is known but the window's length is not (`quota:*`), treats the window as fully elapsed so
-    `pace == share`. Unknown (None) when the reading is stale, has no share, or has a known length but no reset.
+    When the share is known but the window's length or reset is not, treats the window as fully elapsed so
+    `pace == share` (a lower bound, never "room"). Unknown (None) when the reading is stale or has no share.
     """
     used, hours = share(r), window_hours(r.window)
     if stale(r, now) or used is None:
         return None
-    if hours is None:
-        return used
     resets = _reset(r)
-    if resets is None:
-        return None
+    if hours is None or resets is None:
+        return used
     elapsed = 1 - (resets - now) / (hours * 3600)
     return used / min(1.0, max(MIN_ELAPSED, elapsed))
 
@@ -115,8 +119,9 @@ def line_hit(readings: Iterable[Reading], now: float, line: float = LINE) -> Hit
 
 
 def stop_at(bucket: str, overrides: Iterable[Override], now: float) -> float:
-    """The share at which background work stops on this login: the line, or 1.0 while its override lasts."""
-    lifted = any(o.bucket == bucket and o.until > now for o in overrides)
+    """The share at which background work stops on this login: the line, or 1.0 while its override lasts. An
+    override ending further out than any window could reset (a forged or corrupt `until`) lifts nothing."""
+    lifted = any(o.bucket == bucket and now < o.until <= now + MAX_RESET_S for o in overrides)
     return 1.0 if lifted else LINE
 
 

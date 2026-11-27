@@ -224,3 +224,13 @@ def test_seeding_never_writes_to_cohos_file_and_refuses_read_only_store(tmp_path
     with Store(db_path, read_only=True) as ro:
         with pytest.raises(RuntimeError, match="read-only"):
             ledger.seed_from_coho(ro, "codex", f, now=SEEN)
+
+
+def test_a_slightly_future_row_cannot_hide_a_refusal_that_follows(store):
+    from bosun.providers.windows import Reading
+
+    now = 1_000_000.0
+    ledger.save(store, "claude", [Reading("five_hour", "allowed", 0.0, None, now + 299, "output")], now=now)
+    ledger.save(store, "claude", [Reading("five_hour", "rejected", None, now + 3600, now + 10, "output")], now=now)
+    (got,) = ledger.readings(store, "claude")
+    assert got.status == "rejected"

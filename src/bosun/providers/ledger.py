@@ -80,18 +80,24 @@ def _higher(a: float | None, b: float | None) -> float | None:
     return a if b is None else max(a, b)
 
 
-def _resolve(existing: Reading | None, incoming: Reading, max_at: float) -> Reading:
+def _merge(existing: Reading, incoming: Reading, at: float) -> Reading:
+    """The worse of two readings that can't be ordered: worse status, higher share, later reset."""
+    status = worse(existing.status, incoming.status)
+    source = incoming.source if incoming.status == status else existing.source
+    return Reading(incoming.window, status, _higher(existing.used, incoming.used),
+                   _higher(existing.resets_at, incoming.resets_at), at, source)
+
+
+def _resolve(existing: Reading | None, incoming: Reading, max_at: float, now: float) -> Reading:
     """Keep the safer reading for one window: replace stale/far-future rows, keep worse status on equal `at`,
-    and never let a bare `allowed` (no used, no reset) erase an active `rejected` row."""
+    and never let a bare `allowed` (no used, no reset) erase an active `rejected` row. A row dated a little in
+    the future (clock skew) can't be ordered against a reading taken now, so the two are merged, worse wins."""
     if existing is None or existing.at > max_at or stale(existing, incoming.at):
         return incoming
     if incoming.at < existing.at:
-        return existing
+        return _merge(existing, incoming, existing.at) if existing.at > now else existing
     if incoming.at == existing.at:
-        status = worse(existing.status, incoming.status)
-        source = incoming.source if incoming.status == status else existing.source
-        return Reading(incoming.window, status, _higher(existing.used, incoming.used),
-                       _higher(existing.resets_at, incoming.resets_at), incoming.at, source)
+        return _merge(existing, incoming, incoming.at)
     if (existing.status == "rejected" and incoming.status == "allowed"
             and incoming.used is None and incoming.resets_at is None):
         return existing
@@ -103,7 +109,8 @@ def save(store: Store, bucket: str, readings: Iterable[Reading], now: float | No
     if store.read_only:
         raise RuntimeError("Store is read-only")
     provider, account = split(bucket)
-    max_at = (time.time() if now is None else now) + MAX_FUTURE_AT_S
+    now = time.time() if now is None else now
+    max_at = now + MAX_FUTURE_AT_S
     cleaned = [c for r in readings if (c := _clean(bucket, r, max_at)) is not None]
     if not cleaned:
         return
@@ -113,7 +120,7 @@ def save(store: Store, bucket: str, readings: Iterable[Reading], now: float | No
         changed: dict[str, Reading] = {}
         for r in cleaned:
             prev = current_by_win.get(r.window)
-            merged = _resolve(prev, r, max_at)
+            merged = _resolve(prev, r, max_at, now)
             if prev is None or merged != prev:
                 current_by_win[r.window] = merged
                 changed[r.window] = merged
@@ -212,10 +219,10 @@ def _coho_reading(name: str, entry: object) -> Reading | None:
     return Reading(str(window), status, used, resets, at, "coho")
 
 
-def _newest_per_window(items: Iterable[Reading], max_at: float) -> tuple[Reading, ...]:
+def _newest_per_window(items: Iterable[Reading], max_at: float, now: float) -> tuple[Reading, ...]:
     kept: dict[str, Reading] = {}
     for r in items:
-        kept[r.window] = _resolve(kept.get(r.window), r, max_at)
+        kept[r.window] = _resolve(kept.get(r.window), r, max_at, now)
     return tuple(kept.values())
 
 
@@ -238,6 +245,6 @@ def seed_from_coho(store: Store, bucket: str, path: Path | None = None, now: flo
     max_at = when + MAX_FUTURE_AT_S
     valid = (r for r in (_coho_reading(str(k), v) for k, v in windows.items())
              if r is not None and r.at <= max_at and not stale(r, when))
-    seeds = _newest_per_window(valid, max_at)
+    seeds = _newest_per_window(valid, max_at, max_at - MAX_FUTURE_AT_S)
     save(store, bucket, seeds, now=when)
     return len(seeds)

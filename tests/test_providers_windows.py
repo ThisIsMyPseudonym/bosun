@@ -171,8 +171,11 @@ def test_antigravity_other_shapes_and_junk():
 
 
 def test_antigravity_ambiguous_one_resolves_in_the_safe_direction():
+    # `remainingFraction` says it is a fraction: 1 is all of it left, not 1%
     (frac_one,) = windows.parse_antigravity(json.dumps([{"model": "Flash", "remainingFraction": 1}]), at=1.0)
-    assert frac_one.used == pytest.approx(0.99) and frac_one.status == "allowed_warning"
+    assert frac_one.used == 0.0 and frac_one.status == "allowed"
+    (frac_over,) = windows.parse_antigravity(json.dumps([{"model": "Flash", "remainingFraction": 1.5}]), at=1.0)
+    assert frac_over.used == 0.0
     (cell_one,) = windows.parse_antigravity("Flash\t1\n", at=1.0)
     assert cell_one.used == pytest.approx(0.99) and cell_one.status == "allowed_warning"
     (pct_100,) = windows.parse_antigravity("Flash\t100%\n", at=1.0)
@@ -240,3 +243,9 @@ def test_parsers_handle_fuzz_inputs_without_raising():
         for r in got:
             assert r.used is None or math.isfinite(r.used)
             assert r.resets_at is None or math.isfinite(r.resets_at)
+
+
+def test_a_reset_at_or_before_the_reading_is_not_a_reset():
+    assert windows.valid_reset("five_hour", 995.0, 1000.0) is None
+    assert windows.valid_reset("five_hour", 1000.0, 1000.0) is None
+    assert windows.valid_reset("five_hour", 1001.0, 1000.0) == 1001.0

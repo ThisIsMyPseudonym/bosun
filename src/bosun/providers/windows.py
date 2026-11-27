@@ -191,10 +191,11 @@ def reset_horizon(window: str) -> float:
 
 
 def valid_reset(window: str, resets_at: float | None, at: float) -> float | None:
-    """Keep `resets_at` only when it lies within the window's horizon from `at`; else drop it."""
+    """Keep `resets_at` only when it lies after `at` and within the window's horizon; else drop it. A reset at or
+    before the reading itself would make the reading stale the moment it was taken, hiding what it says."""
     if resets_at is None:
         return None
-    return resets_at if resets_at <= at + reset_horizon(window) else None
+    return resets_at if at < resets_at <= at + reset_horizon(window) else None
 
 
 # --- Codex -------------------------------------------------------------------------------------------------------
@@ -280,10 +281,11 @@ def quota_window(name: object) -> str:
     return f"quota:{slug}" if slug else "quota"
 
 
-def _remaining(value: object, *, is_percent: bool = False) -> float | None:
+def _remaining(value: object, *, is_percent: bool = False, is_fraction: bool = False) -> float | None:
     """A remaining share, 0-1, from a fraction, a percentage or a string such as "10%".
 
-    Ambiguous bare `1` (no `%` and not an explicit percentage field) resolves in the safe direction (more used).
+    A field that names itself a fraction (`remainingFraction`) is one, capped at 1. Otherwise an ambiguous bare `1`
+    (no `%`, not an explicit percentage field) resolves in the safe direction (more used).
     """
     if isinstance(value, str):
         text = value.strip()
@@ -297,11 +299,14 @@ def _remaining(value: object, *, is_percent: bool = False) -> float | None:
     f = _number(value)
     if f is None or f < 0:
         return None
+    if is_fraction and not is_percent:
+        return min(1.0, f)
     return min(1.0, f / 100 if is_percent or f >= 1 else f)
 
 
-def _quota(name: object, remaining: object, reset: object, at: float, *, is_percent: bool = False) -> Reading | None:
-    left = _remaining(remaining, is_percent=is_percent)
+def _quota(name: object, remaining: object, reset: object, at: float, *, is_percent: bool = False,
+           is_fraction: bool = False) -> Reading | None:
+    left = _remaining(remaining, is_percent=is_percent, is_fraction=is_fraction)
     if left is None:
         return None
     used = 1.0 - left
@@ -326,12 +331,12 @@ def _agy_json(parsed: object, at: float) -> list[Reading]:
         q = _pick(item, "quotaInfo", "quota_info")
         q = q if isinstance(q, dict) else item
         remaining = _pick(q, "remainingFraction", "remaining_fraction")
-        is_percent = False
+        is_percent, is_fraction = False, remaining is not None
         if remaining is None:
             remaining = _pick(q, "remainingPercentage", "remaining_percentage")
             is_percent = remaining is not None
         r = _quota(_pick(item, "model", "label", "name", "displayName"), remaining,
-                   _pick(q, "resetTime", "reset_time", "resetsAt"), at, is_percent=is_percent)
+                   _pick(q, "resetTime", "reset_time", "resetsAt"), at, is_percent=is_percent, is_fraction=is_fraction)
         if r is not None:
             out.append(r)
     return out

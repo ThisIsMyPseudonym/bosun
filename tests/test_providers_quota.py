@@ -54,7 +54,7 @@ def test_pace_is_unknown_without_a_reset_or_a_share_and_uses_share_without_lengt
     assert quota.pace(R("quota:flash", "allowed", 0.5, NOW + 60, NOW), NOW) == pytest.approx(0.5)
     assert quota.pace(R("quota:flash", "allowed", 0.99, None, NOW), NOW) == pytest.approx(0.99)
     assert quota.pace(R("quota:flash", "allowed", None, NOW + 60, NOW), NOW) is None
-    assert quota.pace(R("five_hour", "allowed", 0.5, None, NOW), NOW) is None
+    assert quota.pace(R("five_hour", "allowed", 0.5, None, NOW), NOW) == 0.5  # no reset: share, a lower bound
     assert quota.pace(R("five_hour", "allowed", None, NOW + 60, NOW), NOW) is None
     assert quota.pace(R("five_hour", "allowed", 0.5, NOW - 1, NOW - 60), NOW) is None  # stale: unknown
 
@@ -128,7 +128,7 @@ def test_far_future_reset_goes_stale_and_override_is_bounded_to_window_horizon()
     far = R("five_hour", "allowed", 0.9, NOW + 365 * 86400, NOW)
     assert not quota.stale(far, NOW)
     assert quota.stale(far, NOW + 8 * 86400)  # dropped far-future reset falls back to undated 7-day staleness
-    assert quota.pace(far, NOW) is None
+    assert quota.pace(far, NOW) == 0.9  # its reset is dropped as implausible: paced by its share
     assert quota.line_hit((far,), NOW) == quota.Hit("five_hour", 0.9, None)
     assert quota.override_until(quota.Hit("five_hour", 0.8, NOW + 365 * 86400), NOW) == (
         NOW + 5 * 3600 + windows.RESET_SLACK_S)
@@ -168,3 +168,34 @@ def test_antigravitys_usage_is_read_at_most_every_15_minutes():
     assert not quota.probe_due(NOW - 14 * 60, NOW)
     assert quota.probe_due(NOW - 15 * 60, NOW)
     assert quota.probe_due(NOW + 3600, NOW)  # a clock that went back: the last probe's time says nothing
+
+
+def test_a_refusal_with_a_past_or_missing_reset_still_holds_the_login_off_for_an_hour():
+    import math
+
+    from bosun.providers.quota import line_hit, login_pace, stale
+    from bosun.providers.windows import Reading
+
+    at = 1_000_000.0
+    for resets in (at - 5, 1.0, at, None):
+        r = Reading("five_hour", "rejected", None, resets, at, "output")
+        assert login_pace([r], at + 1) == math.inf, resets
+        assert line_hit([r], at + 1) is not None, resets
+        assert not stale(r, at + 3599) and stale(r, at + 3601), resets  # an hour, as a limit naming no reset
+
+
+def test_a_known_length_window_without_a_reset_is_paced_by_its_share():
+    from bosun.providers.quota import login_pace, pace
+    from bosun.providers.windows import Reading
+
+    r = Reading("five_hour", "allowed", 0.99, None, 1000.0, "output")
+    assert pace(r, 1001.0) == 0.99 and login_pace([r], 1001.0) == 0.99
+
+
+def test_an_override_further_out_than_any_window_does_not_lift_the_line():
+    from bosun.providers.quota import LINE, Override, stop_at
+
+    now = 1_000_000.0
+    assert stop_at("claude", [Override("claude", now + 3600)], now) == 1.0
+    for until in (float("inf"), now + 1e9):
+        assert stop_at("claude", [Override("claude", until)], now) == LINE
