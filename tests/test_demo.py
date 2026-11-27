@@ -110,3 +110,43 @@ def test_the_demo_never_starts_on_a_port_something_else_holds(tmp_path, monkeypa
         assert cli.cmd_demo(None, s) == 1
     said = capsys.readouterr()
     assert f"Port {taken} is in use" in said.err and "login?code=" not in said.out
+
+
+def test_demo_seeds_rules_only_triage_verdicts_and_never_starts_a_cli(tmp_path, monkeypatch):
+    from bosun import proc
+    from bosun.triage import model as tmodel
+
+    real_run = proc.run
+
+    def guard_proc(argv, *a, **k):
+        if not argv or argv[0] != "git":
+            raise AssertionError(f"demo started an unexpected CLI: {argv}")
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(proc, "run", guard_proc)
+    monkeypatch.setattr(tmodel, "run_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError("demo called a model")))
+    monkeypatch.setattr(tmodel, "_run_cli", lambda *a, **k: (_ for _ in ()).throw(AssertionError("demo ran a model CLI")))
+
+    s = load_settings()
+    s = type(s)(**{**s.__dict__, "demo": True, "self_update": False, "data_dir": tmp_path})
+    store = Store(tmp_path / "demo-triage.db")
+    demo.seed(store)
+    c = TestClient(create_app(s, store, TOKEN), base_url=f"http://127.0.0.1:{s.port}", cookies=signed_in(s.port))
+    c.headers["x-bosun-token"] = TOKEN
+
+    problems = c.get("/api/runs", params={"status": "problems"}).json()
+    assert len(problems) >= 2
+    categories = set()
+    for run in problems:
+        tri = c.get(f"/api/runs/{run['trace_id']}/triage")
+        assert tri.status_code == 200
+        body = tri.json()
+        assert body["status"] == "done" and body["source"] == "rules"
+        assert body["triage_available"] is False
+        categories.add(body["verdict"]["category"])
+    assert {"permissions", "busy_or_locked"} <= categories
+
+    # Failed demo jobs on /api/jobs also carry their seeded verdict summary
+    failed_jobs = [j for j in c.get("/api/jobs").json() if j["status"] == "failed"]
+    assert len(failed_jobs) >= 2
+    assert all(j["triage"] is not None and j["triage"]["source"] == "rules" for j in failed_jobs)

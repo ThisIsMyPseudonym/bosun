@@ -159,6 +159,49 @@ def _seed_ai_usage(store: Store, now: float) -> None:
         )
 
 
+def _seed_triage(store: Store, now: float) -> None:
+    """Seed two failed demo runs and evaluate deterministic rules verdicts (never calls a model)."""
+    from .triage import store as tstore, worker as tworker
+
+    failures = (
+        (
+            "d0000001000000000000000000000001", "sp000001", "brew:jq",
+            ["brew", "upgrade", "--formula", "jq"],
+            "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq/1.7.1",
+            now - 1800,
+        ),
+        (
+            "d0000002000000000000000000000002", "sp000002", "brew:wget",
+            ["brew", "upgrade", "--formula", "wget"],
+            "Error: Could not get lock /opt/homebrew/var/homebrew/locks/wget",
+            now - 900,
+        ),
+    )
+    with store._tx(write=True) as db:
+        for tid, span_id, key, argv, stderr, started in failures:
+            finished = started + 4.2
+            db.execute(
+                "INSERT OR REPLACE INTO runs (trace_id, kind, subject, actor, status, started, finished, duration_ms, error, process) "
+                "VALUES (?, 'upgrade', ?, 'autopilot', 'failed', ?, ?, 4200.0, ?, 'serve')",
+                (tid, key, started, finished, stderr),
+            )
+            attrs = json.dumps({"argv": argv, "returncode": 1, "stderr_tail": stderr})
+            db.execute(
+                "INSERT OR REPLACE INTO spans (trace_id, span_id, parent_id, kind, name, started, duration_ms, status, attrs) "
+                "VALUES (?, ?, '', 'subprocess', ?, ?, 4000.0, 'error', ?)",
+                (tid, span_id, argv[0], started + 0.1, attrs),
+            )
+            db.execute(
+                "INSERT INTO jobs (item_key, argv, status, started, finished, output, actor, trace_id) "
+                "VALUES (?, ?, 'failed', ?, ?, ?, 'autopilot', ?)",
+                (key, json.dumps(argv), started, finished, stderr, tid),
+            )
+    for tid, *_ in failures:
+        rec = tstore.load_failure(store, tid)
+        if rec is not None:
+            tworker.evaluate_fast(store, rec, now=now, save=True)
+
+
 def seed(store: Store, now: float | None = None) -> int:
     """Write one snapshot of the made-up computer, with a coverage line and a name. Returns the snapshot id."""
     now = time.time() if now is None else now
@@ -174,5 +217,7 @@ def seed(store: Store, now: float | None = None) -> int:
     store.set_setting("coverage_mac_apps", json.dumps({
         "apps": 52, "unchecked": ["Demo Calculator Pro", "Pocket Ledger", "Small Tools Suite", "Tidy Desk"]}))
     _seed_ai_usage(store, now)
-    return store.save_snapshot(rows, [], meta={"projects": [project_to_dict(p) for p in PROJECTS.values()],
-                                               "lanes": dict(Counter(d["lane"] for d in rows))})
+    snap_id = store.save_snapshot(rows, [], meta={"projects": [project_to_dict(p) for p in PROJECTS.values()],
+                                                  "lanes": dict(Counter(d["lane"] for d in rows))})
+    _seed_triage(store, now)
+    return snap_id
