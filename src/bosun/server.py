@@ -52,7 +52,7 @@ from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPol
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
-from .triage import store as tstore
+from .triage import store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -943,11 +943,12 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         found = store.trace(body.trace_id)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
+        tid = found["run"]["trace_id"]
         return {
             **found,
             "tree": diagnose.span_tree(found["spans"]),
             "failures": diagnose.failures(found["spans"]),
-            "triage": tstore.get_by_trace(store, found["run"]["trace_id"]),
+            "triage": tworker.triage_for(store, tid, save=not s.demo and not store.read_only),
         }
 
     @actions.bind("diagnose")
@@ -963,7 +964,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
         tid = found["run"]["trace_id"]
-        return tstore.get_by_trace(store, tid) or {"trace_id": tid, "status": None, "verdict": None}
+        row = tworker.triage_for(store, tid, save=not s.demo and not store.read_only)
+        return row or {"trace_id": tid, "status": None, "verdict": None}
 
     @actions.bind("triage_feedback")
     def triage_feedback(ctx: ActionContext, body: TriageFeedbackIn):

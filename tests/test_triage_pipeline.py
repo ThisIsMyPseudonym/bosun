@@ -96,3 +96,28 @@ def test_fast_pipeline_marks_superseded_and_rechecks_cached_step_for_item(tmp_pa
         assert worker.evaluate_fast(st, brand_new, now=200.0) is None
     finally:
         trace.configure(None)
+
+
+def test_evaluate_fast_returns_verdict_without_saving_on_read_only_store(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        job_id = st.create_job("brew:jq", ["brew", "upgrade", "--formula", "jq"])
+        job = st.job(job_id)
+        assert job is not None
+        err = "Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq"
+        with trace.run("upgrade", subject="brew:jq", trace_id=job["trace_id"]) as r:
+            r.fail(err)
+        st.finish_job(job_id, "failed", err)
+    finally:
+        trace.configure(None)
+    st.close()
+
+    ro = Store(tmp_path / "bosun.db", read_only=True)
+    try:
+        row = worker.triage_for(ro, r.trace_id)
+        assert row is not None and row["status"] == "done" and row["source"] == "rules"
+        assert row["verdict"]["category"] == "permissions"
+        assert tstore.get_by_trace(ro, r.trace_id) is None
+    finally:
+        ro.close()
