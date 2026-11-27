@@ -225,3 +225,18 @@ def test_kill_pg_uses_taskkill_tree_on_windows_and_skips_reaped_leader_on_posix(
         reaped = SimpleNamespace(pid=9999, returncode=0)
         proc._kill_pg(reaped)  # type: ignore[arg-type]
         assert pg_calls == []
+
+
+def test_triage_model_passes_kill_group_unconditionally_and_fake_cli_accepts_it(tmp_path, monkeypatch):
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        rec = _make_failure(st)
+        fake = FakeCli(monkeypatch)
+        fake.reply("claude", fake.claude_ok(_good_payload()))
+        res = tmodel.run_model(st, load_settings(), rec, clicked=True, tokens=auth.TriageTokens())
+        assert res.ok
+        assert fake.calls and fake.calls[0].kill_group is True
+        assert not hasattr(tmodel, "inspect")
+    finally:
+        trace.configure(None)

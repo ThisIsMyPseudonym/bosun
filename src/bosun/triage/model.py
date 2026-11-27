@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import platform
 import tempfile
@@ -201,10 +200,9 @@ def _run_cli(
     env: dict[str, str] | None,
     unset: tuple[str, ...],
 ) -> proc.Result:
-    kw: dict[str, Any] = {"timeout": timeout, "cwd": cwd, "stdin": stdin, "env": env, "unset": unset}
-    if "kill_group" in inspect.signature(proc.run).parameters:
-        kw["kill_group"] = True
-    return proc.run(list(call_argv), **kw)
+    return proc.run(
+        list(call_argv), timeout=timeout, cwd=cwd, stdin=stdin, env=env, unset=unset, kill_group=True,
+    )
 
 
 def _validate_verdict(payload: Any) -> tuple[Verdict | None, str]:
