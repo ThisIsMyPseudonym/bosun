@@ -112,9 +112,11 @@ def save_verdict(
             "INSERT INTO triage (failure, trace_id, signature, status, source, verdict, same_as, "
             "triage_trace, created, finished) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(failure) DO UPDATE SET "
-            "trace_id=excluded.trace_id, signature=excluded.signature, status=excluded.status, "
+            "trace_id=excluded.trace_id, signature=excluded.signature, "
+            "status=CASE WHEN triage.status = 'disputed' OR triage.feedback IN ('wrong', 'disputed') "
+            "THEN 'disputed' ELSE excluded.status END, "
             "source=excluded.source, verdict=excluded.verdict, same_as=excluded.same_as, "
-            "triage_trace=excluded.triage_trace, feedback='', feedback_ts=NULL, finished=excluded.finished",
+            "triage_trace=excluded.triage_trace, finished=excluded.finished",
             (failure, trace_id, signature, status, source, payload, same_as, triage_trace, ts, finished),
         )
         row = db.execute("SELECT id FROM triage WHERE failure = ?", (failure,)).fetchone()
@@ -229,7 +231,9 @@ def set_feedback(
             )
         else:
             db.execute(
-                "UPDATE triage SET feedback = ?, feedback_ts = ? WHERE id = ?",
+                "UPDATE triage SET feedback = ?, feedback_ts = ?, "
+                "status = CASE WHEN status = 'disputed' AND verdict != '' THEN 'done' ELSE status END "
+                "WHERE id = ?",
                 (feedback, ts, row_id),
             )
         updated = db.execute("SELECT * FROM triage WHERE id = ?", (row_id,)).fetchone()

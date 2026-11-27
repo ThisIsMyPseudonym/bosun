@@ -354,7 +354,7 @@ SPECS: dict[str, ActionSpec] = _specs(
     ActionSpec("get_triage", "Error triage verdict for one run, if one has been recorded",
                Risk.READ, TraceIn, "GET", "/api/runs/{trace_id}/triage"),
     ActionSpec("triage", "Ask an AI model to diagnose a failed run (skips rules and cache when deep=true)",
-               Risk.LOCAL, TriageIn, "POST", "/api/runs/{trace_id}/triage"),
+               Risk.LOCAL, TriageIn, "POST", "/api/runs/{trace_id}/triage", user_only=True),
     ActionSpec("triage_feedback", "Mark a triage verdict as helpful or wrong (removes wrong verdicts from the cache)",
                Risk.LOCAL, TriageFeedbackIn, "POST", "/api/runs/{trace_id}/triage/feedback", user_only=True),
     ActionSpec("get_runbook", "Read one Bosun troubleshooting runbook by topic name",
