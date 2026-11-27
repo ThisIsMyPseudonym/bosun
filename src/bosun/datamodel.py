@@ -103,6 +103,8 @@ TABLES: dict[str, str] = {
     "conversations": "One row per Ask Bosun conversation. Kept until you delete it in the panel.",
     "messages": "What happened in each conversation: questions, answers, tool calls, approvals and their outcome. "
                 "The words themselves are not readable here; the panel shows them. Deleted with the conversation.",
+    "quota_windows": "The latest reading of each plan usage window (5-hour, weekly, per model) per AI login. A "
+                     "reading past `resets_at`, or undated and a week old, says nothing about now.",
 }
 
 # for columns the schema has no comment on (tables from before comments were written)

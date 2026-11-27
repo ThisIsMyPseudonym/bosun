@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 SETTING = "ai_logins"
 DEFAULT = "default"
-ID = re.compile(r"^[a-z][a-z0-9-]{1,19}$")
+ID = re.compile(r"[a-z][a-z0-9-]{1,19}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 MAX_LABEL = 30
 MAX_HOME = 500
@@ -105,7 +105,7 @@ def _one(raw: Any, kept: list[Stored]) -> Stored | None:
     if not isinstance(raw, dict):
         return None
     provider, login_id, label = _text(raw, "provider"), _text(raw, "id"), _text(raw, "label")[:MAX_LABEL]
-    if provider not in CATALOG or not (login_id == DEFAULT or ID.match(login_id)):
+    if provider not in CATALOG or not (login_id == DEFAULT or ID.fullmatch(login_id)):
         return None
     if not label or CONTROL.search(label) or any(k.provider == provider and k.id == login_id for k in kept):
         return None

@@ -193,7 +193,7 @@ def test_old_snapshots_lose_the_http_addresses_they_kept(tmp_path):
     plain = {"key": "brew:jq", "source": "brew", "name": "jq", "installed": "alice:hunter2@1.7"}  # not an address
     for _ in range(2):
         old.save_snapshot([leaked, plain], [])
-    old._db.execute("DELETE FROM schema_migrations WHERE version = 8")
+    old._db.execute("DELETE FROM schema_migrations WHERE version >= 8")
     old._db.commit()
     old._db.close()
     store = Store(path)
@@ -222,7 +222,7 @@ def _v7_database_with_a_leaked_address(path, snapshots=2):
     others = [{"key": f"brew:tool{n}", "source": "brew", "name": f"tool{n}", "installed": "1.0"} for n in range(300)]
     for _ in range(snapshots):
         old.save_snapshot([*others[:150], leaked, *others[150:]], [])
-    old._db.execute("DELETE FROM schema_migrations WHERE version = 8")
+    old._db.execute("DELETE FROM schema_migrations WHERE version >= 8")
     old._db.commit()
     old._db.close()
 

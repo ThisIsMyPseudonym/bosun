@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000000"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"headline\":\"ok\"}"}}
+{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":40}},"rate_limits":{"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":1800000000},"secondary":{"used_percent":31.5,"window_minutes":10080,"resets_at":1800400000}}}
+{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":0,"output_tokens":40}}

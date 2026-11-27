@@ -1,0 +1,242 @@
+"""Usage-limit replies take a login out until the reset they name; a 429 cools it down."""
+
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from bosun.providers import limits, windows
+
+NOW = 1_800_000_000.0  # 2027-01-15 08:00 UTC (02:00 in America/Chicago)
+HOUR = 3600
+
+
+def _limit(resets_at: float, at: float = NOW) -> windows.Reading:
+    return windows.Reading("limit", "rejected", None, resets_at, at, "limit")
+
+
+@pytest.mark.parametrize("text,reset", [
+    ("You've hit your usage limit. Resets in 4h18m58s", NOW + 4 * HOUR + 18 * 60 + 58),
+    ("Resets in 4h18m58s", NOW + 4 * HOUR + 18 * 60 + 58),
+    ("Claude usage limit reached; resets 3:50pm", NOW + 7 * HOUR + 50 * 60),  # read in the zone given (UTC)
+    ("API Error: Rate limit reached", NOW + HOUR),  # exit 0, still a limit; no reset named: an hour
+    ("Claude API rate limit reached. Try again later.", NOW + HOUR),  # recorded 2026-11-26; no reset named: an hour
+    # Antigravity, recorded 2026-11-26
+    ("Third-party quota reached. Please switch to Gemini models or upgrade your subscription to increase your "
+     "limits. Resets in 2h55m54s.", NOW + 2 * HOUR + 55 * 60 + 54),
+    # Claude Code, recorded 2026-11-26: the zone it names wins over the machine's
+    ("You've hit your 5-hour limit · resets 3:10pm (America/Chicago)", NOW + 13 * HOUR + 10 * 60),
+    ("You've hit your 5-hour limit · resets 9:20pm (America/Chicago)", NOW + 19 * HOUR + 20 * 60),
+    ("Usage limit reached. Try again in 2 days 3 hours", NOW + 51 * HOUR),
+    ("Usage limit reached. Resets in 1 hour and 30 minutes", NOW + HOUR + 30 * 60),
+    ("5-hour limit reached, resets 2027-01-15T12:00:00Z", NOW + 4 * HOUR),
+    ("2027-01-15T07:59:00Z ERROR: 5-hour limit reached, resets 2027-01-15T12:00:00Z", NOW + 4 * HOUR),
+    (f"usage limit reached; reset_at={int(NOW) + 7200}", NOW + 7200),
+    ("usage limit reached until 10 minutes ago; resets 3:50pm", NOW + 7 * HOUR + 50 * 60),
+    ("You've hit your weekly limit · resets 7am (UTC)", NOW + 23 * HOUR),  # already past today: tomorrow
+])
+def test_a_limit_reply_is_a_rejected_reading_not_an_answer(text, reset):
+    assert limits.limit_reading(text, NOW, tz=UTC) == _limit(reset)
+
+
+def test_a_named_time_zone_rolls_to_tomorrow_when_that_time_has_passed():
+    chicago = ZoneInfo("America/Chicago")
+    late = datetime(2026, 11, 26, 22, 0, tzinfo=chicago).timestamp()  # 10:00pm CST: both 3:10pm and 9:20pm passed
+    expect_310 = datetime(2026, 11, 27, 15, 10, tzinfo=chicago).timestamp()
+    expect_920 = datetime(2026, 11, 27, 21, 20, tzinfo=chicago).timestamp()
+    assert limits.limit_reading(
+        "You've hit your 5-hour limit · resets 3:10pm (America/Chicago)", late, tz=UTC
+    ) == _limit(expect_310, late)
+    assert limits.limit_reading(
+        "You've hit your 5-hour limit · resets 9:20pm (America/Chicago)", late, tz=UTC
+    ) == _limit(expect_920, late)
+
+
+def test_a_named_date_is_read_as_that_date():
+    now = datetime(2026, 10, 24, 12, 0, tzinfo=UTC).timestamp()
+    assert limits.limit_reading("try again at Oct 24th, 2026 3:05 PM", now, tz=UTC) == _limit(
+        now + 3 * HOUR + 5 * 60, now)
+    got = limits.limit_reading("Usage limit reached, try again at Oct 24th, 2026 3:05 PM", now, tz=UTC)
+    assert got == _limit(now + 3 * HOUR + 5 * 60, now)
+    # a named date already past says nothing about when: an hour
+    late = limits.limit_reading("Usage limit reached, try again at Oct 24th, 2026 3:05 PM", now + 9 * HOUR, tz=UTC)
+    assert late == _limit(now + 10 * HOUR, now + 9 * HOUR)
+    # a month/day with no year already past would roll a year ahead, beyond any limit's month: unreadable, an hour
+    next_day = datetime(2026, 10, 25, 12, 0, tzinfo=UTC).timestamp()
+    assert limits.limit_reading("Usage limit reached, resets Oct 24, 3:05 PM", next_day, tz=UTC) == _limit(
+        next_day + HOUR, next_day)
+    # ...but one that rolls into the next few weeks (Dec 31 -> Jan 2) is read
+    new_year = datetime(2026, 12, 31, 12, 0, tzinfo=UTC).timestamp()
+    assert limits.limit_reading("Usage limit reached, resets Jan 2, 3:05 PM", new_year, tz=UTC) == _limit(
+        datetime(2027, 1, 2, 15, 5, tzinfo=UTC).timestamp(), new_year)
+
+
+def test_a_clock_time_is_read_in_the_machines_zone_by_default_and_unknown_zones_are_unreadable():
+    chicago = ZoneInfo("America/Chicago")
+    expect = datetime(2027, 1, 15, 15, 10, tzinfo=chicago).timestamp()
+    assert limits.limit_reading("5-hour limit · resets 3:10pm", NOW, tz=chicago) == _limit(expect)
+    assert limits.limit_reading("5-hour limit · resets 3:10pm (Mars/Olympus)", NOW, tz=chicago) == _limit(NOW + HOUR)
+    assert limits.limit_reading("5-hour limit · resets 9pm (Foo/Bar)", NOW, tz=chicago) == _limit(NOW + HOUR)
+    # US zone abbreviations are read as their zone, never as the machine's
+    pacific = datetime(2027, 1, 14, 21, 0, tzinfo=ZoneInfo("America/Los_Angeles")).timestamp()  # NOW is 00:00 PT
+    assert limits.limit_reading("5-hour limit · resets 9pm (PT)", NOW, tz=chicago) == _limit(pacific + 24 * HOUR)
+    assert limits.limit_reading("5-hour limit · resets 9pm PT", NOW, tz=chicago) == _limit(pacific + 24 * HOUR)
+    assert limits.limit_reading("5-hour limit · resets 9pm (XT)", NOW, tz=chicago) == _limit(NOW + HOUR)
+    local = datetime.fromtimestamp(NOW).replace(hour=15, minute=10, second=0, microsecond=0)
+    local_reset = local.timestamp() if local.timestamp() > NOW else local.timestamp() + 24 * HOUR
+    assert limits.limit_reading("5-hour limit · resets 3:10pm", NOW) == _limit(local_reset)
+
+
+def test_an_answer_that_mentions_limits_is_still_an_answer():
+    assert limits.limit_reading('{"headline": "Raises the API rate limit"}', NOW) is None
+    assert limits.limit_reading("Resets the cache at 3pm and runs out of memory less", NOW) is None
+    assert limits.limit_reading("", NOW) is None
+
+
+def test_long_answer_quoting_a_release_note_limit_message_is_not_a_limit():
+    note = (
+        "Release notes for v2.4.0:\n"
+        + "- Improved error formatting across the CLI and streaming client.\n" * 8
+        + '- Updated the quota error text to: "You have hit your usage limit. Resets in 2h".\n'
+        + "- Fixed minor display issues in status output.\n" * 6
+    )
+    assert limits.limit_reading(note, NOW, tz=UTC) is None  # quoted mid-text: an answer
+    # Quoted in its last lines it reads as a refusal: the safe way to be wrong (an hour's hold). Bosun only asks
+    # this of a reply that failed to parse as the answer the job expected.
+    edge = note.rstrip().rsplit("\n", 6)[0] + "\n"
+    assert limits.limit_reading(edge, NOW, tz=UTC) is not None
+
+
+def test_a_reset_bosun_cannot_read_means_an_hour():
+    assert limits.limit_reading("usage limit reached, resets 2027-99-99T00:00:00Z", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("usage limit reached, resets 25:99pm", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("usage limit reached, resets 13pm", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("usage limit reached, resets 0am", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("usage limit reached, resets in 0m", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("usage limit reached, try again at Feb 30, 2027 1pm", NOW, tz=UTC) == _limit(
+        NOW + HOUR)
+    leap_past = datetime(2028, 3, 1, 12, 0, tzinfo=UTC).timestamp()
+    assert limits.limit_reading("usage limit reached, resets Feb 29, 1pm", leap_past, tz=UTC) == _limit(
+        leap_past + HOUR, leap_past)
+
+
+def test_unbounded_or_overflowing_resets_fall_back_to_one_hour():
+    assert limits.limit_reading(f"Resets in {'9' * 400}h", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Resets in 999999h", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Usage limit reached, resets 2099-01-01T00:00:00Z", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Usage limit reached; reset_at=1999999999", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Usage limit reached. Resets in 31 days", NOW, tz=UTC) == _limit(NOW + 31 * 86400)
+    assert limits.limit_reading("Usage limit reached. Resets in 32 days", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Usage limit reached. Resets in NaN h, resets inf, -inf", NOW, tz=UTC) == _limit(
+        NOW + HOUR)
+
+
+def test_latest_bounded_reset_candidate_wins():
+    assert limits.limit_reading(
+        "Release 2099-01-01T00:00:00Z. Usage limit reached. Resets in 2h", NOW, tz=UTC
+    ) == _limit(NOW + 2 * HOUR)
+    assert limits.limit_reading(
+        "5-hour limit resets in 1m. Weekly limit resets in 5d", NOW, tz=UTC
+    ) == _limit(NOW + 5 * 86400)
+    assert limits.limit_reading(
+        "Usage limit reached. Resets in 1h, resets 2027-01-15T12:00:00Z", NOW, tz=UTC
+    ) == _limit(NOW + 4 * HOUR)
+    assert limits.limit_reading(
+        "Usage limit reached. Resets in 6h, resets 10am (UTC)", NOW, tz=UTC
+    ) == _limit(NOW + 6 * HOUR)
+
+
+def test_weeks_are_parsed_as_a_relative_reset_unit():
+    assert limits.limit_reading("Resets in 1 week", NOW, tz=UTC) == _limit(NOW + 7 * 86400)
+    assert limits.limit_reading("Usage limit reached. Resets in 2 weeks", NOW, tz=UTC) == _limit(NOW + 14 * 86400)
+    assert limits.limit_reading("Resets in 1w 2d", NOW, tz=UTC) == _limit(NOW + 9 * 86400)
+    assert limits.limit_reading("Resets in 5w", NOW, tz=UTC) == _limit(NOW + HOUR)
+
+
+# --- 429 cool-downs ----------------------------------------------------------------------------------------------
+
+
+class Clock:
+    def __init__(self, t: float) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def test_a_rate_limit_cools_the_login_down_30s_doubling():
+    clock = Clock(NOW)
+    cool = limits.Cooldowns(clock=clock)
+    assert cool.until("codex") is None and cool.active() == frozenset()
+    assert cool.hit("codex") == NOW + 30 and cool.until("codex") == NOW + 30
+    assert cool.active() == frozenset({"codex"})
+    # Concurrent 429 during an active cool-down keeps the current `until` instead of doubling
+    clock.t = NOW + 5
+    assert cool.hit("codex") == NOW + 30
+    assert cool.until("claude") is None  # per login
+    # Once the cool-down expires, the next 429 doubles the step
+    clock.t = NOW + 30
+    assert cool.until("codex") is None and cool.active() == frozenset()
+    assert cool.hit("codex") == NOW + 30 + 60
+    clock.t = NOW + 91
+    assert cool.hit("codex") == NOW + 91 + 120
+    # A late success resets the step, but never erases an active cool-down
+    cool.clear("codex")
+    assert cool.until("codex") == NOW + 91 + 120 and cool.active() == frozenset({"codex"})
+    clock.t = NOW + 91 + 120
+    assert cool.until("codex") is None and cool.hit("codex") == clock.t + 30
+
+
+def test_a_cool_down_is_capped_at_15_minutes():
+    clock = Clock(NOW)
+    cool = limits.Cooldowns(clock=clock)
+    for _ in range(10):
+        last = cool.hit("grok@work")
+        clock.t = last
+    assert last == clock.t and cool.hit("grok@work") == clock.t + limits.COOLDOWN_MAX_S == clock.t + 900
+    cool.clear("nobody")  # clearing a login that never cooled is fine
+
+
+NOV27 = 1795737600.0  # 2026-11-27T00:00:00Z
+
+
+def test_a_long_refusal_is_still_a_refusal():
+    import json
+
+    from bosun.providers.limits import limit_reading
+
+    trace = "API Error: Rate limit reached\n" + "\n".join(f"    at frame {i} (file.js:{i}:1)" for i in range(40))
+    assert limit_reading(trace, NOV27) is not None
+    envelope = json.dumps({"type": "result", "is_error": True, "uuid": "x" * 400, "usage": {"input_tokens": 1},
+                           "result": "You've hit your 5-hour limit · resets 3:10pm (America/Chicago)"})
+    got = limit_reading(envelope, NOV27)
+    assert got is not None and got.resets_at is not None and got.resets_at - NOV27 < 86400
+    tail = "Some words. " * 60 + "\nThird-party quota reached. Resets in 2h55m54s."
+    got = limit_reading(tail, NOV27)
+    assert got is not None and got.resets_at == pytest.approx(NOV27 + 2 * 3600 + 55 * 60 + 54)
+
+
+def test_a_limit_phrase_quoted_deep_inside_a_long_answer_is_not_a_refusal():
+    from bosun.providers.limits import limit_reading
+
+    answer = "\n".join(["Summary of the release."] * 8 + ['Notes: "You have hit your usage limit. Resets in 2h"']
+                        + ["More notes."] * 8)
+    assert limit_reading(answer, NOV27) is None
+
+
+def test_a_dateless_clock_already_past_does_not_roll_a_year_ahead():
+    from bosun.providers.limits import reset_time
+
+    got = reset_time("Resets in 2 hours. (last reset Jan 14, 3pm UTC)", NOV27)
+    assert got == pytest.approx(NOV27 + 7200)
+
+
+def test_utc_offsets_and_us_zone_abbreviations_are_read():
+    from datetime import datetime
+
+    from bosun.providers.limits import reset_time
+
+    assert reset_time("Resets 3pm UTC-5", NOV27) == datetime(2026, 11, 27, 20, 0, tzinfo=UTC).timestamp()
+    assert reset_time("Resets 3pm (UTC+05:30)", NOV27) == datetime(2026, 11, 27, 9, 30, tzinfo=UTC).timestamp()
+    assert reset_time("Resets 9pm ET", NOV27) == datetime(2026, 11, 27, 2, 0, tzinfo=UTC).timestamp()  # 9pm Nov 26 EST
+    assert reset_time("Resets 9pm PT", NOV27) == datetime(2026, 11, 27, 5, 0, tzinfo=UTC).timestamp()  # 9pm Nov 26 PST
