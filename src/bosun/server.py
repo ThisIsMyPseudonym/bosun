@@ -77,6 +77,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     icon_dir = store.path.parent  # app icons read from this machine are cached beside the database
     sessions = auth.Sessions(session_key or auth.load_key(s.data_dir))
     assistant_tokens = auth.AssistantTokens()
+    triage_tokens = auth.TriageTokens()
     cookie = auth.cookie_name(s.port)
     refresh_file_lock = lock.FileLock(store.path.parent / "refresh.lock")
     # with a `bosun refresh` running on its own, only what no process is doing any more: some may be its own
@@ -153,6 +154,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             response = RedirectResponse("/", status_code=303)
             response.set_cookie(cookie, value, max_age=auth.COOKIE_MAX_AGE_S, httponly=True, samesite="strict", path="/")
             return response
+        triage_token = request.headers.get(auth.TRIAGE_TOKEN_HEADER)
+        if triage_token is not None and not path.startswith(OPEN_PATHS):
+            return _refuse_triage(request, triage_token)
         assistant_token = request.headers.get(auth.ASSISTANT_TOKEN_HEADER)
         if assistant_token is not None and not path.startswith(OPEN_PATHS):
             return _refuse_assistant(request, assistant_token)
@@ -227,6 +231,32 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         request.state.actor, request.state.surface = registry.ASSISTANT, "assistant"
         request.state.assistant_grant = grant
         request.state.assistant_token = assistant_token
+        return None
+
+    def _refuse_triage(request: Request, triage_token: str) -> Response | None:
+        """A read-only error triage MCP call (`bosun mcp --as triage`): per-job token in header, 8-call cap."""
+        if request.headers.get("origin") is not None or request.headers.get("sec-fetch-site") is not None:
+            return JSONResponse({"error": "triage requests must not come from a browser"}, status_code=403)
+        if request.headers.get("authorization") is not None or request.headers.get(auth.ASSISTANT_TOKEN_HEADER) is not None:
+            return JSONResponse({"error": "conflicting credentials"}, status_code=403)
+        if triage_tokens.verify(triage_token) is None:
+            return JSONResponse({"error": "invalid or expired triage token"}, status_code=401)
+        raw = request.scope.get("raw_path") or request.url.path.encode()
+        target = raw.decode("ascii", "replace") + (f"?{request.scope['query_string'].decode('ascii', 'replace')}"
+                                                   if request.scope.get("query_string") else "")
+        request.state.reply_proof = auth.triage_reply_proof(triage_tokens.reply_key(triage_token),
+                                                            request.method, target)
+        path = request.url.path
+        if not path.startswith("/api/") or path == "/api/state":
+            return JSONResponse({"error": "triage can only call read-only actions"}, status_code=403)
+        if path.startswith(("/api/assistant", "/api/icon", "/api/terminal")):
+            return JSONResponse({"error": "this panel route is not open to triage"}, status_code=403)
+        if triage_tokens.consume_call(triage_token) is None:
+            return JSONResponse(
+                {"error": "Triage tool-call limit reached. Stop calling tools and emit your JSON verdict now."},
+                status_code=429,
+            )
+        request.state.actor, request.state.surface = registry.TRIAGE, "triage"
         return None
 
     @app.middleware("http")
@@ -393,6 +423,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     app.state.actions = actions  # the in-process surface (the assistant) calls these directly
     assistant = Assistant(store, s, actions, approvals, tokens=assistant_tokens)
     app.state.assistant, app.state.approvals, app.state.assistant_tokens = assistant, approvals, assistant_tokens
+    app.state.triage_tokens = triage_tokens
     app.state.terminals, app.state.upgrader = terminals, upgrader
     if store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")

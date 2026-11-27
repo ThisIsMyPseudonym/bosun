@@ -909,8 +909,8 @@ def main(argv: list[str] | None = None) -> int:
     mc = sub.add_parser("mcp", help="Bosun as an MCP server for Claude Code (stdio); `mcp install` adds it to Claude Code")
     mc.add_argument("mcp_cmd", nargs="?", choices=("install", "uninstall"),
                     help="install: add it to Claude Code for every project; uninstall: remove it")
-    mc.add_argument("--as", dest="as_role", choices=("agent", "assistant"), default="agent",
-                    help="who is calling: agent (default) or assistant (Ask Bosun per-turn token)")
+    mc.add_argument("--as", dest="as_role", choices=("agent", "assistant", "triage"), default="agent",
+                    help="who is calling: agent (default), assistant (Ask Bosun), or triage (read-only error triage)")
     mc.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     a = sub.add_parser("actions", help="everything Bosun can do, with its risk tier")
     a.add_argument("--json", action="store_true", help="with input schemas, as JSON")
@@ -961,11 +961,11 @@ def main(argv: list[str] | None = None) -> int:
         (args.cmd in _READ_ONLY_CMDS and not (args.cmd == "doctor" and getattr(args, "providers", False)))
         or (args.cmd == "db" and not args.migrate)
     )
-    assistant_mcp = args.cmd == "mcp" and args.mcp_cmd is None and getattr(args, "as_role", "agent") == "assistant"
+    embedded_mcp = args.cmd == "mcp" and args.mcp_cmd is None and getattr(args, "as_role", "agent") in ("assistant", "triage")
     # Read-only commands must never create directories, write logs, or open/migrate the database.
-    # `mcp --as assistant` logs to stderr only so it never needs BOSUN_DATA_DIR forwarded.
+    # `mcp --as assistant|triage` logs to stderr only so it never needs BOSUN_DATA_DIR forwarded.
     # `refresh` defers logging/DB setup until it knows the dashboard is not running (offline fallback).
-    if assistant_mcp:
+    if embedded_mcp:
         logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     elif not read_only and args.cmd != "refresh":
         _setup_logging(s, "serve" if args.cmd == "serve" else "cli", open_db=args.cmd not in _NO_DB_LOG_CMDS)
