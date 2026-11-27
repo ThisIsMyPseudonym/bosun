@@ -50,8 +50,10 @@ def test_pace_is_share_used_over_share_of_time_gone():
     assert quota.pace(R("five_hour", "allowed", 0.90, six_pm, four_pm), four_pm) == pytest.approx(1.5)
 
 
-def test_pace_is_unknown_without_a_length_a_reset_or_a_share():
-    assert quota.pace(R("quota:flash", "allowed", 0.5, NOW + 60, NOW), NOW) is None
+def test_pace_is_unknown_without_a_reset_or_a_share_and_uses_share_without_length():
+    assert quota.pace(R("quota:flash", "allowed", 0.5, NOW + 60, NOW), NOW) == pytest.approx(0.5)
+    assert quota.pace(R("quota:flash", "allowed", 0.99, None, NOW), NOW) == pytest.approx(0.99)
+    assert quota.pace(R("quota:flash", "allowed", None, NOW + 60, NOW), NOW) is None
     assert quota.pace(R("five_hour", "allowed", 0.5, None, NOW), NOW) is None
     assert quota.pace(R("five_hour", "allowed", None, NOW + 60, NOW), NOW) is None
     assert quota.pace(R("five_hour", "allowed", 0.5, NOW - 1, NOW - 60), NOW) is None  # stale: unknown
@@ -81,8 +83,10 @@ def test_login_pace_is_the_worst_current_window_and_none_without_one():
     assert quota.login_pace((gone,), NOW) is None
     refused = R("five_hour", "rejected", None, NOW + 60, NOW)
     assert quota.login_pace((_at_pace("seven_day", 0.1), refused), NOW) == math.inf
-    unknown = R("quota:flash", "allowed", 0.5, NOW + 60, NOW)  # a share but no length: no pace of its own
-    assert quota.login_pace((unknown,), NOW) is None
+    unknown_len = R("quota:flash", "allowed", 0.99, NOW + 60, NOW)  # no length: pace equals share (fully elapsed)
+    assert quota.login_pace((unknown_len,), NOW) == pytest.approx(0.99)
+    no_share = R("quota:flash", "allowed", None, NOW + 60, NOW)
+    assert quota.login_pace((no_share,), NOW) is None
 
 
 # --- the 75% line ------------------------------------------------------------------------------------------------

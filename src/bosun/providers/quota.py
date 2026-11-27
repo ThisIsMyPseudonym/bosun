@@ -46,10 +46,15 @@ def share(r: Reading) -> float | None:
 def pace(r: Reading, now: float) -> float | None:
     """Share used over the share of the window's time gone: 1.0 is on track to use it all exactly at the reset.
 
-    Unknown (None) when the reading is stale, has no share, no reset, or a window whose length its name does not say.
+    When the share is known but the window's length is not (`quota:*`), treats the window as fully elapsed so
+    `pace == share`. Unknown (None) when the reading is stale, has no share, or has a known length but no reset.
     """
     used, hours = share(r), window_hours(r.window)
-    if stale(r, now) or used is None or r.resets_at is None or hours is None:
+    if stale(r, now) or used is None:
+        return None
+    if hours is None:
+        return used
+    if r.resets_at is None:
         return None
     elapsed = 1 - (r.resets_at - now) / (hours * 3600)
     return used / min(1.0, max(MIN_ELAPSED, elapsed))
