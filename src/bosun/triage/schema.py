@@ -99,3 +99,4 @@ class FailureRecord:
     command: tuple[str, ...]
     exit_code: int | None
     output: str
+    span_id: str = ""

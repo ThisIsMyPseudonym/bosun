@@ -210,18 +210,24 @@ def test_triage_card_renders_cause_evidence_step_and_never_uses_innerhtml():
     runs_js = str(STATIC / "runs.js")
     script = f"""
     const fs = require("fs");
+    const byId = new Map();
     function mkNode(tag) {{
       const n = {{
         tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
         _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
-        id: "", href: "",
+        id: "", href: "", scrolled: false,
         get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
         set textContent(v) {{ this._text = String(v); this.children = []; }},
-        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "id") this.id = String(v); if (k === "href") this.href = String(v); }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "id") {{ this.id = String(v); byId.set(this.id, this); }}
+          if (k === "href") this.href = String(v);
+        }},
         getAttribute(k) {{ return this.attrs[k] ?? null; }},
         addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
         append(...kids) {{ for (const k of kids) this.children.push(k); }},
         replaceChildren(...kids) {{ this.children = [...kids]; }},
+        scrollIntoView() {{ this.scrolled = true; }},
         showModal() {{ this.open = true; }},
         close() {{ this.open = false; }},
         remove() {{}},
@@ -232,7 +238,7 @@ def test_triage_card_renders_cause_evidence_step_and_never_uses_innerhtml():
     globalThis.document = {{
       body: mkNode("body"),
       querySelector: () => ({{ content: "tok" }}),
-      getElementById: () => null,
+      getElementById: (id) => byId.get(id) || null,
       createElement: (tag) => mkNode(tag),
       createElementNS: (_ns, tag) => mkNode(tag),
     }};
@@ -249,10 +255,15 @@ def test_triage_card_renders_cause_evidence_step_and_never_uses_innerhtml():
 
     const H = MC.triageHelpers;
     if (!H) throw new Error("MC.triageHelpers missing");
+    const allNodes = (n) => [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)];
+
+    const spanNode = mkNode("details");
+    spanNode.setAttribute("id", "span-a1b2c3d4");
+    spanNode.open = false;
 
     const trace = {{
       run: {{ trace_id: "abcdef12", kind: "upgrade", subject: "brew:jq", status: "failed", started: 1700000000 }},
-      spans: [{{ span_id: "sp1", kind: "subprocess", name: "brew", status: "error", attrs: {{}} }}],
+      spans: [{{ span_id: "a1b2c3d4", kind: "subprocess", name: "brew", status: "error", attrs: {{}} }}],
       failures: [],
       jobs: [],
       fixes: [],
@@ -265,7 +276,10 @@ def test_triage_card_renders_cause_evidence_step_and_never_uses_innerhtml():
         category: "permissions",
         cause: "Folder <script>alert(1)</script> not writable.",
         confidence: "high",
-        evidence: [{{ source: "output", ref: "sp1", line: "Permission denied @ <script>x</script>" }}],
+        evidence: [
+          {{ source: "output", ref: "a1b2c3d4", line: "Permission denied @ <script>x</script>" }},
+          {{ source: "output", ref: "", line: "Fallback line with no span" }},
+        ],
         next_step: {{ kind: "runbook", recipe: null, runbook: "homebrew-permissions", why: "Fix ownership." }},
         needs_person: true,
         transient: false,
@@ -279,6 +293,13 @@ def test_triage_card_renders_cause_evidence_step_and_never_uses_innerhtml():
     if (!text.includes("Rules")) throw new Error("missing provenance Rules: " + text);
     if (!text.includes("Helpful") || !text.includes("Wrong")) throw new Error("missing feedback buttons: " + text);
     if (!text.includes("Open guide")) throw new Error("missing runbook button: " + text);
+
+    // Evidence with a real span id links to #span-<span_id> and opens + scrolls to the span node
+    const evLinks = allNodes(card).filter((n) => n.tagName === "A" && n.className.includes("triage-evref"));
+    if (evLinks.length !== 1) throw new Error("expected 1 evidence link (empty ref must not be a link), got " + evLinks.length);
+    if (evLinks[0].href !== "#span-a1b2c3d4") throw new Error("wrong evidence href: " + evLinks[0].href);
+    (evLinks[0].listeners.click || []).forEach((fn) => fn({{ preventDefault() {{}} }}));
+    if (!spanNode.open || !spanNode.scrolled) throw new Error("clicking evidence link did not open and scroll to span");
 
     const cacheTriage = {{
       status: "done",

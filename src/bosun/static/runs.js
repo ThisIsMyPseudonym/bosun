@@ -240,11 +240,15 @@ function verdictCard(triage, trace, S) {
   const v = triage.verdict;
   if (!v) return null;
   const heading = v.category === "unknown" ? "Not sure" : "Likely cause";
+  const spanIds = new Set((trace.spans || []).map((sp) => sp.span_id));
   const evList = (v.evidence || []).length
-    ? el("ul", { class: "triage-ev" }, ...v.evidence.map((ev) => el("li", {},
-        el("a", { href: `#span-${ev.ref}`, class: "triage-evref", text: ev.source,
-          onclick: (e) => { e.preventDefault(); jumpToSpan(ev.ref); } }),
-        " ", el("code", { text: ev.line })))) : null;
+    ? el("ul", { class: "triage-ev" }, ...v.evidence.map((ev) => {
+        const ref = ev.ref && spanIds.has(ev.ref)
+          ? el("a", { href: `#span-${ev.ref}`, class: "triage-evref", text: ev.source,
+              onclick: (e) => { e.preventDefault(); jumpToSpan(ev.ref); } })
+          : el("span", { class: "triage-evref", text: ev.source });
+        return el("li", {}, ref, " ", el("code", { text: ev.line }));
+      })) : null;
   const tid = trace.run.trace_id;
   const fbBtn = (label, val) => el("button", {
     class: `quiet${triage.feedback === val ? " on" : ""}`, "aria-pressed": String(triage.feedback === val),

@@ -344,7 +344,7 @@ def match(rec: FailureRecord) -> Verdict | None:
     hits.sort(key=lambda t: (t[0], t[1]))
     chosen = hits[0][2]
     line = _matching_line(chosen.pattern, text)
-    evidence = [Evidence(source="output", ref=rec.trace_id[:120] or rec.failure[:120], line=line)] if line else []
+    evidence = [Evidence(source="output", ref=rec.span_id[:120], line=line)] if line else []
     needs_person = chosen.needs_person or bool(actions.needs_person(text))
     return Verdict(
         category=chosen.category,

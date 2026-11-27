@@ -117,5 +117,22 @@ def test_load_failure_normalizes_partial_fix_and_falls_back_from_null_failed_out
         assert rec_job.item_source == "brew-cask"
         assert "App Store's copy" in rec_job.output
         assert rec_job.command == ("brew", "upgrade", "--cask", "vlc")
+        assert rec_job.span_id == ""
+
+        # Failed job with an error subprocess span records its span_id
+        job2_id = st.create_job("brew:jq", ["brew", "upgrade", "--formula", "jq"])
+        job2 = st.job(job2_id)
+        assert job2 is not None
+        with trace.run("upgrade", subject="brew:jq", trace_id=job2["trace_id"]) as r_job2:
+            with trace.span("subprocess", "brew", argv=["brew", "upgrade", "--formula", "jq"]) as sp:
+                sp.set(returncode=1, stderr_tail="Permission denied")
+                sp.fail("exit 1")
+                failed_span_id = sp.span_id
+            r_job2.fail("Permission denied")
+        st.finish_job(job2_id, "failed", "Permission denied")
+
+        rec_job2 = tstore.load_failure(st, job2["trace_id"])
+        assert rec_job2 is not None
+        assert rec_job2.span_id == failed_span_id
     finally:
         trace.configure(None)

@@ -250,6 +250,15 @@ def _resolve_fallbacks(
     return what, what_id, subject, status, command, output or error
 
 
+def _failing_span_id(db: sqlite3.Connection, trace_id: str) -> str:
+    row = db.execute(
+        "SELECT span_id FROM spans WHERE trace_id = ? AND status = 'error' AND kind != 'run' "
+        "ORDER BY (kind = 'subprocess') DESC, started DESC LIMIT 1",
+        (trace_id,),
+    ).fetchone()
+    return str(row["span_id"]) if row is not None else ""
+
+
 def load_failure(store: Store, trace_id: str) -> FailureRecord | None:
     """Load and normalize one failure from v_failures by trace_id."""
     with store._tx() as db:
@@ -284,4 +293,5 @@ def load_failure(store: Store, trace_id: str) -> FailureRecord | None:
             command=command,
             exit_code=int(row["failed_exit"]) if row["failed_exit"] is not None else None,
             output=output,
+            span_id=_failing_span_id(db, trace_id),
         )

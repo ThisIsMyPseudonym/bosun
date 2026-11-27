@@ -93,3 +93,20 @@ def test_is_outage_only_matches_only_did_not_answer_lines():
     assert not rules.is_outage_only("NVD answered in a form Bosun could not read; check schema")
     assert not rules.is_outage_only("NVD did not answer; missing\nbrew collector crashed")
 
+
+def test_evidence_ref_uses_failing_span_id_or_empty_when_missing():
+    with_span = FailureRecord(
+        "job:10", "job", "10", "upgrade", "brew:jq", "brew", "failed", 100.0, "user", "trace123",
+        "Permission denied", ("brew", "upgrade", "--formula", "jq"), 1, "Permission denied",
+        span_id="span99ab",
+    )
+    v1 = rules.match(with_span)
+    assert v1 is not None and v1.evidence and v1.evidence[0].ref == "span99ab"
+
+    without_span = FailureRecord(
+        "job:11", "job", "11", "upgrade", "brew:jq", "brew", "failed", 100.0, "user", "trace123",
+        "Permission denied", ("brew", "upgrade", "--formula", "jq"), 1, "Permission denied",
+    )
+    v2 = rules.match(without_span)
+    assert v2 is not None and v2.evidence and v2.evidence[0].ref == ""
+
