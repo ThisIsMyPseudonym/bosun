@@ -192,3 +192,128 @@ def test_routing_and_override_controls_offer_only_installed_logins():
     panel = js[js.index("function routingPanel"):]
     assert "logins = logins.filter((lg) => lg.installed);" in panel[:400]
     assert "} else if (lg.line_hit && lg.installed) {" in js
+
+
+def test_triage_card_renders_cause_evidence_step_and_never_uses_innerhtml():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    src = (STATIC / "runs.js").read_text(encoding="utf-8")
+    assert "innerHTML" not in code_only(src)
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    runs_js = str(STATIC / "runs.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      const n = {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        id: "", href: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "id") this.id = String(v); if (k === "href") this.href = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+        showModal() {{ this.open = true; }},
+        close() {{ this.open = false; }},
+        remove() {{}},
+      }};
+      return n;
+    }}
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      body: mkNode("body"),
+      querySelector: () => ({{ content: "tok" }}),
+      getElementById: () => null,
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    MC.route = {{ parse: () => ({{ page: "trace" }}) }};
+    MC.render = () => {{}};
+    MC.nameOf = (_S, k) => k.split(":").pop();
+    MC.ago = () => "1m ago";
+    MC.jobLabel = (j) => j.status;
+    MC.ask = () => {{}};
+    MC.banner = () => {{}};
+    MC.actions = {{ upgrade: () => {{}}, fix: () => {{}}, recheckProject: () => {{}}, copyPrompt: () => {{}} }};
+    eval(fs.readFileSync({json.dumps(runs_js)}, "utf8"));
+
+    const H = MC.triageHelpers;
+    if (!H) throw new Error("MC.triageHelpers missing");
+
+    const trace = {{
+      run: {{ trace_id: "abcdef12", kind: "upgrade", subject: "brew:jq", status: "failed", started: 1700000000 }},
+      spans: [{{ span_id: "sp1", kind: "subprocess", name: "brew", status: "error", attrs: {{}} }}],
+      failures: [],
+      jobs: [],
+      fixes: [],
+    }};
+    const rulesTriage = {{
+      status: "done",
+      source: "rules",
+      feedback: "",
+      verdict: {{
+        category: "permissions",
+        cause: "Folder <script>alert(1)</script> not writable.",
+        confidence: "high",
+        evidence: [{{ source: "output", ref: "sp1", line: "Permission denied @ <script>x</script>" }}],
+        next_step: {{ kind: "runbook", recipe: null, runbook: "homebrew-permissions", why: "Fix ownership." }},
+        needs_person: true,
+        transient: false,
+      }},
+    }};
+    const card = H.verdictCard(rulesTriage, trace, {{}});
+    const text = card.textContent;
+    if (!text.includes("Folder <script>alert(1)</script> not writable.")) throw new Error("cause not escaped as text: " + text);
+    if (!text.includes("High confidence")) throw new Error("missing confidence: " + text);
+    if (!text.includes("Permission denied @ <script>x</script>")) throw new Error("missing evidence: " + text);
+    if (!text.includes("Rules")) throw new Error("missing provenance Rules: " + text);
+    if (!text.includes("Helpful") || !text.includes("Wrong")) throw new Error("missing feedback buttons: " + text);
+    if (!text.includes("Open guide")) throw new Error("missing runbook button: " + text);
+
+    const cacheTriage = {{
+      status: "done",
+      source: "cache",
+      same_as: 1,
+      same_as_run: {{ trace_id: "11223344", kind: "upgrade", subject: "brew:jq", started: 1700000000 }},
+      feedback: "disputed",
+      verdict: {{
+        category: "network",
+        cause: "Registry timed out.",
+        confidence: "medium",
+        evidence: [],
+        next_step: {{ kind: "retry", recipe: null, runbook: null, why: "Try again." }},
+        needs_person: false,
+        transient: true,
+      }},
+    }};
+    const cacheCard = H.verdictCard(cacheTriage, trace, {{}});
+    if (!cacheCard.textContent.includes("Same as") || !cacheCard.textContent.includes("Try again")) {{
+      throw new Error("cache card missing provenance or retry: " + cacheCard.textContent);
+    }}
+    if (!cacheCard.textContent.includes("Disputed")) throw new Error("missing disputed marker: " + cacheCard.textContent);
+
+    const fixedCard = H.verdictCard({{ status: "fixed_since", source: "", verdict: null }}, trace, {{}});
+    if (!fixedCard.textContent.includes("Fixed since")) throw new Error("missing fixed_since text: " + fixedCard.textContent);
+
+    const rb = H.renderRunbookMarkdown("# Title\\n\\nParagraph with <script>bad</script>\\n\\n```\\nbrew doctor\\n```\\n\\n| A | B |\\n|---|---|\\n| 1 | 2 |");
+    const rbText = rb.textContent;
+    if (!rbText.includes("Title") || !rbText.includes("brew doctor") || !rbText.includes("<script>bad</script>")) {{
+      throw new Error("bad runbook render: " + rbText);
+    }}
+
+    console.log("OK");
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
