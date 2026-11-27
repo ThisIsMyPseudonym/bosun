@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
+import time
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
@@ -24,12 +26,14 @@ class Result:
 
 def run(argv: list[str] | tuple[str, ...], timeout: float = 300, cwd: str | None = None,
         stdin: str | None = None, env: dict[str, str] | None = None, private: tuple[int, ...] = (),
-        ok_codes: tuple[int, ...] = (0,), unset: tuple[str, ...] = ()) -> Result:
+        ok_codes: tuple[int, ...] = (0,), unset: tuple[str, ...] = (), *, kill_group: bool = False) -> Result:
     """`private`: positions in argv that must not be recorded (a config blob that may hold keys).
     `unset`: variables the command must not inherit, even when `env` sets them (an added AI login drops the keys
     that would sign its CLI in some other way); the run's record lists their names, never their values.
     `ok_codes`: exit codes that are an answer and not a failure for this command (`brew vulns` exits 1 when it
     has findings); the run's record doesn't mark those as errors.
+    `kill_group`: start in a new process group and terminate the entire group on any exit so child servers
+    (such as `bosun mcp --as triage`) never outlive the CLI.
     Every command is a span in the current trace: argv (redacted), exit code, how long, and on failure the
     tail of its output. Successful output isn't stored (the caller has it); only its size."""
     from . import trace  # late: trace imports redact, which must stay importable without this module
@@ -39,7 +43,7 @@ def run(argv: list[str] | tuple[str, ...], timeout: float = 300, cwd: str | None
     extra = {"unset": sorted(unset)} if unset else {}
     with trace.span("subprocess", name, argv=trace.redact.argv(shown), cwd=cwd, timeout=timeout,
                     stdin_chars=len(stdin) if stdin is not None else None, **extra) as sp:
-        r = _run(argv, timeout, cwd, stdin, env, shown=shown, unset=unset)
+        r = _run(argv, timeout, cwd, stdin, env, shown=shown, unset=unset, kill_group=kill_group)
         sp.set(returncode=r.returncode, stdout_chars=len(r.stdout), stderr_chars=len(r.stderr))
         if r.returncode not in ok_codes:
             sp.status = "error"
@@ -92,12 +96,86 @@ def git(path: str | os.PathLike, *args: str, timeout: float = 120) -> Result:
     return run(["git", "-C", str(path), *GIT_SAFE, *args], timeout=timeout, env={"GIT_OPTIONAL_LOCKS": "0"})
 
 
+def _kill_pg(p: subprocess.Popen[str]) -> None:
+    """Terminate the child's entire process group on any exit so grandchildren cannot linger."""
+    if os.name == "nt":
+        try:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=1.5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                p.kill()
+            except OSError:
+                pass
+        return
+    for sig, wait_s in ((signal.SIGTERM, 0.4), (signal.SIGKILL, 0.0)):
+        try:
+            os.killpg(p.pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        if wait_s <= 0:
+            return
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(p.pid, 0)
+            except ProcessLookupError:
+                return
+            except OSError:
+                break
+            time.sleep(0.02)
+
+
+def _run_group(argv: list[str] | tuple[str, ...], timeout: float, cwd: str | None, stdin: str | None,
+               env: dict[str, str], shown: list[str] | tuple[str, ...] | None) -> Result:
+    extra: dict[str, object] = (
+        {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+        if os.name == "nt" else {"start_new_session": True}
+    )
+    try:
+        p = subprocess.Popen(
+            list(argv),
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            env=env,
+            **extra,  # type: ignore[arg-type]
+        )
+    except FileNotFoundError:
+        log.warning("command not found: %s", argv[0])
+        return Result(tuple(argv), 127, "", f"command not found: {argv[0]}")
+    try:
+        out, err = p.communicate(input=stdin, timeout=timeout)
+        return Result(tuple(argv), p.returncode if p.returncode is not None else 1, out or "", err or "")
+    except subprocess.TimeoutExpired as exc:
+        from . import redact
+        log.warning("timeout after %ss: %s", timeout, " ".join(redact.argv(shown if shown is not None else argv)))
+        _kill_pg(p)
+        try:
+            p.communicate(timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        partial = exc.stdout or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", errors="replace")
+        return Result(tuple(argv), 124, partial, f"timed out after {timeout}s")
+    finally:
+        _kill_pg(p)
+
+
 def _run(argv: list[str] | tuple[str, ...], timeout: float, cwd: str | None, stdin: str | None,
          env: dict[str, str] | None, shown: list[str] | tuple[str, ...] | None = None,
-         unset: tuple[str, ...] = ()) -> Result:
+         unset: tuple[str, ...] = (), *, kill_group: bool = False) -> Result:
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1", **(env or {})}
     for name in unset:
         env.pop(name, None)
+    if kill_group:
+        return _run_group(argv, timeout, cwd, stdin, env, shown)
     try:
         cp = subprocess.run(
             list(argv),
