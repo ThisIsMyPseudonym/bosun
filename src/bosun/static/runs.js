@@ -193,21 +193,47 @@ function triageProvenance(triage, S) {
   return el("span", { class: "triage-src", text: triage.source ? `Source: ${triage.source}` : "" });
 }
 
-function runRetry(trace, S) {
-  const r = trace.run;
-  if (r.kind === "fix" && r.subject && MC.actions.fix) return MC.actions.fix([r.subject]);
-  if (["upgrade", "manual"].includes(r.kind) && r.subject && r.subject.includes(":") && MC.actions.upgrade) return MC.actions.upgrade([r.subject]);
-  if (r.kind === "recheck-project" && r.subject && MC.actions.recheckProject) return MC.actions.recheckProject(r.subject, subjectName(S, r));
-  return api("/api/refresh", { method: "POST" }).catch((e) => { if (MC.banner) MC.banner(e.message); });
+function fixRetryKeys(trace, triage) {
+  const r = trace.run, fixes = trace.fixes || [];
+  const fx = fixes.find((f) => f.trace_id === r.trace_id) || fixes[0];
+  const valid = (arr) => (arr || []).filter((k) => typeof k === "string" && k.includes(":") && !k.startsWith("batch:"));
+  const fromResult = valid(fx && fx.result && fx.result.keys);
+  if (fromResult.length) return fromResult;
+  const fromItem = valid(fx && fx.item_key ? [fx.item_key] : []);
+  if (fromItem.length) return fromItem;
+  return valid(triage && triage.item_keys);
 }
 
-function triageStepAction(step, trace, S) {
+function retryAction(trace, triage, S) {
+  const r = trace.run;
+  if (r.kind === "fix" && MC.actions.fix) {
+    const keys = fixRetryKeys(trace, triage);
+    return keys.length ? () => MC.actions.fix(keys) : null;
+  }
+  if (["upgrade", "manual"].includes(r.kind) && MC.actions.upgrade) {
+    const jobKeys = (trace.jobs || []).map((j) => j.item_key).filter((k) => k && k.includes(":"));
+    const keys = jobKeys.length ? jobKeys : (r.subject && r.subject.includes(":") ? [r.subject] : []);
+    return keys.length ? () => MC.actions.upgrade(keys) : null;
+  }
+  if (r.kind === "recheck-project" && r.subject && MC.actions.recheckProject) {
+    return () => MC.actions.recheckProject(r.subject, subjectName(S, r));
+  }
+  if (["refresh", "recheck"].includes(r.kind)) {
+    return () => api("/api/refresh", { method: "POST" }).catch((e) => { if (MC.banner) MC.banner(e.message); });
+  }
+  return null;
+}
+
+function triageStepAction(step, trace, triage, S) {
   if (!step) return null;
   if (step.kind === "runbook" && step.runbook) {
     return el("button", { class: "primary", text: "Open guide", onclick: () => openRunbook(step.runbook) });
   }
   if (step.kind === "recipe" && MC.recipeButtons) return MC.recipeButtons({ trace_id: trace.run.trace_id });
-  if (step.kind === "retry") return el("button", { class: "primary", text: "Try again", onclick: () => runRetry(trace, S) });
+  if (step.kind === "retry") {
+    const go = retryAction(trace, triage, S);
+    return go ? el("button", { class: "primary", text: "Try again", onclick: go }) : null;
+  }
   if (step.kind === "rescan") {
     const r = trace.run;
     const go = () => (r.kind === "recheck-project" && r.subject && MC.actions.recheckProject
@@ -261,7 +287,7 @@ function verdictCard(triage, trace, S) {
       triage.feedback === "disputed" ? el("span", { class: "triage-conf warn", text: "Disputed" }) : null),
     el("p", { class: "triage-cause", text: v.cause }),
     evList,
-    el("div", { class: "triage-step" }, triageStepAction(v.next_step, trace, S),
+    el("div", { class: "triage-step" }, triageStepAction(v.next_step, trace, triage, S),
       v.next_step && v.next_step.why ? el("span", { class: "hint", text: v.next_step.why }) : null),
     el("div", { class: "triage-foot" }, triageProvenance(triage, S),
       el("div", { class: "triage-fb" }, fbBtn("Helpful", "helpful"), fbBtn("Wrong", "wrong"))));

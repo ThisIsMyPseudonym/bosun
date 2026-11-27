@@ -338,3 +338,129 @@ def test_triage_card_renders_cause_evidence_step_and_never_uses_innerhtml():
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
 
+
+def test_triage_retry_uses_fix_item_keys_and_omits_button_for_non_retryable_kinds():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    runs_js = str(STATIC / "runs.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      body: mkNode("body"),
+      querySelector: () => ({{ content: "tok" }}),
+      getElementById: () => null,
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const apiCalls = [];
+    MC.api = async (path, opts) => {{ apiCalls.push({{ path, opts }}); return {{}}; }};
+    const fixCalls = [];
+    MC.route = {{ parse: () => ({{ page: "trace" }}) }};
+    MC.render = () => {{}};
+    MC.nameOf = (_S, k) => k;
+    MC.ago = () => "1m ago";
+    MC.jobLabel = (j) => j.status;
+    MC.ask = () => {{}};
+    MC.banner = () => {{}};
+    MC.actions = {{ upgrade: () => {{}}, fix: (keys) => fixCalls.push(keys), recheckProject: () => {{}}, copyPrompt: () => {{}} }};
+    eval(fs.readFileSync({json.dumps(runs_js)}, "utf8"));
+
+    const H = MC.triageHelpers;
+    const allNodes = (n) => [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)];
+    const retryBtn = (card) => allNodes(card).find((n) => n.tagName === "BUTTON" && n.textContent === "Try again");
+    const retryTriage = (extra = {{}}) => ({{
+      status: "done", source: "rules", feedback: "", ...extra,
+      verdict: {{
+        category: "network", cause: "Registry timed out.", confidence: "high", evidence: [],
+        next_step: {{ kind: "retry", recipe: null, runbook: null, why: "Try again." }},
+        needs_person: false, transient: true,
+      }},
+    }});
+
+    // 1. Single-item failed fix passes the item key from trace.fixes, not the project name
+    const fixTrace = {{
+      run: {{ trace_id: "fix00001", kind: "fix", subject: "orchard-api", status: "failed", started: 1700000000 }},
+      spans: [], failures: [], jobs: [],
+      fixes: [{{ id: 1, trace_id: "fix00001", item_key: "repo:npm:lodash@orchard-api", result: {{ keys: ["repo:npm:lodash@orchard-api"] }} }}],
+    }};
+    const fixCard = H.verdictCard(retryTriage(), fixTrace, {{}});
+    const btn1 = retryBtn(fixCard);
+    if (!btn1) throw new Error("expected Try again button for fix with item key");
+    (btn1.listeners.click || []).forEach((fn) => fn());
+    if (JSON.stringify(fixCalls[0]) !== JSON.stringify(["repo:npm:lodash@orchard-api"])) {{
+      throw new Error("fix retry sent wrong keys: " + JSON.stringify(fixCalls[0]));
+    }}
+
+    // 2. Batch fix passes all item keys from result.keys (never batch:proj)
+    const batchTrace = {{
+      run: {{ trace_id: "fix00002", kind: "fix", subject: "orchard-api", status: "failed", started: 1700000000 }},
+      spans: [], failures: [], jobs: [],
+      fixes: [{{ id: 2, trace_id: "fix00002", item_key: "batch:orchard-api", result: {{ keys: ["repo:npm:a@orchard-api", "repo:npm:b@orchard-api"] }} }}],
+    }};
+    const btn2 = retryBtn(H.verdictCard(retryTriage(), batchTrace, {{}}));
+    if (!btn2) throw new Error("expected Try again button for batch fix");
+    (btn2.listeners.click || []).forEach((fn) => fn());
+    if (JSON.stringify(fixCalls[1]) !== JSON.stringify(["repo:npm:a@orchard-api", "repo:npm:b@orchard-api"])) {{
+      throw new Error("batch fix retry sent wrong keys: " + JSON.stringify(fixCalls[1]));
+    }}
+
+    // 3. Fix without item keys shows no Try again button and does not call /api/refresh
+    const noKeysFix = {{
+      run: {{ trace_id: "fix00003", kind: "fix", subject: "orchard-api", status: "failed", started: 1700000000 }},
+      spans: [], failures: [], jobs: [], fixes: [],
+    }};
+    if (retryBtn(H.verdictCard(retryTriage(), noKeysFix, {{}}))) {{
+      throw new Error("fix without item keys must not show Try again button");
+    }}
+
+    // 4. Non-retryable kinds show no Try again button and never fall through to /api/refresh
+    for (const kind of ["action", "relaunch", "pin"]) {{
+      const tr = {{
+        run: {{ trace_id: "other001", kind, subject: "something", status: "failed", started: 1700000000 }},
+        spans: [], failures: [], jobs: [], fixes: [],
+      }};
+      if (retryBtn(H.verdictCard(retryTriage(), tr, {{}}))) {{
+        throw new Error(`kind ${{kind}} must not show Try again button`);
+      }}
+    }}
+    if (apiCalls.length !== 0) throw new Error("unexpected api calls: " + JSON.stringify(apiCalls));
+
+    // 5. Refresh kind DOES show Try again and posts to /api/refresh
+    const refTrace = {{
+      run: {{ trace_id: "ref00001", kind: "refresh", subject: "everything", status: "failed", started: 1700000000 }},
+      spans: [], failures: [], jobs: [], fixes: [],
+    }};
+    const btnRef = retryBtn(H.verdictCard(retryTriage(), refTrace, {{}}));
+    if (!btnRef) throw new Error("refresh should show Try again button");
+    (btnRef.listeners.click || []).forEach((fn) => fn());
+    if (apiCalls.length !== 1 || apiCalls[0].path !== "/api/refresh") {{
+      throw new Error("refresh retry did not POST /api/refresh: " + JSON.stringify(apiCalls));
+    }}
+
+    console.log("OK");
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
