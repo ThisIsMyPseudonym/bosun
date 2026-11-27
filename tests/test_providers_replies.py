@@ -100,3 +100,17 @@ def test_grok_json_gives_its_answer_marked_estimated():
     err = json.dumps({"is_error": True, "error": "429 Too Many Requests"})
     assert replies.parse("grok", proc.Result(("grok",), 1, err, ""), at=100.0).outcome == "rate_limit"
     assert replies.parse("grok", proc.Result(("grok",), 0, "", ""), at=100.0).outcome == "empty"
+
+
+def test_antigravity_refuses_a_reply_that_used_a_tool():
+    tool_raw = (FIX / "antigravity/handmade/tool-use.jsonl").read_text()
+    bad = replies.parse("antigravity", proc.Result(("agy",), 0, tool_raw, ""), at=100.0)
+    assert bad.outcome == "error" and "used a tool" in bad.error and bad.payload is None
+    nested_tool = json.dumps({"event": "assistant", "message": {"role": "assistant",
+                              "content": [{"type": "tool_use", "name": "bash"}]}})
+    bad2 = replies.parse("antigravity", proc.Result(("agy",), 0, nested_tool, ""), at=100.0)
+    assert bad2.outcome == "error" and "used a tool" in bad2.error
+    ok_raw = (FIX / "antigravity/handmade/ok-assessment.jsonl").read_text()
+    ok = replies.parse("antigravity", proc.Result(("agy",), 0, ok_raw, ""), at=100.0)
+    assert ok.outcome == "ok" and ok.estimated and ok.readings == () and '"headline":"h"' in ok.text
+    assert (ok.usage.input_tokens, ok.usage.output_tokens) == (80, 30) and ok.model == "gemini-3.8-flash"

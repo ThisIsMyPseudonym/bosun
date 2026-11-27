@@ -45,26 +45,6 @@ class Reply:
     turns: int | None = None
 
 
-def _nonneg_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return 0
-    try:
-        f = float(value)
-    except OverflowError:
-        return 0
-    return int(f) if math.isfinite(f) and f >= 0 else 0
-
-
-def _nonneg_float(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return 0.0
-    try:
-        f = float(value)
-    except OverflowError:
-        return 0.0
-    return f if math.isfinite(f) and f >= 0 else 0.0
-
-
 def _opt_float(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
@@ -75,10 +55,17 @@ def _opt_float(value: object) -> float | None:
     return f if math.isfinite(f) else None
 
 
+def _nonneg_float(value: object) -> float:
+    f = _opt_float(value)
+    return f if f is not None and f >= 0 else 0.0
+
+
+def _nonneg_int(value: object) -> int:
+    return int(_nonneg_float(value))
+
+
 def _opt_int(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value
+    return None if isinstance(value, bool) or not isinstance(value, int) else value
 
 
 def _loads_dict(raw: str, limit: int = MAX_DOC_CHARS) -> dict[str, Any] | None:
@@ -360,11 +347,77 @@ def _grok(result: proc.Result, at: float) -> Reply:
     return _ok_or_limit(text, structured, at, estimated=True, usage=usage, model=model, sid=sid)
 
 
+_TOOL_KINDS = frozenset({"tool_use", "tool_call", "tool_result", "function_call", "function_response", "tool"})
+
+
+def _has_tool_step(ev: dict[str, Any]) -> bool:
+    for key in ("event", "type"):
+        val = ev.get(key)
+        if isinstance(val, str) and (val.lower() in _TOOL_KINDS or "tool" in val.lower()):
+            return True
+    if isinstance(item := ev.get("item"), dict) and str(item.get("type") or "").lower() in _TOOL_KINDS:
+        return True
+    msg = ev.get("message")
+    if isinstance(msg, dict):
+        if msg.get("tool_calls"):
+            return True
+        content = msg.get("content")
+        if isinstance(content, list):
+            return any(isinstance(b, dict) and str(b.get("type") or "").lower() in _TOOL_KINDS for b in content)
+    return False
+
+
+def _content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]
+        return "".join(parts)
+    return ""
+
+
+def _antigravity(result: proc.Result, at: float) -> Reply:
+    if (pf := _proc_failure(result, estimated=True)) is not None:
+        return pf
+    stdout, stderr = result.stdout or "", result.stderr or ""
+    if result.ok and not stdout.strip():
+        return _fail("empty", "empty reply", estimated=True)
+    text, structured, err_msg, model, sid, usage = "", None, "", "", "", llm.Usage()
+    for ev in _iter_jsonl(stdout):
+        if _has_tool_step(ev):
+            return _fail("error", "Antigravity used a tool", estimated=True, usage=usage, model=model, session_id=sid)
+        kind = str(ev.get("event") or ev.get("type") or "")
+        if isinstance(ev.get("model"), str) and ev["model"]:
+            model = ev["model"]
+        if isinstance(ev.get("session_id"), str) and ev["session_id"]:
+            sid = ev["session_id"]
+        if isinstance(ev.get("usage"), dict):
+            usage = _usage_dict(ev["usage"])
+        if kind == "error" or ev.get("is_error") or ev.get("error"):
+            err = ev.get("error")
+            err_msg = (str(err.get("message") or "") if isinstance(err, dict) else str(err or "")) or str(ev.get("message") or "")
+        elif kind == "assistant" and isinstance(msg := ev.get("message"), dict):
+            if got := _content_text(msg.get("content")):
+                text = got
+        elif kind == "result":
+            if ev.get("structured_output") is not None:
+                structured = ev["structured_output"]
+            if isinstance(ev.get("result"), str):
+                text = ev["result"]
+    if err_msg or not result.ok:
+        return _classify_error_text(err_msg or stderr or stdout, result.returncode, at,
+                                    estimated=True, usage=usage, model=model, session_id=sid)
+    if not text and structured is not None:
+        text = json.dumps(structured)
+    return _ok_or_limit(text, structured, at, estimated=True, usage=usage, model=model, sid=sid)
+
+
 PARSERS: dict[str, Callable[[proc.Result, float], Reply]] = {
     "claude": _claude,
     "codex": _codex,
     "gemini": _gemini,
     "grok": _grok,
+    "antigravity": _antigravity,
 }
 
 
