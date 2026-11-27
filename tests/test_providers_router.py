@@ -266,3 +266,41 @@ def test_balance_breaks_ties_by_owners_order_and_uses_0_5_when_all_unknown():
     }
     assert router.plan("summarize", ctx(readings=bg_readings, settings=per_job)).candidates[0].bucket == "codex"
     assert router.plan("explain", ctx(readings=bg_readings, settings=per_job)).candidates[0].bucket == "claude"
+
+
+# --- Task 3.7: pinned jobs ---------------------------------------------------------------------------------------
+
+
+def test_a_pinned_job_runs_only_there_and_says_why_when_it_cannot():
+    # fix is pinned to claude by default: claude@work is also capable, but never added as failover
+    ok = router.plan("fix", ctx(), clicked=True)
+    assert [c.bucket for c in ok.candidates] == ["claude"] and ok.skipped == () and ok.mode == "pinned"
+    assert ok.fell_back_from is None
+
+    # Claude at its limit: no failover to claude@work, skip names the reset
+    at_limit = {"claude": (R("five_hour", "rejected", 1.0, NOW + 3600, NOW),)}
+    limited = router.plan("fix", ctx(readings=at_limit), clicked=True)
+    assert limited.candidates == () and len(limited.skipped) == 1
+    assert limited.skipped[0].bucket == "claude" and limited.skipped[0].reason == "limit"
+    assert "resets" in limited.skipped[0].detail
+
+    # Pin to an excluded login -> no candidates, reason excluded
+    rs_excl = dataclasses.replace(router.RoutingSettings.default(), pins={"summarize": "claude@work"})
+    excl_logins = (_login("claude"), _login("claude", "work", excluded=True), _login("codex"))
+    excl = router.plan("summarize", ctx(logins=excl_logins, settings=rs_excl))
+    assert excl.candidates == () and len(excl.skipped) == 1
+    assert excl.skipped[0].bucket == "claude@work" and excl.skipped[0].reason == "excluded"
+
+    # Pin via job_modes ("pinned:<bucket>") also applies filters (75% line on background job)
+    rs_jm = dataclasses.replace(router.RoutingSettings.default(), job_modes={"summarize": "pinned:codex"})
+    codex_line = {"codex": (R("five_hour", "allowed", 0.80, NOW + 600, NOW),)}
+    jm_ok = router.plan("summarize", ctx(settings=rs_jm))
+    assert [c.bucket for c in jm_ok.candidates] == ["codex"] and jm_ok.mode == "pinned"
+    jm_line = router.plan("summarize", ctx(readings=codex_line, settings=rs_jm))
+    assert jm_line.candidates == () and jm_line.skipped[0].reason == "line"
+
+    # Pin to an uninstalled or incapable login
+    rs_incap = dataclasses.replace(router.RoutingSettings.default(), pins={"fix": "codex"})
+    assert router.plan("fix", ctx(settings=rs_incap), clicked=True).skipped[0].reason == "capability"
+    rs_missing = dataclasses.replace(router.RoutingSettings.default(), pins={"summarize": "codex"})
+    assert router.plan("summarize", ctx(logins=(_login("claude"),), settings=rs_missing)).skipped[0].reason == "not_installed"

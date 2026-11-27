@@ -307,6 +307,13 @@ def _balance_order(candidates: list[Candidate]) -> list[Candidate]:
     return sorted(candidates, key=lambda c: fallback if c.pace is None else c.pace)
 
 
+def _pinned_bucket(job: str, rs: RoutingSettings) -> str | None:
+    if job in rs.pins:
+        return rs.pins[job]
+    jm = rs.job_modes.get(job, "")
+    return jm.removeprefix("pinned:") if jm.startswith("pinned:") else None
+
+
 def _job_mode(job: str, rs: RoutingSettings) -> str:
     override = rs.job_modes.get(job)
     return override if override in MODES else rs.mode
@@ -316,6 +323,10 @@ def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
     """Filter and order candidates for `job` from pure `ctx` (no store, no clock)."""
     capable = frozenset(catalog.capable(job))
     job_spec = catalog.JOBS[job]
+    if (pinned := _pinned_bucket(job, ctx.settings)) is not None:
+        by_bucket = {lg.bucket: lg for lg in ctx.logins if lg.provider in catalog.CATALOG}
+        candidates, skipped = _evaluate(job_spec, capable, [(pinned, by_bucket.get(pinned))], ctx, clicked=clicked)
+        return Route(job, tuple(candidates), tuple(skipped), "pinned")
     entries = _ordered_entries(ctx)
     candidates, skipped = _evaluate(job_spec, capable, entries, ctx, clicked=clicked)
     mode = _job_mode(job, ctx.settings)
