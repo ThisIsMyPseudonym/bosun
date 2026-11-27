@@ -250,8 +250,11 @@ function breakdown(title, rows, total, name) {
 async function saveTriageSettings(body) {
   try {
     await api("/api/triage/settings", { method: "POST", body: JSON.stringify(body) });
-    fetchUsage(true);
-  } catch (err) { alert(`Could not save triage settings: ${err.message}`); }
+  } catch (err) {
+    alert(`Could not save triage settings: ${err.message}`);
+  } finally {
+    await fetchUsage(true);
+  }
 }
 
 function triagePanel(triage, isDemo) {

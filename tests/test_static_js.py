@@ -853,3 +853,99 @@ def test_today_shows_verdict_cause_step_button_and_rescan_fallback_without_inner
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
 
+
+def test_usage_triage_switch_refetches_and_restores_server_state_on_failed_save():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    usage_js = str(STATIC / "usage.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "value") this.value = String(v);
+          if (k === "checked") this.checked = true;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    const alerts = [];
+    globalThis.alert = (msg) => alerts.push(msg);
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    let usageFetches = 0;
+    const serverUsage = () => ({{
+      days: 30, demo: false, logins: [], top_jobs: [], routing: {{ mode: "default", order: [], pins: {{}}, jobs: [] }},
+      notices: [], budgets_retired: null,
+      triage: {{ auto: true, daily_limit: 10, daily_used: 1, daily_remaining: 9 }},
+      detail: {{ days: 30, totals: {{}}, cache: {{}}, by_day: [], by_purpose: [], by_model: [], by_source: [], top_items: [], outliers: [], top_calls: [] }},
+    }});
+    MC.api = async (path) => {{
+      if (path.startsWith("/api/usage")) {{ usageFetches += 1; return serverUsage(); }}
+      if (path === "/api/triage/settings") throw new Error("server rejected");
+      return {{}};
+    }};
+    let renders = 0;
+    let lastTree = null;
+    const S = {{ agents: {{ system: false, external: false }} }};
+    MC.route = {{ parse: () => ({{ page: "usage" }}) }};
+    MC.nameOf = (_S, k) => k;
+    MC.runHref = (id) => "#/runs/" + id;
+    MC.ago = () => "1m ago";
+    MC.render = () => {{ renders += 1; lastTree = MC.views.usage(S); }};
+    eval(fs.readFileSync({json.dumps(usage_js)}, "utf8"));
+
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    (async () => {{
+      MC.views.usage(S);
+      await new Promise((r) => setTimeout(r, 10));
+      if (usageFetches !== 1 || !lastTree) throw new Error("initial usage fetch did not render");
+      const findBox = (tree) => allNodes(tree).find((n) => n.tagName === "INPUT" && n.attrs["aria-label"] === "Triage failures automatically");
+      const box = findBox(lastTree);
+      if (!box || !box.checked) throw new Error("initial switch must be checked");
+
+      // User unchecks the box, but POST /api/triage/settings fails
+      box.checked = false;
+      const rendersBefore = renders;
+      for (const fn of box.listeners.change || []) await fn();
+      await new Promise((r) => setTimeout(r, 10));
+
+      if (alerts.length !== 1 || !alerts[0].includes("server rejected")) {{
+        throw new Error("expected alert on failed save, got: " + JSON.stringify(alerts));
+      }}
+      if (usageFetches !== 2) {{
+        throw new Error("expected fetchUsage(true) after failed save, got usageFetches=" + usageFetches);
+      }}
+      if (renders <= rendersBefore) {{
+        throw new Error("expected re-render after failed save");
+      }}
+      const refreshedBox = findBox(lastTree);
+      if (!refreshedBox || !refreshedBox.checked) {{
+        throw new Error("switch did not revert to server value (auto=true) after failed save");
+      }}
+      console.log("OK");
+    }})().catch((err) => {{ console.error(err); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
