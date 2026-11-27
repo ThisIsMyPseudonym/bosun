@@ -63,25 +63,33 @@ def availability(
     found = accounts.logins(store) if logins is None else logins
     allowed = _locked_down_providers()
     reasons: list[str] = []
+    missing: list[tuple[str, str]] = []
     any_installed = False
+    any_ok = False
     for lg in found:
-        if lg.provider not in allowed:
+        if lg.provider not in allowed or not lg.binary:
             continue
         spec = catalog.CATALOG[lg.provider]
-        if not lg.binary:
-            continue
         any_installed = True
         if lg.excluded:
             reasons.append(f"{spec.label} ({lg.label}) is excluded")
             continue
-        status = (
-            contract.cached(store, lg.provider, lg.binary, now=now, stale_ok=True)
-            if cached_only
-            else contract.check(store, lg.provider, lg.binary, now=now)
-        )
+        if cached_only:
+            status = contract.cached(store, lg.provider, lg.binary, now=now, stale_ok=True)
+            if status is None or contract.due(lg.binary, now=now):
+                missing.append((lg.provider, lg.binary))
+        else:
+            status = contract.check(store, lg.provider, lg.binary, now=now)
         if status is None or status.ok:
-            return True, ""
-        reasons.append(status.finding or f"{spec.label}: contract check failed")
+            any_ok = True
+            if not cached_only:
+                return True, ""
+        else:
+            reasons.append(status.finding or f"{spec.label}: contract check failed")
+    if cached_only and missing:
+        contract.refresh_async(store, missing, now=now)
+    if any_ok:
+        return True, ""
     if not any_installed:
         return False, "No locked-down AI CLI (Claude, Codex, or Gemini) is installed"
     return False, "; ".join(dict.fromkeys(reasons)) or "No locked-down AI CLI passed its contract check"
@@ -201,14 +209,8 @@ def _validate_verdict(payload: Any) -> tuple[Verdict | None, str]:
 
 
 def _invoke_candidate(
-    cand: router.Candidate,
-    chosen_model: str,
-    settings: Settings,
-    bundle: Mapping[str, Any],
-    offered: Sequence[Mapping[str, Any]],
-    tokens: auth.TriageTokens,
-    triage_trace: str,
-    timeout: float,
+    cand: router.Candidate, chosen_model: str, settings: Settings, bundle: Mapping[str, Any],
+    offered: Sequence[Mapping[str, Any]], tokens: auth.TriageTokens, triage_trace: str, timeout: float,
 ) -> tuple[proc.Result, float, int]:
     schema_dict = Verdict.model_json_schema()
     schema_dict["additionalProperties"] = False
@@ -242,19 +244,9 @@ def _invoke_candidate(
 
 
 def _run_one(
-    store: Store,
-    settings: Settings,
-    rec: FailureRecord,
-    cand: router.Candidate,
-    *,
-    tier: Literal["light", "strong"],
-    bundle: Mapping[str, Any],
-    offered: Sequence[Mapping[str, Any]],
-    tokens: auth.TriageTokens,
-    triage_trace: str,
-    deadline: float,
-    cd: limits.Cooldowns,
-    now: Callable[[], float],
+    store: Store, settings: Settings, rec: FailureRecord, cand: router.Candidate, *, tier: Literal["light", "strong"],
+    bundle: Mapping[str, Any], offered: Sequence[Mapping[str, Any]], tokens: auth.TriageTokens, triage_trace: str,
+    deadline: float, cd: limits.Cooldowns, now: Callable[[], float],
 ) -> router.Outcome:
     remaining = deadline - time.monotonic()
     if remaining <= 0.5:

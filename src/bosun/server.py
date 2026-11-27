@@ -974,7 +974,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if s.demo:
             return False, "Model triage is off in demo mode"
         try:
-            return tmodel.availability(store)
+            return tmodel.availability(store, cached_only=True)
         except Exception:  # noqa: BLE001 - never break the run page
             log.exception("triage availability check failed")
             return False, "Model triage availability could not be checked"

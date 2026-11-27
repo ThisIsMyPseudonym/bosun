@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+import pytest
 
 from conftest import SESSION_KEY, signed_in
 
@@ -523,5 +524,45 @@ def test_unexpected_exception_and_failed_look_deeper_restore_verdict_and_return_
         assert res_none.status_code == 502
         row2 = tstore.get_by_trace(st, r2.trace_id)
         assert row2 is not None and row2["status"] == "failed" and row2["last_error"]
+    finally:
+        trace.configure(None)
+
+
+@pytest.mark.real_contract
+def test_get_trace_and_get_triage_never_run_cli_subprocess_synchronously(tmp_path, monkeypatch):
+    from bosun import proc
+    from bosun.providers import accounts, contract
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        with trace.run("upgrade", subject="brew:jq") as r:
+            r.fail("mystery exit 1")
+
+        monkeypatch.setattr(contract, "_versions", {})
+        monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/bin/claude", "codex": "/bin/codex"})
+
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+
+        proc_calls: list[tuple] = []
+
+        def forbid_proc(*a, **_kw):
+            proc_calls.append(a)
+            raise AssertionError(f"page load must never call proc.run synchronously: {a}")
+
+        scheduled: list[list[tuple[str, str]]] = []
+        monkeypatch.setattr(proc, "run", forbid_proc)
+        monkeypatch.setattr(contract, "refresh_async", lambda _s, targets, **_kw: scheduled.append(list(targets)))
+
+        # Cold cache: GET /api/runs/{id} and GET /api/runs/{id}/triage must never run proc.run; they queue refresh_async
+        resp = user.get(f"/api/runs/{r.trace_id}")
+        assert resp.status_code == 200 and resp.json()["triage_available"] is True
+        assert proc_calls == []
+        assert scheduled and ("claude", "/bin/claude") in scheduled[0]
+
+        resp2 = user.get(f"/api/runs/{r.trace_id}/triage")
+        assert resp2.status_code == 200 and resp2.json()["triage_available"] is True
+        assert proc_calls == []
     finally:
         trace.configure(None)
