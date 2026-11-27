@@ -219,3 +219,16 @@ def test_v9_adds_quota_windows_and_an_older_database_keeps_its_rows(tmp_path):
     assert db.execute("SELECT value FROM settings WHERE key='kept'").fetchone() == ("yes",)
     keys = [r[5] for r in db.execute("PRAGMA table_info(quota_windows)") if r[5]]
     assert keys == [1, 2]  # one row per login and window
+
+
+def test_v9_migration_is_idempotent_on_rerun(tmp_path):
+    path = tmp_path / "bosun.db"
+    Store(path)
+    db = sqlite3.connect(path)
+    db.execute("INSERT INTO quota_windows VALUES ('claude', 'claude', 'default', 'five_hour', 'allowed', 0.4, NULL, 100.0, 'output')")
+    db.execute("DELETE FROM schema_migrations WHERE version = 9")
+    db.commit()
+    assert migrate(db, path) == [9]
+    assert migrations.current_version(db) == 9
+    row = db.execute("SELECT bucket, window, used FROM quota_windows").fetchone()
+    assert row == ("claude", "five_hour", 0.4)

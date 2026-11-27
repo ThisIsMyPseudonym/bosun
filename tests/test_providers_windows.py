@@ -204,3 +204,39 @@ def test_far_future_reset_beyond_window_horizon_is_dropped():
     agy_far = json.dumps([{"model": "Flash", "quotaInfo": {"remainingFraction": 0.5,
                                                            "resetTime": "2099-01-01T00:00:00Z"}}])
     assert windows.parse_antigravity(agy_far, at=at)[0].resets_at is None
+
+
+def test_parsers_handle_fuzz_inputs_without_raising():
+    import math
+
+    huge_int = "9" * 400
+    at = 1_800_000_000.0
+    claude_fuzz = "\n".join([
+        '{"a":' * 5000 + '"rate_limit_event"' + '}' * 5000,
+        f'{{"type":"rate_limit_event","rate_limit_info":{{"status":"allowed","rateLimitType":"five_hour",'
+        f'"utilization":{huge_int},"resetsAt":{huge_int}}}}}',
+        '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day",'
+        '"utilization":NaN,"resetsAt":Infinity,"unifiedWindows":{"seven_day":{"utilization":"NaN","resetsAt":"-inf"}}}}',
+        '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour",'
+        '"utilization":"Infinity","resetsAt":"NaN"}}',
+    ])
+    codex_fuzz = "\n".join([
+        '{"rate_limits":' * 5000 + '{}' + '}' * 5000,
+        f'{{"rate_limits":{{"primary":{{"used_percent":{huge_int},"window_minutes":{huge_int},'
+        f'"resets_in_seconds":{huge_int},"resets_at":{huge_int}}}}}}}',
+        '{"rate_limits":{"primary":{"used_percent":NaN,"resets_at":Infinity,"resets_in_seconds":-Infinity},'
+        '"secondary":{"used_percent":"NaN","resets_at":"inf"}}}',
+    ])
+    agy_fuzz = [
+        '{"a":' * 5000 + '{}' + '}' * 5000,
+        f'[{{"model":"Flash","remainingFraction":{huge_int},"resetTime":{huge_int}}}]',
+        '[{"model":"Flash","remainingFraction":NaN,"resetTime":Infinity},'
+        '{"model":"Pro","remainingFraction":"NaN","resetTime":"-inf"},'
+        '{"model":"Lite","remainingPercentage":"Infinity"}]',
+        "Flash\tNaN\tinf\nPro\t-inf\tNaN\nLite\t1e500\t2099-01-01T00:00:00Z\n",
+    ]
+    for got in (windows.parse_claude(claude_fuzz, at=at), windows.parse_codex(codex_fuzz, at=at),
+                *(windows.parse_antigravity(s, at=at) for s in agy_fuzz)):
+        for r in got:
+            assert r.used is None or math.isfinite(r.used)
+            assert r.resets_at is None or math.isfinite(r.resets_at)

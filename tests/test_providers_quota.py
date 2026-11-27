@@ -103,6 +103,13 @@ def test_the_line_names_the_most_used_window_at_or_past_it():
     assert quota.line_hit((refused,), NOW, 1.0) == quota.Hit("five_hour", 1.0, NOW + 60)  # a refusal is always out
 
 
+def test_the_line_triggers_exactly_at_75_percent():
+    at_line = R("five_hour", "allowed", 0.75, NOW + 60, NOW)
+    just_under = R("five_hour", "allowed", 0.7499, NOW + 60, NOW)
+    assert quota.line_hit((at_line,), NOW, quota.LINE) == quota.Hit("five_hour", 0.75, NOW + 60)
+    assert quota.line_hit((just_under,), NOW, quota.LINE) is None
+
+
 def test_the_override_lifts_the_line_for_one_login_until_its_reset():
     o = quota.Override(bucket="claude", until=NOW + 60)
     assert quota.stop_at("claude", (o,), NOW) == 1.0

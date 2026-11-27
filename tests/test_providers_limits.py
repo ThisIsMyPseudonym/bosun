@@ -118,6 +118,8 @@ def test_unbounded_or_overflowing_resets_fall_back_to_one_hour():
     assert limits.limit_reading("Usage limit reached; reset_at=1999999999", NOW, tz=UTC) == _limit(NOW + HOUR)
     assert limits.limit_reading("Usage limit reached. Resets in 31 days", NOW, tz=UTC) == _limit(NOW + 31 * 86400)
     assert limits.limit_reading("Usage limit reached. Resets in 32 days", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Usage limit reached. Resets in NaN h, resets inf, -inf", NOW, tz=UTC) == _limit(
+        NOW + HOUR)
 
 
 def test_latest_bounded_reset_candidate_wins():

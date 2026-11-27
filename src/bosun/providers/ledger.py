@@ -50,7 +50,10 @@ def valid_window(name: object) -> bool:
 def _time(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    f = float(value)
+    try:
+        f = float(value)
+    except OverflowError:
+        return None
     return f if math.isfinite(f) else None
 
 
