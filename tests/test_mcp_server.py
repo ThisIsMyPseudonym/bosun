@@ -321,7 +321,8 @@ def test_post_timeout_is_not_retried_while_get_timeout_is():
 
 # --- resources -------------------------------------------------------------------------------------------------
 RUNBOOKS = {"homebrew-permissions", "cask-needs-password", "winget-installer-failed", "apt-lock", "claude-not-logged-in",
-            "osv-scanner-download", "update-not-signed", "not-signed-in"}
+            "osv-scanner-download", "update-not-signed", "not-signed-in",
+            "claude-setup", "codex-setup", "gemini-setup", "grok-setup", "antigravity-setup", "muse-setup"}
 
 
 def test_resources_are_the_data_model_and_the_runbooks(dash):

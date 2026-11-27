@@ -59,19 +59,14 @@ rotate), **fix** drop-ins on a branch and run the tests, **plan** migrations bef
 or **assess** what has no fix yet. When the agent is done, **Recheck** on the project page
 re-scans just that project in seconds and says what got fixed.
 
-## Claude Code integration (no API key)
+## AI providers and subscriptions (no API key)
 
-- **Summaries:** `claude -p` reads release notes and returns schema-validated JSON:
-  security fixes, notable changes, breaking changes, migration effort and value. It runs
-  with no tools, no MCP servers, no settings or hooks, and an empty working directory.
-  Each upgrade is summarized once, then cached. Routine summaries use a small model
-  (`BOSUN_MODEL_SUMMARIZE`, default `haiku`). The larger one (`BOSUN_MODEL`, default `sonnet`, also used for
-  "Will this break?" and Branch + test) reads the upgrades where a wrong answer costs more: ones that fix a
-  serious or exploited vulnerability, major version jumps, and any the small model says need migration work.
-  An update with no release notes and no known vulnerabilities isn't sent to Claude at all.
-- **Branch + test** ("Let Claude Code try it"): for one dependency, or for a project's whole Do-now or Batch lane
-  (one run, one branch, one commit). Bosun creates a git worktree on a new `bosun/fix-*` branch.
-  Claude Code then makes the minimal change and runs the project's tests inside a sandbox:
+Bosun can use any supported AI CLI you have installed and signed in to: **Claude Code**, **Codex**, **Gemini CLI**, **Grok**, **Antigravity**, and **Muse**. Bosun never asks for an API key and unsets API-key environment variables on every call so a subscription never silently bills a key. Each CLI is offered only the jobs its verified lockdown flags allow; see the setup runbooks in [`runbooks/`](runbooks/) (`claude-setup.md`, `codex-setup.md`, `gemini-setup.md`, `grok-setup.md`, `antigravity-setup.md`, `muse-setup.md`).
+
+- **Summaries and "Will this break?":** every capable, locked-down CLI runs with no tools, no MCP servers, no user settings, and a fresh empty working directory. Bosun validates every reply against a Pydantic schema and fails over to the next candidate on a limit, empty reply, or bad schema. Each upgrade is summarized once, then cached. Routine summaries use each CLI's light model (`BOSUN_MODEL_<PROVIDER>_LIGHT`, or `BOSUN_MODEL_SUMMARIZE` for Claude, default `haiku`). Upgrades where a wrong answer costs more (serious or exploited vulnerabilities, major jumps, or migration confirmations) use the strong model (`BOSUN_MODEL_<PROVIDER>_STRONG`, or `BOSUN_MODEL` for Claude, default `sonnet`). An update with no release notes and no known vulnerabilities makes no AI call.
+- **Multiple logins:** CLIs with a config-folder variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`, `GROK_HOME`) can hold extra login folders. Each login is its own quota bucket, and you can exclude any login (for example, a work account).
+- **Routing:** set **Default order** (your preferred logins in order, failing over when a login hits its limit or the 75% line) or **Balance by pace** (picks the eligible login furthest behind its window pace). Any job can be pinned to one login.
+- **Branch + test** ("Let Claude Code try it"): pinned to Claude Code by default. For one dependency, or for a project's whole Do-now or Batch lane (one run, one branch, one commit), Bosun creates a git worktree on a new `bosun/fix-*` branch. Claude Code makes the minimal change and runs the project's tests inside a sandbox:
   - `--restricted`: file tools are confined to the worktree, and writes to git and tool
     configuration are refused.
   - `--tools` / `--allowedTools`: Bash is limited to the ecosystem's package-manager and
@@ -85,7 +80,7 @@ re-scans just that project in seconds and says what got fixed.
     tests or builds run.
   - `--permission-mode dontAsk` with `--permission-prompts none`: anything else is denied,
     never asked.
-  - `--max-budget-usd`: caps the cost of each run.
+  - `--max-budget-usd`: a fixed per-run runaway guard ($3) for Claude Code.
 
   Bosun makes the commit. Nothing leaves the machine until you click
   **Push & create PR**. **Discard** removes the branch and the worktree.
@@ -123,7 +118,7 @@ running, the server starts it the way the app icon does.
    state and install. It may **not** quit and reopen apps, open system updaters, push a branch or open a pull
    request unless you turn that on: **AI usage → Agents** has two switches, "Let agents quit and reopen apps
    and open system updaters" and "Let agents push branches and open pull requests", both off at first. An
-   agent can never change those switches, the Claude budgets or Autopilot, and never gets a password window:
+   agent can never change those switches, AI logins, routing, quota overrides, or Autopilot, and never gets a password window:
    an update that needs your password waits for you.
 
 The MCP server does nothing itself. Every call goes to the dashboard, so upgrades still run one at a time
@@ -160,7 +155,7 @@ your reason if you type one. A card nobody answers counts as declined after five
 allow": the next action gets its own card. **Stop** ends an answer and declines whatever was waiting.
 
 **What it will never do,** approved or not: acknowledge, snooze or ignore an item or a project, turn Autopilot or notifications on
-or off, change the Claude budgets, or change what agents may do. Those are yours; it tells you where in the
+or off, change AI logins, routing, or quota overrides, or change what agents may do. Those are yours; it tells you where in the
 dashboard they are. It cannot ask itself questions, answer its own cards, or read your other conversations.
 An upgrade that needs your password is not started for it: it looks up what Bosun's terminal can run for that
 item and the panel shows it as a button under the answer, for you to press (see [Run it here](sources.md#run-it-here)). When something
@@ -173,35 +168,22 @@ from your signed-in browser. Text inside release notes, package names or command
 action it runs is on the Runs page and in the audit trail (`v_actions`) as `assistant`, with `approved_by`
 saying it was you.
 
-**Budget.** Each answer is counted on the AI usage page as "Ask Bosun". It has its own cap, $5 per 24 hours
-at list price by default, editable there with the other budgets (`BOSUN_ASSISTANT_BUDGET_USD` overrides it; 0
-means no cap). When it is used up the panel says so and does not call Claude. `BOSUN_MODEL_ASSISTANT` picks
-the model (default: the same as `BOSUN_MODEL`, `sonnet`).
+**Quota.** Each answer is counted on the AI usage page under **Ask Bosun**. Because you clicked it, the 75% background line does not stop Ask Bosun: it runs until the provider itself reports a limit. `BOSUN_MODEL_ASSISTANT` picks the model (default: the same as `BOSUN_MODEL`, `sonnet`).
 
 **Your conversations** are kept in Bosun's database on this computer, so you can go back to one, also after
 a restart: **Earlier** lists them. **Delete** removes a conversation and all its messages; what its actions
 did stays on the Runs page. Nothing is written to Claude Code's own session history. `bosun query` and agents
 can see that a conversation happened and which tools ran, but not what was said or what the tools returned.
 
-## What Claude costs
+## Quota windows and pace
 
-Every Claude call Bosun makes is counted: what it was for (release-note summaries, "Will this break?",
-Branch + test fixes, Ask Bosun), which item, which model, its tokens (plain input, prompt-cache reads and writes,
-output) and its cost at list price, as Claude Code reports it. On a Claude subscription nothing is billed
-per call; the figure measures how much of your plan Bosun takes. Calls Bosun's own cache made unnecessary
-are counted too, so you can see what it saves.
+Bosun measures AI use by each plan's own usage windows (5-hour, weekly) rather than list-price dollars.
 
-**AI usage** in the sidebar (developer view) shows cost per day, the split by purpose, model and source, the
-costliest items, and outliers (calls over three times their purpose's usual cost). `uv run bosun usage`
-prints the same. Three budgets cap it, all editable there: per refresh for summaries ($2 by default),
-per 24 hours for summaries and explanations ($10), and per 24 hours for Ask Bosun ($5, counted on its own).
-Past a budget, summaries fall back to built-in rules and the refresh says so, and the Ask Bosun panel says it
-is paused. `BOSUN_REFRESH_BUDGET_USD`, `BOSUN_DAILY_BUDGET_USD` and `BOSUN_ASSISTANT_BUDGET_USD` override
-them; 0 means no cap.
-
-An Ask Bosun answer usually costs a few cents: the instructions and tool list are the same every time, so
-Claude reads them from its prompt cache, and each tool result it reads is capped. A long diagnosis that reads
-several runs costs more; each conversation shows its total under **Earlier**.
+- **Windows and pace:** every call parses the CLI's own quota report and saves the latest reading in `quota_windows`. **Pace** is share used divided by share of window time gone (`1.0×` finishes the window right at reset). A stale or missing reading shows as **unknown**, never `0% used`. CLIs that do not report windows yet are counted from calls and tokens and marked **Estimated**.
+- **The 75% line:** background work (release-note summaries) skips any login whose current window is at or past 75% and raises one notice per window. Jobs you click ("Will this break?", Branch + test, Ask Bosun) keep going until the provider refuses.
+- **Owner-only override:** on **AI usage**, click **Let background work go past 75% until it resets** on any paused login to lift the 75% line until that window resets. Agents and Ask Bosun can never set overrides or change routing.
+- **Bosun's share and detail:** each login card shows Bosun's own share (the sum of `window_draw` since that window started) and the top jobs by draw. Tokens, prompt-cache hit rates, and list-price cost stay collapsed under **Detail**. `uv run bosun usage` prints the token breakdown from a terminal.
+- **Retired dollar budgets:** `BOSUN_REFRESH_BUDGET_USD`, `BOSUN_DAILY_BUDGET_USD`, and `BOSUN_ASSISTANT_BUDGET_USD` are retired and ignored. `bosun doctor` notes if any are still set, and the AI usage page shows a one-time notice if you had stored budget caps.
 
 When several releases' notes run long (over 16,000 characters), each release keeps its opening and every
 line about breaking changes or security, so no release in the range is dropped.
