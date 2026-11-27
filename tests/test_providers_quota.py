@@ -83,3 +83,31 @@ def test_login_pace_is_the_worst_current_window_and_none_without_one():
     assert quota.login_pace((_at_pace("seven_day", 0.1), refused), NOW) == math.inf
     unknown = R("quota:flash", "allowed", 0.5, NOW + 60, NOW)  # a share but no length: no pace of its own
     assert quota.login_pace((unknown,), NOW) is None
+
+
+# --- the 75% line ------------------------------------------------------------------------------------------------
+
+
+def test_the_line_names_the_most_used_window_at_or_past_it():
+    rs = (R("five_hour", "allowed", 0.74, NOW + 60, NOW), R("seven_day", "allowed", 0.81, NOW + 9000, NOW))
+    assert quota.line_hit(rs, NOW, 0.75) == quota.Hit("seven_day", 0.81, NOW + 9000)
+    assert quota.line_hit(rs[:1], NOW, 0.75) is None
+    assert quota.line_hit((R("w", "allowed", None, None, NOW),), NOW, 0.75) is None  # unknown: nothing to apply
+    assert quota.line_hit((R("five_hour", "allowed", 0.9, NOW - 1, NOW - 60),), NOW, 0.75) is None  # stale
+    refused = R("five_hour", "rejected", None, NOW + 60, NOW)
+    assert quota.line_hit((refused,), NOW, quota.LINE) == quota.Hit("five_hour", 1.0, NOW + 60)
+    assert quota.line_hit((refused,), NOW, 1.0) == quota.Hit("five_hour", 1.0, NOW + 60)  # a refusal is always out
+
+
+def test_the_override_lifts_the_line_for_one_login_until_its_reset():
+    o = quota.Override(bucket="claude", until=NOW + 60)
+    assert quota.stop_at("claude", (o,), NOW) == 1.0
+    assert quota.stop_at("codex", (o,), NOW) == quota.LINE == 0.75
+    assert quota.stop_at("claude", (o,), NOW + 61) == 0.75  # ended at the reset by itself
+    assert quota.stop_at("claude", (), NOW) == 0.75
+
+
+def test_an_override_ends_at_the_hit_windows_reset_or_in_a_day_when_undated():
+    assert quota.override_until(quota.Hit("seven_day", 0.8, NOW + 9000), NOW) == NOW + 9000
+    assert quota.override_until(quota.Hit("quota:flash", 0.8, None), NOW) == NOW + 86400
+    assert quota.override_until(quota.Hit("five_hour", 0.8, NOW - 5), NOW) == NOW + 86400  # past: a day, not none
