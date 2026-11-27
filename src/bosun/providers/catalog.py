@@ -114,18 +114,21 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
                   "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT"), "~/.gemini", "gemini-3.8-flash",
                  "gemini-3.1-pro", "estimated",
                  ("generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com", "oauth2.googleapis.com")),
+    # Grok's --tools and --disallowed-tools cover built-in tools only: MCP servers in GROK_HOME still load, so it
+    # stays off jobs carrying untrusted text until a per-call MCP switch is verified.
     ProviderSpec("grok", "Grok", "grok", ONE_SHOT, HELP, GROK_FLAGS, "GROK_HOME",
                  ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY"), "~/.grok",
-                 "grok-4.7-build-fast", "grok-4.7", "estimated", ("api.x.ai",)),
+                 "grok-4.7-build-fast", "grok-4.7", "estimated", ("api.x.ai",), locked_down=False),
     # Antigravity holds one login per machine; its Argon model draws far more quota, so both tiers use Flash.
     # Neither `agy help` nor `agy changelog` documents a per-call flag or `--settings` key that disables built-in
     # tools and MCP servers, so `locked_down=False` keeps it off jobs carrying untrusted text.
     ProviderSpec("antigravity", "Antigravity", "agy", ONE_SHOT, HELP, AGY_FLAGS, None, (), None,
                  "gemini-3.8-flash", "gemini-3.8-flash", "probe",
                  ("cloudcode-pa.googleapis.com", "oauth2.googleapis.com"), locked_down=False),
-    # `muse login --help`: META_API_KEY always takes priority over the account login.
+    # `muse login --help`: META_API_KEY always takes priority over the account login. No flag turns the user's MCP
+    # servers off, and its LLM approval judge is on by default, so it stays off jobs carrying untrusted text.
     ProviderSpec("muse", "Muse", "muse", ONE_SHOT, EXEC_HELP, MUSE_FLAGS, None, ("META_API_KEY",), None, "", "",
-                 "estimated", ()),
+                 "estimated", (), locked_down=False),
 )
 
 

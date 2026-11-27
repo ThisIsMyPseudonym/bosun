@@ -44,7 +44,7 @@ def test_a_cli_is_offered_only_the_jobs_its_capabilities_allow():
 
     from bosun.providers.catalog import capable
 
-    assert capable("summarize") == ("claude", "codex", "gemini", "grok", "muse")
+    assert capable("summarize") == ("claude", "codex", "gemini")
     assert capable("fix") == ("claude",)
     assert capable("assistant") == ("claude",)
     assert capable("computer_use") == ("claude",)
@@ -58,10 +58,12 @@ def test_a_cli_that_is_not_locked_down_never_gets_untrusted_text():
     from bosun.providers.catalog import CATALOG, capable, spec
 
     assert {j for j, job in JOBS.items() if job.untrusted} == {"summarize", "explain", "triage"}
-    assert not spec("antigravity").locked_down  # no proven per-call way to turn its tools and MCP off
-    assert all(s.locked_down for p, s in CATALOG.items() if p != "antigravity")
+    # No proven per-call way to turn their tools and MCP servers off: Antigravity has no such flag, Grok's tool
+    # lists cover built-in tools only, and Muse loads the user's MCP servers with an LLM approval judge on.
+    loose_clis = {"antigravity", "grok", "muse"}
+    assert {p for p, s in CATALOG.items() if not s.locked_down} == loose_clis
     for job in ("summarize", "explain", "triage"):
-        assert "antigravity" not in capable(job)
+        assert not loose_clis & set(capable(job))
     every = frozenset(C)
     loose = {"loose": replace(spec("claude"), id="loose", capabilities=every, locked_down=False)}
     assert capable("summarize", loose) == () and capable("triage", loose) == ()
