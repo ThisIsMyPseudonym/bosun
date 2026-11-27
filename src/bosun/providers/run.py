@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from ..store import Store
 
 COOLDOWNS = limits.Cooldowns()
+POOL_OUT = frozenset({"usage_limit", "rate_limit", "not_logged_in"})
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n(.*?)\n\s*```\s*$", re.S | re.I)
 
 
@@ -39,6 +40,13 @@ class Outcome:
     model: str
     attempts: tuple[router.Attempt, ...]
     reason: str  # why nothing answered: names each login and its reset
+    exhausted: bool = False  # True when no eligible login remains in the pool
+
+
+def model_tag(provider: str, model: str) -> str:
+    """Label stored in `generated_by` / explain `model`: keeps `claude-code:<model>` for Claude."""
+    prefix = "claude-code" if provider == "claude" else provider
+    return f"{prefix}:{model}" if model else prefix
 
 
 def _strip_fence(text: str) -> str:
@@ -194,6 +202,9 @@ def run(store: Store, job: str, *, prompt: str, system: str, schema: type[BaseMo
     )
     if done.ok and done.result is not None and done.candidate is not None:
         validated, chosen_model = done.result.value
-        return Outcome(True, validated, done.candidate.login, chosen_model, done.attempts, "")
+        return Outcome(True, validated, done.candidate.login, chosen_model, done.attempts, "", exhausted=False)
+    exhausted = not route.candidates or (
+        len(done.attempts) == len(route.candidates) and all(a.outcome in POOL_OUT for a in done.attempts)
+    )
     return Outcome(False, None, done.candidate.login if done.candidate else None, "", done.attempts,
-                   _reason(done, route, store, cd, now(), labels))
+                   _reason(done, route, store, cd, now(), labels), exhausted=exhausted)

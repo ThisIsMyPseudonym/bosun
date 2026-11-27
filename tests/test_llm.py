@@ -45,7 +45,7 @@ def calls(store):
 def fake_run(out, rc=0, err=""):
     seen = []
 
-    def run(argv, timeout=300, cwd=None, stdin=None, env=None):
+    def run(argv, timeout=300, cwd=None, stdin=None, env=None, unset=()):
         seen.append({"argv": argv, "stdin": stdin})
         return proc.Result(tuple(argv), rc, out if isinstance(out, str) else json.dumps(out), err)
     run.seen = seen
@@ -191,7 +191,7 @@ def _models(run):
 def recording_run(reply_for):
     seen = []
 
-    def run(argv, timeout=300, cwd=None, stdin=None, env=None):
+    def run(argv, timeout=300, cwd=None, stdin=None, env=None, unset=()):
         seen.append({"argv": argv, "stdin": stdin, "env": env})
         return proc.Result(tuple(argv), 0, json.dumps(reply_for(argv[argv.index("--model") + 1])), "")
     run.seen = seen
