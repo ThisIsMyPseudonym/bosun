@@ -29,7 +29,7 @@ from bosun.store import Store
 
 log = logging.getLogger(__name__)
 
-WINDOW = re.compile(r"^quota(:[a-z0-9.-]{1,40})?$")  # Antigravity's per-model windows, beside windows.NAME
+WINDOW = re.compile(r"quota(:[a-z0-9.-]{1,40})?")  # Antigravity's per-model windows, beside windows.NAME
 MAX_FUTURE_AT_S = 5 * 60.0  # reject readings further ahead of `now` than plausible clock skew
 COLUMNS = "bucket, provider, account, window, status, used, resets_at, at, source"
 REPLACE = f"INSERT OR REPLACE INTO quota_windows ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -38,13 +38,13 @@ REPLACE = f"INSERT OR REPLACE INTO quota_windows ({COLUMNS}) VALUES (?, ?, ?, ?,
 def split(bucket: str) -> tuple[str, str]:
     """(provider, account) of a bucket; ValueError for one that names no CLI or no valid login."""
     provider, at, account = bucket.partition("@")
-    if provider not in CATALOG or (at and (account == DEFAULT or not ID.match(account))):
+    if provider not in CATALOG or (at and (account == DEFAULT or not ID.fullmatch(account))):
         raise ValueError(f"not a login bucket: {bucket!r}")
     return provider, account or DEFAULT
 
 
 def valid_window(name: object) -> bool:
-    return isinstance(name, str) and bool(NAME.match(name) or WINDOW.match(name))
+    return isinstance(name, str) and bool(NAME.fullmatch(name) or WINDOW.fullmatch(name))
 
 
 def _time(value: object) -> float | None:

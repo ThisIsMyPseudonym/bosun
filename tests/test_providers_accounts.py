@@ -42,6 +42,11 @@ def test_a_malformed_stored_login_is_dropped(entry):
     assert accounts.clean([entry]) == ()
 
 
+def test_login_id_pattern_refuses_trailing_newline():
+    assert accounts.ID.fullmatch("work") is not None
+    assert accounts.ID.fullmatch("work\n") is None
+
+
 def test_cleaning_keeps_one_id_per_cli_a_renamed_default_and_at_most_eight_added():
     added = [{"provider": "codex", "id": f"acct-{i}", "label": f"A{i}", "home": f"/h/{i}"} for i in range(10)]
     got = accounts.clean([{"provider": "claude", "id": "default", "label": "  Personal  ", "home": "/ignored",

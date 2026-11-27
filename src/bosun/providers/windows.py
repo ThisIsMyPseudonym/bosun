@@ -20,7 +20,7 @@ Source = Literal["output", "probe", "coho", "limit"]
 
 STATUSES: tuple[Status, ...] = ("allowed", "allowed_warning", "rejected")
 SOURCES: tuple[Source, ...] = ("output", "probe", "coho", "limit")
-NAME = re.compile(r"^[a-z0-9_]{1,40}$")
+NAME = re.compile(r"[a-z0-9_]{1,40}")
 MS_EPOCH = 1e12  # an epoch at or past this is in milliseconds
 MAX_JSON_CHARS = 1 << 17  # cap line/document length before json.loads so hostile input stays cheap
 RESET_SLACK_S = 3600.0  # clock skew / top-of-hour rounding beyond a window's nominal length
@@ -69,7 +69,7 @@ def status_of(value: object) -> Status | None:
 
 
 def name_of(value: object, fallback: str = "window") -> str:
-    return value if isinstance(value, str) and NAME.match(value) else fallback
+    return value if isinstance(value, str) and NAME.fullmatch(value) else fallback
 
 
 _RANK = {s: i for i, s in enumerate(STATUSES)}
@@ -138,7 +138,7 @@ def _claude_event(info: dict[str, Any], at: float) -> list[Reading]:
     out = {top.window: top}
     unified = info.get("unifiedWindows")
     for name, w in (unified.items() if isinstance(unified, dict) else ()):
-        if not isinstance(w, dict) or not NAME.match(str(name)):
+        if not isinstance(w, dict) or not NAME.fullmatch(str(name)):
             continue
         r = _unified(str(name), w, at)
         if r is None:
@@ -166,7 +166,7 @@ def parse_claude(raw: str, at: float) -> tuple[Reading, ...]:
     return latest_per_window(readings)
 
 
-_MIN_NAME = re.compile(r"^(\d+)_min$")
+_MIN_NAME = re.compile(r"(\d+)_min")
 
 
 def window_hours(window: str) -> float | None:
@@ -177,7 +177,7 @@ def window_hours(window: str) -> float | None:
         return 168.0
     if window == "one_day":
         return 24.0
-    m = _MIN_NAME.match(window)
+    m = _MIN_NAME.fullmatch(window)
     return int(m[1]) / 60 if m and int(m[1]) > 0 else None
 
 
@@ -267,7 +267,7 @@ def parse_codex(raw: str, at: float) -> tuple[Reading, ...]:
 # --- Antigravity -------------------------------------------------------------------------------------------------
 
 _SLUG = re.compile(r"[^a-z0-9.-]+")
-_PERCENT_CELL = re.compile(r"^\d+(\.\d+)?%$|^0?\.\d+$|^1(\.0+)?$")
+_PERCENT_CELL = re.compile(r"\d+(?:\.\d+)?%|0?\.\d+|1(?:\.0+)?")
 _DATE_CELL = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
@@ -333,7 +333,7 @@ def _agy_lines(text: str, at: float) -> list[Reading]:
         if len(line) > MAX_JSON_CHARS:
             continue
         cells = [c.strip() for c in line.split("\t")]
-        share_cell = next((c for c in cells[1:] if _PERCENT_CELL.match(c)), None)
+        share_cell = next((c for c in cells[1:] if _PERCENT_CELL.fullmatch(c)), None)
         if len(cells) < 2 or share_cell is None:
             continue
         reset = next((c for c in cells if _DATE_CELL.search(c) and epoch(c) is not None), None)

@@ -104,6 +104,10 @@ def test_a_bad_bucket_or_a_row_bosun_cannot_read_is_refused_or_skipped(store, ca
         ledger.save(store, "nonesuch@x", (R("five_hour", "allowed", 0.1, None, NOW),))
     with pytest.raises(ValueError):
         ledger.save(store, "claude@../x", (R("five_hour", "allowed", 0.1, None, NOW),))
+    with pytest.raises(ValueError):
+        ledger.save(store, "claude@work\n", (R("five_hour", "allowed", 0.1, None, NOW),))
+    assert not ledger.valid_window("five_hour\n")
+    assert not ledger.valid_window("quota:flash\n")
     bad_batch = (
         R("../x", "allowed", 0.1, None, NOW),
         R("five_hour", "allowed", -0.1, None, NOW),

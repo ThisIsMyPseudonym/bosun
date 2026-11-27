@@ -49,6 +49,8 @@ def test_a_bad_window_name_or_status_is_dropped():
     assert windows.parse_claude(_event(status="maybe", rateLimitType="five_hour"), at=1.0) == ()
     assert windows.parse_claude(_event(status="allowed", rateLimitType="../x"), at=1.0) == (
         R("window", "allowed", None, None, 1.0),)
+    assert windows.parse_claude(_event(status="allowed", rateLimitType="five_hour\n", unifiedWindows={
+        "seven_day\n": {"utilization": 0.5}}), at=1.0) == (R("window", "allowed", None, None, 1.0),)
 
 
 def test_claude_times_in_milliseconds_or_iso_and_junk_are_read_or_dropped():
