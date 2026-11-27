@@ -277,22 +277,28 @@ def quota_window(name: object) -> str:
     return f"quota:{slug}" if slug else "quota"
 
 
-def _remaining(value: object) -> float | None:
-    """A remaining share, 0-1, from a fraction, a percentage or a string such as "10%"."""
+def _remaining(value: object, *, is_percent: bool = False) -> float | None:
+    """A remaining share, 0-1, from a fraction, a percentage or a string such as "10%".
+
+    Ambiguous bare `1` (no `%` and not an explicit percentage field) resolves in the safe direction (more used).
+    """
     if isinstance(value, str):
         text = value.strip()
+        if text.endswith("%"):
+            is_percent = True
+            text = text[:-1]
         try:
-            value = float(text[:-1]) / 100 if text.endswith("%") else float(text)
+            value = float(text)
         except ValueError:
             return None
     f = _number(value)
     if f is None or f < 0:
         return None
-    return min(1.0, f / 100 if f > 1 else f)
+    return min(1.0, f / 100 if is_percent or f >= 1 else f)
 
 
-def _quota(name: object, remaining: object, reset: object, at: float) -> Reading | None:
-    left = _remaining(remaining)
+def _quota(name: object, remaining: object, reset: object, at: float, *, is_percent: bool = False) -> Reading | None:
+    left = _remaining(remaining, is_percent=is_percent)
     if left is None:
         return None
     used = 1.0 - left
@@ -317,11 +323,12 @@ def _agy_json(parsed: object, at: float) -> list[Reading]:
         q = _pick(item, "quotaInfo", "quota_info")
         q = q if isinstance(q, dict) else item
         remaining = _pick(q, "remainingFraction", "remaining_fraction")
+        is_percent = False
         if remaining is None:
-            percent = _number(_pick(q, "remainingPercentage", "remaining_percentage"))
-            remaining = percent / 100 if percent is not None else None
+            remaining = _pick(q, "remainingPercentage", "remaining_percentage")
+            is_percent = remaining is not None
         r = _quota(_pick(item, "model", "label", "name", "displayName"), remaining,
-                   _pick(q, "resetTime", "reset_time", "resetsAt"), at)
+                   _pick(q, "resetTime", "reset_time", "resetsAt"), at, is_percent=is_percent)
         if r is not None:
             out.append(r)
     return out

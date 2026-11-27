@@ -160,6 +160,19 @@ def test_antigravity_other_shapes_and_junk():
     assert windows.parse_antigravity("a\tb\n\n", at=1.0) == ()
 
 
+def test_antigravity_ambiguous_one_resolves_in_the_safe_direction():
+    (frac_one,) = windows.parse_antigravity(json.dumps([{"model": "Flash", "remainingFraction": 1}]), at=1.0)
+    assert frac_one.used == pytest.approx(0.99) and frac_one.status == "allowed_warning"
+    (cell_one,) = windows.parse_antigravity("Flash\t1\n", at=1.0)
+    assert cell_one.used == pytest.approx(0.99) and cell_one.status == "allowed_warning"
+    (pct_100,) = windows.parse_antigravity("Flash\t100%\n", at=1.0)
+    assert pct_100.used == 0.0 and pct_100.status == "allowed"
+    (json_pct_100,) = windows.parse_antigravity(json.dumps([{"model": "Flash", "remainingPercentage": 100}]), at=1.0)
+    assert json_pct_100.used == 0.0 and json_pct_100.status == "allowed"
+    (json_pct_1,) = windows.parse_antigravity(json.dumps([{"model": "Flash", "remainingPercentage": 1}]), at=1.0)
+    assert json_pct_1.used == pytest.approx(0.99) and json_pct_1.status == "allowed_warning"
+
+
 def test_parsers_never_raise_on_deeply_nested_or_oversized_json():
     assert windows.parse_claude("[" * 200_000 + "rate_limit_event", 0.0) == ()
     assert windows.parse_claude("[" * 10_000 + "rate_limit_event", 0.0) == ()
