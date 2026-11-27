@@ -13,6 +13,7 @@ import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from .. import trace
 from ..registry import Conflict, Invalid
 from . import accounts, catalog, contract, ledger, limits, quota, router, windows
 
@@ -209,4 +210,20 @@ def context(store: Store, *, cooldowns: limits.Cooldowns | None = None, now: flo
         for lg in found:
             if (until := cooldowns.until(lg.bucket)) is not None:
                 cool_map[lg.bucket] = until
-    return router.Context(found, contracts, all_r, cool_map, overrides(store, now=when), when, router.settings(store))
+    return router.Context(found, contracts, all_r, cool_map, overrides(store, now=when), when, router.settings(store),
+                          background_calls(store, when))
+
+
+def background_calls(store: Store, now: float) -> dict[str, tuple[int, int]]:
+    """Background AI calls actually made per login: (in the current refresh's trace, in the last 24 hours)."""
+    jobs = tuple(name for name, j in catalog.JOBS.items() if j.background)
+    run_id = trace.current_trace_id()
+    with store._tx() as db:
+        rows = db.execute(
+            "SELECT COALESCE(NULLIF(provider, ''), 'claude') AS p, COALESCE(NULLIF(account, ''), 'default') AS a, "
+            "SUM(CASE WHEN ? != '' AND trace_id = ? THEN 1 ELSE 0 END) AS refresh, COUNT(*) AS day "
+            f"FROM llm_calls WHERE ts >= ? AND COALESCE(NULLIF(job, ''), purpose) IN ({','.join('?' * len(jobs))}) "
+            "AND outcome NOT IN ('cached', 'skipped') GROUP BY p, a",
+            (run_id, run_id, now - 86400, *jobs)).fetchall()
+    return {(r["p"] if r["a"] == accounts.DEFAULT else f"{r['p']}@{r['a']}"): (int(r["refresh"]), int(r["day"]))
+            for r in rows}
