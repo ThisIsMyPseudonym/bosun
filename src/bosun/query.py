@@ -59,7 +59,8 @@ READABLE: dict[str, frozenset[str]] = {name: frozenset(cols.split()) for name, c
     "conversations": "id created updated turns cost_usd model",
     "messages": "id conversation_id turn ts role tool outcome risk trace_id",
     "quota_windows": "bucket provider account window status used resets_at at source",
-    "triage": "id failure trace_id signature status source verdict same_as triage_trace feedback feedback_ts created finished",
+    "triage": "id failure trace_id signature status source verdict same_as triage_trace feedback feedback_ts created finished last_error",
+    "triage_disputed_rules": "signature disputed_at",
 }.items()}
 HIDDEN: dict[str, frozenset[str]] = {
     "snapshots": frozenset({"items"}),  # the blob: megabytes, and the rows in snapshot_items say the same

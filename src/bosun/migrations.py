@@ -673,8 +673,8 @@ FROM triage;
 
 TRIAGE_RULE_DISPUTES = """
 CREATE TABLE IF NOT EXISTS triage_disputed_rules (
-    signature TEXT PRIMARY KEY,
-    disputed_at REAL NOT NULL
+    signature TEXT PRIMARY KEY,            -- SHA-256 failure signature whose deterministic rule was marked wrong
+    disputed_at REAL NOT NULL              -- Unix time the rule was disputed
 );
 INSERT OR IGNORE INTO triage_disputed_rules (signature, disputed_at)
 SELECT signature, COALESCE(feedback_ts, created) FROM triage
