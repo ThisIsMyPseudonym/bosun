@@ -19,13 +19,21 @@ from importlib import metadata
 from dataclasses import dataclass
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from . import diagnose, launcher, machine, proc, selfupdate
 from .config import PROJECT_ROOT, Settings
-from .providers import accounts, contract
+from .providers import accounts, contract, ledger, quota, run as ai_run, windows
 from .providers.catalog import CATALOG
 
 OK, MISSING, OPTIONAL = "[ok]", "[!!]", "[--]"  # plain ASCII: a Windows console may not print a tick
 MIN_PYTHON = (3, 13)
+PING_PROMPT = 'Reply with {"ok": true} and nothing else.'
+PING_SYSTEM = "Return only valid JSON matching the schema."
+
+
+class _Ping(BaseModel):
+    ok: bool
 
 
 @dataclass(frozen=True)
@@ -101,6 +109,10 @@ class Probe:
                 return contract.check(store, provider, binary)
         except (FileNotFoundError, sqlite3.Error):  # no database yet, or one this machine can't read: ask afresh
             return contract.check(None, provider, binary)
+
+    def live_providers(self, s: Settings) -> list[Line]:
+        """Opt-in live check (`bosun doctor --providers`): one tiny call per login, recording its readings."""
+        return check_providers(s)
 
     def signing(self, root: Path) -> list[str]:
         """What stops self-update from verifying a commit here; empty when nothing does."""
@@ -178,7 +190,38 @@ def _retired_budget_env() -> list[Line]:
                  f"unset {name} in your shell or service environment") for name in found]
 
 
-def check(s: Settings, probe: Probe | None = None, root: Path = PROJECT_ROOT) -> list[Line]:
+def _reading_summary(readings: tuple[windows.Reading, ...]) -> str:
+    parts = [
+        f"{ledger.window_label(r.window)} {round(used * 100)}%"
+        for r in readings
+        if (used := quota.share(r)) is not None
+    ]
+    return ", ".join(parts) if parts else "no window readings"
+
+
+def check_providers(s: Settings) -> list[Line]:
+    """Opt-in live check: send one tiny prompt to each installed, non-excluded login and record its readings."""
+    from .store import Store
+
+    with Store(s.db_path) as store:
+        found = accounts.logins(store, usable=True)
+        if not found:
+            return [Line(OPTIONAL, "live provider check: no installed AI logins to check")]
+        out: list[Line] = []
+        for lg in found:
+            sp = CATALOG[lg.provider]
+            res = ai_run.run(store, "explain", prompt=PING_PROMPT, system=PING_SYSTEM, schema=_Ping,
+                             tier="light", clicked=True, pin=lg, timeout=60.0)
+            if res.ok:
+                summary = _reading_summary(ledger.readings(store, lg.bucket))
+                out.append(Line(OK, f"live {sp.label} ({lg.label}): ok ({summary})"))
+            else:
+                out.append(Line(OPTIONAL, f"live {sp.label} ({lg.label}): {res.reason}",
+                                f"check your {sp.label} login (see docs/runbooks/{lg.provider}-setup.md)"))
+        return out
+
+
+def check(s: Settings, probe: Probe | None = None, root: Path = PROJECT_ROOT, *, providers: bool = False) -> list[Line]:
     p = probe or Probe()
     tools = p.tools()
     out: list[Line] = []
@@ -212,6 +255,8 @@ def check(s: Settings, probe: Probe | None = None, root: Path = PROJECT_ROOT) ->
     out += _managers(p, tools, s)
 
     out += _ai_clis(p, s)
+    if providers:
+        out += p.live_providers(s)
     out += _retired_budget_env()
 
     scanner = s.osv_scanner
