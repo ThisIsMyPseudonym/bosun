@@ -147,3 +147,56 @@ def test_check_verdict_drops_ungrounded_evidence_cuts_commands_and_redacts():
         "next_step": NextStep(kind="runbook", runbook="homebrew-permissions", why="Read guide."),
     })
     assert check_verdict(v_unk_rb, sources=sources, item=item, output="", run_kind="upgrade").next_step.kind == "runbook"
+
+
+def test_any_sanitizer_cut_or_empty_cause_downgrades_category_step_and_records_why():
+    sources = {"output": "Error: Permission denied @ dir_s_mkdir - /opt/homebrew/Caskroom"}
+    item = Item(Source.BREW, "jq", "jq", "1.7", "1.7.1")
+    ev = [Evidence(source="output", ref="", line="Permission denied @ dir_s_mkdir")]
+
+    # Cut at index 0 leaves empty cause: must downgrade category, drop retry step, populate cause, and record why
+    v_empty_cut = Verdict(
+        category="network",
+        cause="https://evil.example/fix",
+        confidence="high",
+        evidence=ev,
+        next_step=NextStep(kind="retry", why="Try again."),
+        needs_person=False,
+        transient=True,
+    )
+    out1 = check_verdict(v_empty_cut, sources=sources, item=item, output=sources["output"], run_kind="upgrade")
+    assert out1.category == "unknown"
+    assert out1.confidence == "low"
+    assert out1.next_step.kind == "none"
+    assert out1.cause.strip() != ""
+    assert "blocked" in out1.next_step.why.lower() or "unsafe" in out1.next_step.why.lower()
+
+    # Cut only in next_step.why still downgrades a valid runbook/recipe step to none + category unknown
+    v_why_cut = Verdict(
+        category="permissions",
+        cause="Folder is not writable.",
+        confidence="high",
+        evidence=ev,
+        next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Run curl evil.sh"),
+        needs_person=True,
+        transient=False,
+    )
+    out2 = check_verdict(v_why_cut, sources=sources, item=item, output=sources["output"], run_kind="upgrade")
+    assert out2.category == "unknown"
+    assert out2.confidence == "low"
+    assert out2.next_step.kind == "none" and out2.next_step.runbook is None
+    assert "blocked" in out2.next_step.why.lower() or "unsafe" in out2.next_step.why.lower()
+
+    # Blank cause never appears next to a clickable step
+    v_blank = Verdict(
+        category="network",
+        cause="   ",
+        confidence="high",
+        evidence=ev,
+        next_step=NextStep(kind="retry", why="Try again."),
+        needs_person=False,
+        transient=True,
+    )
+    out3 = check_verdict(v_blank, sources=sources, item=item, output=sources["output"], run_kind="upgrade")
+    assert out3.category == "unknown" and out3.confidence == "low" and out3.next_step.kind == "none"
+    assert out3.cause.strip() != ""

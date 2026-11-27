@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from collections.abc import Mapping
 
 from bosun import mcp_server, recipes, redact
 from bosun.models import Item, Source
-from bosun.triage.schema import Confidence, Evidence, NextStep, Verdict
+from bosun.triage.schema import Category, Confidence, Evidence, NextStep, Verdict
+
+log = logging.getLogger(__name__)
+_CUT_NOTE = "Blocked unsafe content in model reply; inspect the run output."
+_EMPTY_CAUSE_NOTE = "Cause could not be determined from the run output."
 
 _BREW_SOURCES = frozenset({Source.BREW, Source.BREW_CASK, Source.MAC_APP})
 _APT_SOURCES = frozenset({Source.APT, Source.WSL_APT})
@@ -177,25 +182,37 @@ def check_verdict(
     cause, cause_cut = sanitize_text(verdict.cause)
     why, why_cut = sanitize_text(verdict.next_step.why)
 
-    confidence: Confidence = verdict.confidence
-    if not kept or cause_cut or why_cut:
-        confidence = "low"
+    if cause_cut or why_cut:
+        log.warning("triage verdict downgraded: unsafe content cut (cause=%s why=%s)", cause_cut, why_cut)
+        return verdict.model_copy(update={
+            "category": "unknown",
+            "cause": cause.strip() or _CUT_NOTE,
+            "confidence": "low",
+            "evidence": kept,
+            "next_step": NextStep(kind="none", why=_CUT_NOTE),
+        })
 
+    if not cause.strip():
+        return verdict.model_copy(update={
+            "category": "unknown",
+            "cause": _EMPTY_CAUSE_NOTE,
+            "confidence": "low",
+            "evidence": kept,
+            "next_step": NextStep(kind="none", why=why.strip() or _EMPTY_CAUSE_NOTE),
+        })
+
+    category: Category = verdict.category
+    confidence: Confidence = "low" if not kept else verdict.confidence
     step = recheck_step(
         verdict.next_step.model_copy(update={"why": why}),
-        category=verdict.category,
+        category=category,
         item=item,
         output=redact.text(output),
         run_kind=run_kind,
     )
-    if verdict.category == "unknown":
+    if category == "unknown":
         step = _constrain_unknown(step, item, run_kind)
 
-    return verdict.model_copy(
-        update={
-            "cause": cause,
-            "confidence": confidence,
-            "evidence": kept,
-            "next_step": step,
-        },
-    )
+    return verdict.model_copy(update={
+        "category": category, "cause": cause, "confidence": confidence, "evidence": kept, "next_step": step,
+    })
