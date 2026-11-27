@@ -230,19 +230,77 @@ def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Logi
     return None
 
 
-def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
-    """Filter and order candidates for `job` from pure `ctx` (no store, no clock)."""
-    capable = frozenset(catalog.capable(job))
-    job_spec = catalog.JOBS[job]
+_CATALOG_INDEX: Mapping[str, int] = MappingProxyType({p: i for i, p in enumerate(catalog.CATALOG)})
+
+
+def _check_missing(job: catalog.Job, capable: frozenset[str], bucket: str) -> Skip:
+    try:
+        provider, _ = ledger.split(bucket)
+    except ValueError:
+        return Skip(bucket, "not_installed", f"{bucket} is not a valid login")
+    if provider not in capable:
+        return Skip(bucket, "capability", _capability_detail(job, provider))
+    return Skip(bucket, "not_installed", f"{catalog.CATALOG[provider].label} is not installed")
+
+
+def _ordered_entries(ctx: Context) -> list[tuple[str, accounts.Login | None]]:
+    """Preference order: owner's `order` first, then remaining logins in catalog order (default login first)."""
+    valid_logins = [(i, lg) for i, lg in enumerate(ctx.logins) if lg.provider in catalog.CATALOG]
+    by_bucket = {lg.bucket: lg for _, lg in valid_logins}
+    entries: list[tuple[str, accounts.Login | None]] = []
+    seen: set[str] = set()
+    for bucket in ctx.settings.order:
+        if bucket in seen or _valid_bucket(bucket) is None:
+            continue
+        seen.add(bucket)
+        entries.append((bucket, by_bucket.get(bucket)))
+    rest = sorted(valid_logins, key=lambda pair: (_CATALOG_INDEX[pair[1].provider],
+                                                  0 if pair[1].id == accounts.DEFAULT else 1, pair[0]))
+    for _, lg in rest:
+        if lg.bucket not in seen:
+            seen.add(lg.bucket)
+            entries.append((lg.bucket, lg))
+    return entries
+
+
+def _fell_back_from(entries: list[tuple[str, accounts.Login | None]], candidates: list[Candidate],
+                    skipped: list[Skip], explicit: frozenset[str]) -> str | None:
+    if not candidates:
+        return None
+    skip_reason = {s.bucket: s.reason for s in skipped}
+    for bucket, _ in entries:
+        reason = skip_reason.get(bucket)
+        if reason == "capability":
+            continue
+        if reason in ("excluded", "not_installed") and bucket not in explicit:
+            continue
+        return bucket if bucket != candidates[0].bucket else None
+    return None
+
+
+def _evaluate(job: catalog.Job, capable: frozenset[str], entries: list[tuple[str, accounts.Login | None]],
+              ctx: Context, *, clicked: bool) -> tuple[list[Candidate], list[Skip]]:
     candidates: list[Candidate] = []
     skipped: list[Skip] = []
-    for login in ctx.logins:
-        if login.provider not in catalog.CATALOG:
+    for bucket, login in entries:
+        if login is None:
+            skipped.append(_check_missing(job, capable, bucket))
             continue
-        skip = _check_login(job_spec, capable, login, ctx, clicked=clicked)
+        skip = _check_login(job, capable, login, ctx, clicked=clicked)
         if skip is not None:
             skipped.append(skip)
         else:
             pace = quota.login_pace(ctx.readings.get(login.bucket, ()), ctx.now)
             candidates.append(Candidate(login.provider, login.bucket, login, pace))
-    return Route(job, tuple(candidates), tuple(skipped), ctx.settings.mode)
+    return candidates, skipped
+
+
+def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
+    """Filter and order candidates for `job` from pure `ctx` (no store, no clock)."""
+    capable = frozenset(catalog.capable(job))
+    job_spec = catalog.JOBS[job]
+    entries = _ordered_entries(ctx)
+    candidates, skipped = _evaluate(job_spec, capable, entries, ctx, clicked=clicked)
+    mode = ctx.settings.mode
+    fell_back = _fell_back_from(entries, candidates, skipped, frozenset(ctx.settings.order)) if mode == "default" else None
+    return Route(job, tuple(candidates), tuple(skipped), mode, fell_back)

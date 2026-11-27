@@ -113,13 +113,13 @@ def test_filters_run_in_order_and_missing_contract_fails_closed():
     contracts = {"claude": FAILED, "codex": FAILED}  # gemini missing -> fails closed
     route = router.plan("summarize", ctx(logins=logins, contracts=contracts))
     assert route.candidates == ()
-    assert [(s.bucket, s.reason) for s in route.skipped] == [
-        ("grok", "capability"),
-        ("codex", "not_installed"),
-        ("claude", "excluded"),
-        ("gemini", "contract"),
-        ("claude@work", "contract"),
-    ]
+    assert {s.bucket: s.reason for s in route.skipped} == {
+        "grok": "capability",
+        "codex": "not_installed",
+        "claude": "excluded",
+        "gemini": "contract",
+        "claude@work": "contract",
+    }
 
 
 # --- Task 3.3: limits and cool-downs -----------------------------------------------------------------------------
@@ -179,3 +179,40 @@ def test_the_owners_override_lets_background_work_past_the_line_until_the_reset(
     assert "claude" not in [c.bucket for c in gone.candidates]
     forged = router.plan("summarize", ctx(readings=readings, overrides=(quota.Override("claude", NOW + 1e9),), now=NOW))
     assert "claude" not in [c.bucket for c in forged.candidates]
+
+
+# --- Task 3.5: default mode ordering and fallback ----------------------------------------------------------------
+
+
+def test_default_mode_runs_your_choice_then_your_preference_order():
+    rs = dataclasses.replace(router.RoutingSettings.default(), order=("codex", "claude"))
+    shuffled = (_login("gemini"), _login("claude", "work"), _login("claude"), _login("codex"))
+    route = router.plan("summarize", ctx(logins=shuffled, settings=rs))
+    assert route.mode == "default" and route.fell_back_from is None
+    assert [c.bucket for c in route.candidates] == ["codex", "claude", "claude@work", "gemini"]
+
+    # First choice skipped (75% line) -> records fell_back_from
+    hit = {"codex": (R("five_hour", "allowed", 0.80, NOW + 600, NOW),)}
+    fb = router.plan("summarize", ctx(logins=shuffled, readings=hit, settings=rs))
+    assert [c.bucket for c in fb.candidates] == ["claude", "claude@work", "gemini"]
+    assert fb.fell_back_from == "codex"
+
+    # Empty order: first catalog choice skipped -> fell_back_from="claude"
+    at_limit = {"claude": (R("five_hour", "rejected", 1.0, NOW + 600, NOW),)}
+    fb2 = router.plan("summarize", ctx(readings=at_limit))
+    assert fb2.candidates[0].bucket == "claude@work" and fb2.fell_back_from == "claude"
+
+    # Empty order with default excluded: user opted it out, not a fallback
+    excl = (_login("claude", excluded=True), _login("claude", "work"), _login("codex"))
+    no_fb = router.plan("summarize", ctx(logins=excl))
+    assert no_fb.candidates[0].bucket == "claude@work" and no_fb.fell_back_from is None
+
+    # First ordered bucket uninstalled -> skipped as not_installed and recorded as fell_back_from
+    missing_codex = (_login("claude"), _login("gemini"))
+    fb3 = router.plan("summarize", ctx(logins=missing_codex, settings=rs))
+    assert fb3.candidates[0].bucket == "claude" and fb3.fell_back_from == "codex"
+    assert any(s.bucket == "codex" and s.reason == "not_installed" for s in fb3.skipped)
+
+    # All candidates skipped -> fell_back_from is None
+    all_out = router.plan("summarize", ctx(logins=(_login("claude"),), readings=at_limit))
+    assert all_out.candidates == () and all_out.fell_back_from is None
