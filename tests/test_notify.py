@@ -229,3 +229,79 @@ def test_a_hold_is_said_in_full_also_after_something_more_urgent():
     assert note.title == "Actively exploited: WinRAR"
     assert "Git and 7-Zip: fix for an exploited flaw. The new versions of Git and 7-Zip fix" in note.body
     assert "Autopilot installs them after a 24-hour hold" in note.body
+
+
+def test_failed_update_notification_includes_ready_verdict_and_dedups_by_signature(tmp_path):
+    from bosun.triage import store as tstore
+    from bosun.triage.schema import NextStep, Verdict
+
+    store, n, sent, clock = setup(tmp_path, [GIT])
+    n.tick()  # initial silent cursor
+
+    # Job 1 fails with a ready 'done' triage verdict (signature sig-perm)
+    j1 = store.create_job("winget:Git.Git", ["winget", "upgrade", "Git.Git"], status="running")
+    job1 = store.job(j1)
+    assert job1 is not None
+    store.finish_job(j1, "failed", "Permission denied")
+    tstore.save_verdict(
+        store, f"job:{j1}", job1["trace_id"], "sig-perm", "rules",
+        Verdict(
+            category="permissions", cause="Homebrew cannot write to its folder.", confidence="high", evidence=[],
+            next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Fix ownership."),
+            needs_person=True, transient=False,
+        ),
+    )
+    clock.t = store.jobs()[0]["finished"] + 1
+    note = n.tick()
+    assert note is not None
+    assert note.title == "Git didn't update"
+    assert "Homebrew cannot write to its folder." in note.body
+
+    # Job 2 later fails with the SAME signature -> never repeated!
+    clock.t += notify.GAP_S + 10
+    j2 = store.create_job("winget:Git.Git", ["winget", "upgrade", "Git.Git"], status="running")
+    job2 = store.job(j2)
+    assert job2 is not None
+    store.finish_job(j2, "failed", "Permission denied")
+    with store._tx(write=True) as db:
+        db.execute("UPDATE jobs SET finished = ? WHERE id = ?", (clock.t - 1, j2))
+    tstore.save_verdict(
+        store, f"job:{j2}", job2["trace_id"], "sig-perm", "cache",
+        Verdict(
+            category="permissions", cause="Homebrew cannot write to its folder.", confidence="high", evidence=[],
+            next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Fix ownership."),
+            needs_person=True, transient=False,
+        ),
+    )
+    assert n.tick() is None and len(sent) == 1
+
+    # Job 3 fails with a still-running triage (not ready) -> notifies immediately without waiting
+    clock.t += notify.GAP_S + 10
+    j3 = store.create_job("winget:Other", ["winget", "upgrade", "Other"], status="running")
+    job3 = store.job(j3)
+    assert job3 is not None
+    store.finish_job(j3, "failed", "mystery error")
+    with store._tx(write=True) as db:
+        db.execute("UPDATE jobs SET finished = ? WHERE id = ?", (clock.t - 1, j3))
+    tstore.save_status(store, f"job:{j3}", job3["trace_id"], "sig-other", "running")
+    note3 = n.tick()
+    assert note3 is not None and note3.title == "Other didn't update"
+    assert "Open Bosun to see why and retry." in note3.body
+
+    # When notifications are off, deliver is never called
+    notify.set_on(store, False)
+    clock.t += notify.GAP_S + 10
+    j4 = store.create_job("winget:Quiet", ["winget", "upgrade", "Quiet"], status="running")
+    job4 = store.job(j4)
+    assert job4 is not None
+    store.finish_job(j4, "failed", "boom")
+    with store._tx(write=True) as db:
+        db.execute("UPDATE jobs SET finished = ? WHERE id = ?", (clock.t - 1, j4))
+    tstore.save_verdict(
+        store, f"job:{j4}", job4["trace_id"], "sig-quiet", "rules",
+        Verdict(
+            category="network", cause="Registry timed out.", confidence="high", evidence=[],
+            next_step=NextStep(kind="retry", why="Retry."), needs_person=False, transient=True,
+        ),
+    )
+    assert n.tick() is None and len(sent) == 2
