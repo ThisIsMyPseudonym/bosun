@@ -98,6 +98,29 @@ def _store_or_return(
     return tstore.get(store, rec.failure)
 
 
+def _reuse_cached(
+    store: Store,
+    rec: FailureRecord,
+    sig: str,
+    item: Item | None,
+    *,
+    persist: bool,
+    now: float | None,
+) -> dict[str, Any] | None:
+    cached = tstore.find_cached(store, sig, now=now)
+    if cached is None or not cached.get("verdict"):
+        return None
+    try:
+        validated = Verdict.model_validate(cached["verdict"])
+    except ValidationError:
+        return None
+    reused = _recheck(validated, item, rec)
+    return _store_or_return(
+        store, rec, sig, "cache", reused, persist=persist,
+        same_as=int(cached["id"]), same_as_run=cached.get("same_as_run"), now=now,
+    )
+
+
 def evaluate_fast(
     store: Store,
     rec: FailureRecord,
@@ -105,11 +128,7 @@ def evaluate_fast(
     now: float | None = None,
     save: bool = True,
 ) -> dict[str, Any] | None:
-    """Run steps 1-4 (superseded -> signature -> rules -> 30-day cache) without calling a model.
-
-    Returns the triage row dict, or None when the failure is ineligible or needs a model.
-    When ``save`` is False or ``store.read_only`` is True, returns the verdict without writing.
-    """
+    """Run steps 1-4 (superseded -> signature -> rules -> 30-day cache) without calling a model."""
     if rec.status in SKIPPED_STATUSES:
         return None
 
@@ -122,7 +141,6 @@ def evaluate_fast(
     persist = save and not store.read_only
     sig = signature_of(rec)
 
-    # Step 1: Superseded by a later successful run of the same kind and subject
     if tstore.superseded(store, rec):
         if not persist:
             return _ephemeral_row(rec, sig, "fixed_since", now=now)
@@ -130,28 +148,13 @@ def evaluate_fast(
         return tstore.get(store, rec.failure)
 
     item = _lookup_item(store, rec.subject)
-
-    # Step 3: Deterministic rule table (unless a rules verdict for this signature was disputed)
     if not tstore.is_rule_disputed(store, sig):
         matched = rules.match(rec)
         if matched is not None:
             checked = _recheck(matched, item, rec)
             return _store_or_return(store, rec, sig, "rules", checked, persist=persist, now=now)
 
-    # Step 4: 30-day cache of non-disputed model verdicts for the same signature
-    cached = tstore.find_cached(store, sig, now=now)
-    if cached is not None and cached.get("verdict"):
-        try:
-            validated = Verdict.model_validate(cached["verdict"])
-        except ValidationError:
-            return None
-        reused = _recheck(validated, item, rec)
-        return _store_or_return(
-            store, rec, sig, "cache", reused, persist=persist,
-            same_as=int(cached["id"]), same_as_run=cached.get("same_as_run"), now=now,
-        )
-
-    return None
+    return _reuse_cached(store, rec, sig, item, persist=persist, now=now)
 
 
 def triage_for(
