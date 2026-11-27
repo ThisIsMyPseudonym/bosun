@@ -22,6 +22,7 @@ from bosun.providers.windows import Reading
 
 NO_RESET_S = 3600  # a limit that names no reset keeps the login out for an hour
 MAX_RESET_S = 31 * 86400.0  # resets further out than a month are unreadable (fall back to an hour)
+MAX_LIMIT_CHARS = 500  # real limit errors are short; longer text is a normal answer quoting limit words
 
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
 _UNIT = r"(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])"
@@ -155,9 +156,10 @@ def reset_time(text: str, now: float, tz: tzinfo | None = None) -> float | None:
 
 def limit_reading(text: str, now: float, tz: tzinfo | None = None) -> Reading | None:
     """A usage-limit reply as a `rejected` reading of the `limit` window, or None when the text is not one."""
-    if not text or not LIMIT_WORDS.search(text):
+    trimmed = text.strip()
+    if not trimmed or len(trimmed) > MAX_LIMIT_CHARS or not LIMIT_WORDS.search(trimmed):
         return None
-    resets = reset_time(text, now, tz)
+    resets = reset_time(trimmed, now, tz)
     return Reading("limit", "rejected", None, resets if resets is not None else now + NO_RESET_S, now, "limit")
 
 

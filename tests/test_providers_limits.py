@@ -87,6 +87,17 @@ def test_an_answer_that_mentions_limits_is_still_an_answer():
     assert limits.limit_reading("", NOW) is None
 
 
+def test_long_answer_quoting_a_release_note_limit_message_is_not_a_limit():
+    note = (
+        "Release notes for v2.4.0:\n"
+        + "- Improved error formatting across the CLI and streaming client.\n" * 8
+        + '- Updated the quota error text to: "You have hit your usage limit. Resets in 2h".\n'
+        + "- Fixed minor display issues in status output.\n"
+    )
+    assert len(note.strip()) > limits.MAX_LIMIT_CHARS
+    assert limits.limit_reading(note, NOW, tz=UTC) is None
+
+
 def test_a_reset_bosun_cannot_read_means_an_hour():
     assert limits.limit_reading("usage limit reached, resets 2027-99-99T00:00:00Z", NOW, tz=UTC) == _limit(NOW + HOUR)
     assert limits.limit_reading("usage limit reached, resets 25:99pm", NOW, tz=UTC) == _limit(NOW + HOUR)
