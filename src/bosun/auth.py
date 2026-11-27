@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from dataclasses import dataclass
 import hmac
 import os
 import re
@@ -177,3 +178,83 @@ class Sessions:
                 mac.encode("utf-8", "replace"), _mac(self._key, f"login|{ts}|{nonce}").encode()):
             return None
         return self._cookie if self._once(nonce, now) else None
+
+
+ASSISTANT_TOKEN_ENV = "BOSUN_ASSISTANT_TOKEN"
+ASSISTANT_TOKEN_HEADER = "x-bosun-assistant-token"
+ASSISTANT_TOKEN_PREFIX = "bsn_at_"
+ASSISTANT_REPLY_KEY_ENV = "BOSUN_ASSISTANT_REPLY_KEY"
+ASSISTANT_REPLY_KEY_PREFIX = "bsn_rk_"
+ASSISTANT_TOKEN_TTL_S = 3600.0
+
+
+def assistant_reply_proof(reply_key: str, method: str, target: str) -> str:
+    """The dashboard's proof of an answer to an assistant MCP call. It is keyed by the turn's reply key, which the
+    dashboard gives the MCP child in its environment and which is never sent on the wire: something else on the
+    port receives the token but not this key, so it can't forge the proof."""
+    return _mac(reply_key, f"assistant-reply|{method.upper()}|{target}")
+
+
+def valid_assistant_reply(reply_key: str | None, method: str, target: str, value: str | None) -> bool:
+    return bool(reply_key and value) and hmac.compare_digest(
+        str(value).encode("utf-8", "replace"), assistant_reply_proof(str(reply_key), method, target).encode())
+
+
+@dataclass(frozen=True)
+class TokenGrant:
+    """What a live per-turn assistant token authorises: one conversation and one turn."""
+
+    conversation_id: str
+    turn: int
+    issued_at: float
+
+
+class AssistantTokens:
+    """In-memory per-turn tokens for MCP-backed Ask Bosun engines. Revoked when the turn ends or stops."""
+
+    def __init__(self, ttl_s: float = ASSISTANT_TOKEN_TTL_S, clock: Callable[[], float] = time.time):
+        self._ttl_s = ttl_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._active: dict[str, TokenGrant] = {}
+        self._secret = secrets.token_bytes(32)  # this process's: reply keys die with it
+
+    def reply_key(self, token: str) -> str:
+        """The turn's reply key, derived from its token with a secret only this dashboard holds."""
+        mac = hmac.new(self._secret, token.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
+        return f"{ASSISTANT_REPLY_KEY_PREFIX}{mac}"
+
+    def issue(self, conversation_id: str, turn: int) -> str:
+        token = f"{ASSISTANT_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
+        grant = TokenGrant(conversation_id, turn, self._clock())
+        with self._lock:
+            self._prune(grant.issued_at)
+            self._active[token] = grant
+        return token
+
+    def verify(self, token: str | None) -> TokenGrant | None:
+        if not token or not token.startswith(ASSISTANT_TOKEN_PREFIX):
+            return None
+        now = self._clock()
+        raw = token.encode("utf-8", "replace")
+        with self._lock:
+            self._prune(now)
+            for candidate, grant in self._active.items():
+                if hmac.compare_digest(candidate.encode(), raw):
+                    return grant
+        return None
+
+    def revoke(self, token: str | None) -> None:
+        if not token:
+            return
+        with self._lock:
+            self._active.pop(token, None)
+
+    def revoke_conversation(self, conversation_id: str) -> None:
+        with self._lock:
+            for tok in [t for t, g in self._active.items() if g.conversation_id == conversation_id]:
+                del self._active[tok]
+
+    def _prune(self, now: float) -> None:
+        for tok in [t for t, g in self._active.items() if now - g.issued_at > self._ttl_s]:
+            del self._active[tok]

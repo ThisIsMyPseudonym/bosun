@@ -38,7 +38,7 @@ from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff,
                registry, relaunch, selfupdate, status as status_mod, takeover, terminal, trace)
 from . import appguard, goback  # noqa: E402
 from . import approvals as approving
-from .assistant import Assistant
+from .assistant import ApprovalDeclined, Assistant
 from .actions import ATTENDED, UnsafeItem, Upgrader, failure_hint
 from .enrich.explain import Explainer
 from .enrich.exposure import REACH_EXPLAIN, REACH_LABEL, impact, profile, reach
@@ -75,6 +75,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     store = store or Store(s.db_path)
     icon_dir = store.path.parent  # app icons read from this machine are cached beside the database
     sessions = auth.Sessions(session_key or auth.load_key(s.data_dir))
+    assistant_tokens = auth.AssistantTokens()
     cookie = auth.cookie_name(s.port)
     refresh_file_lock = lock.FileLock(store.path.parent / "refresh.lock")
     # with a `bosun refresh` running on its own, only what no process is doing any more: some may be its own
@@ -148,6 +149,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             response = RedirectResponse("/", status_code=303)
             response.set_cookie(cookie, value, max_age=auth.COOKIE_MAX_AGE_S, httponly=True, samesite="strict", path="/")
             return response
+        assistant_token = request.headers.get(auth.ASSISTANT_TOKEN_HEADER)
+        if assistant_token is not None and not path.startswith(OPEN_PATHS):
+            return _refuse_assistant(request, assistant_token)
         authorization = request.headers.get("authorization")
         if authorization is not None and not path.startswith(OPEN_PATHS):
             return _refuse_agent(request, authorization, body)
@@ -191,6 +195,34 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if name is None:
             return JSONResponse({"error": "invalid agent name"}, status_code=400)
         request.state.actor, request.state.surface = f"agent:{name}", "mcp"  # who the audit trail will name
+        return None
+
+    def _refuse_assistant(request: Request, assistant_token: str) -> Response | None:
+        """An MCP-backed Ask Bosun turn (`bosun mcp --as assistant`): per-turn token in header, no cookie."""
+        if request.headers.get("origin") is not None or request.headers.get("sec-fetch-site") is not None:
+            return JSONResponse({"error": "assistant requests must not come from a browser"}, status_code=403)
+        if request.headers.get("authorization") is not None:
+            return JSONResponse({"error": "conflicting credentials"}, status_code=403)
+        grant = assistant_tokens.verify(assistant_token)
+        if grant is None:
+            return JSONResponse({"error": "invalid or expired assistant token"}, status_code=401)
+        raw = request.scope.get("raw_path") or request.url.path.encode()
+        target = raw.decode("ascii", "replace") + (f"?{request.scope['query_string'].decode('ascii', 'replace')}"
+                                                   if request.scope.get("query_string") else "")
+        request.state.reply_proof = auth.assistant_reply_proof(assistant_tokens.reply_key(assistant_token),
+                                                               request.method, target)
+        path = request.url.path
+        if not path.startswith("/api/") or path == "/api/state":
+            return JSONResponse({"error": "agents can only call actions"}, status_code=403)
+        if path.startswith("/api/assistant"):
+            return JSONResponse({"error": "the Ask Bosun panel is not open to agents"}, status_code=403)
+        if path.startswith("/api/icon"):
+            return JSONResponse({"error": "app icons are not open to agents"}, status_code=403)
+        if path.startswith("/api/terminal"):
+            return JSONResponse({"error": "Bosun's terminal is not open to agents"}, status_code=403)
+        request.state.actor, request.state.surface = registry.ASSISTANT, "assistant"
+        request.state.assistant_grant = grant
+        request.state.assistant_token = assistant_token
         return None
 
     @app.middleware("http")
@@ -355,8 +387,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     approvals = approving.Approvals()  # the user's one-call yeses to the assistant; permit spends them
     actions = Actions(store=store, approvals=approvals, demo=s.demo)
     app.state.actions = actions  # the in-process surface (the assistant) calls these directly
-    assistant = Assistant(store, s, actions, approvals)
-    app.state.assistant, app.state.approvals = assistant, approvals
+    assistant = Assistant(store, s, actions, approvals, tokens=assistant_tokens)
+    app.state.assistant, app.state.approvals, app.state.assistant_tokens = assistant, approvals, assistant_tokens
     app.state.terminals, app.state.upgrader = terminals, upgrader
     if store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")
@@ -990,17 +1022,17 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     unbound = actions.unbound()
     if unbound:  # the contract test catches this too; failing at startup beats a 404 for one button
         raise RuntimeError(f"actions declared but not bound: {', '.join(unbound)}")
-    mount_actions(app, actions)
+    mount_actions(app, actions, assistant=assistant)
     return app
 
 
-def mount_actions(app: FastAPI, actions: Actions) -> None:
+def mount_actions(app: FastAPI, actions: Actions, assistant: Assistant | None = None) -> None:
     """One HTTP route per action, from its spec. Errors keep FastAPI's shapes: 422 for bad input, {detail} otherwise."""
     for spec in actions.specs.values():
-        app.add_api_route(spec.path, _endpoint(actions, spec), methods=[spec.method], include_in_schema=False)
+        app.add_api_route(spec.path, _endpoint(actions, spec, assistant), methods=[spec.method], include_in_schema=False)
 
 
-def _endpoint(actions: Actions, spec: ActionSpec):
+def _endpoint(actions: Actions, spec: ActionSpec, assistant: Assistant | None = None):
     async def endpoint(request: Request):
         if spec.method == "GET":
             payload: dict[str, object] = dict(request.query_params)
@@ -1019,6 +1051,17 @@ def _endpoint(actions: Actions, spec: ActionSpec):
             body = actions.validate(spec.name, {**payload, **request.path_params})
         except ValidationError as exc:
             raise RequestValidationError(exc.errors(include_url=False))
+        grant = getattr(request.state, "assistant_grant", None)
+        if grant is not None and assistant is not None:
+            token = getattr(request.state, "assistant_token", "")
+            try:
+                result, tid = await run_in_threadpool(assistant.run_mcp_action, grant, spec, body, token)
+            except ApprovalDeclined as exc:
+                raise HTTPException(exc.status, exc.detail)
+            except ActionError as exc:
+                raise HTTPException(exc.status, exc.message)
+            headers = {TRACE_HEADER: tid} if tid else None
+            return JSONResponse(jsonable_encoder(result), status_code=spec.status_code, headers=headers)
         # the guard (create_app's _refuse_agent) names an agent; anyone else it let through is you, in the browser
         ctx = ActionContext(actor=getattr(request.state, "actor", "user"), surface=getattr(request.state, "surface", "http"))
         # an action that changes something is a run: say which, so whoever asked can follow it (wait_run, the Runs page)

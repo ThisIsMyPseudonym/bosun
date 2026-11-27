@@ -68,6 +68,7 @@ class ProviderSpec:
     features_args: tuple[str, ...] = ()  # e.g. ("features", "list", ...) to verify feature flags exist
     lockdown_features: tuple[str, ...] = ()  # feature names passed to --disable; a version lacking one fails closed
     fixer_flags: tuple[str, ...] = ()  # flags used only by the fixer, kept separate so one-shots aren't blocked
+    mcp_flags: tuple[str, ...] = ()  # extra flags used by CliMcpEngine, checked beside lockdown_flags
     # The login is tied to the exact home_env string, so home_env set to the default folder is a second login beside
     # the unset default (Claude Code: this Mac's two accounts share ~/.claude that way).
     home_string_is_login: bool = False
@@ -77,6 +78,7 @@ CLAUDE_FLAGS = ("-p", "--tools", "--disallowedTools", "--strict-mcp-config", "--
                 "--json-schema", "--output-format", "--verbose", "--disable-slash-commands", "--permission-mode",
                 "--model", "--system-prompt")
 CLAUDE_FIXER_FLAGS = ("--restricted", "--permission-prompts")
+CLAUDE_MCP_FLAGS = ("--mcp-config", "--allowedTools", "--include-partial-messages")  # --restricted: CLAUDE_FIXER_FLAGS
 CODEX_DISABLED_FEATURES = ("shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins",
                            "in_app_browser", "browser_use_external", "multi_agent", "view_image", "image_generation",
                            "hooks", "skill_search", "remote_plugin", "tool_suggest", "memories")
@@ -101,7 +103,7 @@ def _catalog(*specs: ProviderSpec) -> Mapping[str, ProviderSpec]:
     return MappingProxyType({s.id: s for s in specs})
 
 
-# Codex gets MCP in phase 6 and SANDBOXED_AGENT in phase 7, each once it is verified. Claude's models are the
+# Codex has MCP (phase 6) and gets SANDBOXED_AGENT in phase 7 once verified. Claude's models are the
 # defaults here; at call time Settings.summary_model and Settings.model (BOSUN_MODEL*) win (phase 4).
 CATALOG: Mapping[str, ProviderSpec] = _catalog(
     ProviderSpec("claude", "Claude Code", "claude", frozenset({C.TEXT, C.JSON, C.SANDBOXED_AGENT, C.MCP, C.VISION}),
@@ -109,8 +111,8 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
                  ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
                   "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"), "~/.claude",
                  "haiku", "sonnet", "output", ("api.anthropic.com",), fixer_flags=CLAUDE_FIXER_FLAGS,
-                 home_string_is_login=True),
-    ProviderSpec("codex", "Codex", "codex", frozenset({C.TEXT, C.JSON, C.VISION}), EXEC_HELP, CODEX_FLAGS,
+                 mcp_flags=CLAUDE_MCP_FLAGS, home_string_is_login=True),
+    ProviderSpec("codex", "Codex", "codex", frozenset({C.TEXT, C.JSON, C.MCP, C.VISION}), EXEC_HELP, CODEX_FLAGS,
                  "CODEX_HOME", ("CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"), "~/.codex",
                  "gpt-5.6-luna", "gpt-5.6-terra", "output", ("chatgpt.com", "api.openai.com"),
                  features_args=("features", "list", "-c", 'web_search="disabled"'),
