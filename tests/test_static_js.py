@@ -160,7 +160,7 @@ def test_usage_rendering_helpers_handle_windows_stale_overrides_and_escaping():
 
     // Login card with line_hit shows the owner-only override button and escapes hostile labels as text
     const card = H.loginCard({{
-      bucket: "claude", provider: "claude", provider_label: "<b>Claude</b>", label: "<img onerror=alert(1)>",
+      bucket: "claude", provider: "claude", installed: true, provider_label: "<b>Claude</b>", label: "<img onerror=alert(1)>",
       estimated: false, excluded: false, pace: 1.4, limited: false,
       line_hit: {{ window: "five_hour", label: "5-hour limit", used: 0.82, reset: "Fri 3:00 PM" }},
       override: null, calls: 5, tokens: 1200,
@@ -176,11 +176,19 @@ def test_usage_rendering_helpers_handle_windows_stale_overrides_and_escaping():
 
     // Routing panel renders mode switch and per-job pins
     const rpanel = H.routingPanel({{ mode: "default", order: ["claude", "codex"], pins: {{ fix: "claude" }}, job_modes: {{}}, jobs: ["summarize", "explain", "fix"] }},
-      [{{ bucket: "claude", provider_label: "Claude Code", label: "Default" }}, {{ bucket: "codex", provider_label: "Codex", label: "Default" }}], false);
+      [{{ bucket: "claude", installed: true, provider_label: "Claude Code", label: "Default" }}, {{ bucket: "codex", installed: true, provider_label: "Codex", label: "Default" }}, {{ bucket: "gone", installed: false, provider_label: "Gone CLI", label: "Default" }}], false);
     if (!rpanel.textContent.includes("Balance by pace") || !rpanel.textContent.includes("Branch + test")) throw new Error("routing panel missing controls");
+    if (rpanel.textContent.includes("Gone CLI")) throw new Error("an uninstalled login must not be offered for routing");
 
     console.log("OK");
     """
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
+
+
+def test_routing_and_override_controls_offer_only_installed_logins():
+    js = (STATIC / "usage.js").read_text()
+    panel = js[js.index("function routingPanel"):]
+    assert "logins = logins.filter((lg) => lg.installed);" in panel[:400]
+    assert "} else if (lg.line_hit && lg.installed) {" in js

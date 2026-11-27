@@ -289,7 +289,7 @@ manage `bin/` yourself, or `BOSUN_OSV_SCANNER` to point at another copy.
 |---|---|---|
 | `BOSUN_DATA_DIR` | OS data folder | Where `bosun.db`, logs and the session key live. |
 | `BOSUN_PORT` | `8787` | Local port for the dashboard (`127.0.0.1`). |
-| `BOSUN_REPO_ROOTS` | common code folders | Colon- or semicolon-separated folders to scan for git repos. |
+| `BOSUN_REPO_ROOTS` | your home folder | Folders to scan for git repos, separated by `:` (`;` on Windows). |
 | `BOSUN_REPO_DEPTH` | `3` | How many subfolders deep to look for git repos. |
 | `BOSUN_MODEL` | `sonnet` | Strong Claude model (explanations, fixes, major summaries). |
 | `BOSUN_MODEL_SUMMARIZE` | `haiku` | Light Claude model for routine release-note summaries. |
@@ -297,7 +297,7 @@ manage `bin/` yourself, or `BOSUN_OSV_SCANNER` to point at another copy.
 | `BOSUN_MODEL_<PROVIDER>_LIGHT` | per-CLI default | Light model for a provider (`CLAUDE`, `CODEX`, `GEMINI`, `GROK`, `ANTIGRAVITY`, `MUSE`). |
 | `BOSUN_MODEL_<PROVIDER>_STRONG` | per-CLI default | Strong model for a provider. |
 | `BOSUN_COHO_WINDOWS` | Coho's data folder | Optional read-only path to Coho's `cli-windows.json` for initial window readings. |
-| `BOSUN_FIX_ALLOW_HOSTS` | package registries | Extra host names allowed inside the Branch + test sandbox. |
+| `BOSUN_FIX_ALLOW_HOSTS` | none | Extra host names, comma-separated, allowed inside the Branch + test sandbox beside the package registries. |
 | `BOSUN_OSV_SCANNER` | `bin/osv-scanner` | Path to a custom `osv-scanner` binary. |
 | `BOSUN_OSV_AUTO_UPDATE` | `1` | Set `0` to manage `osv-scanner` yourself. |
 | `BOSUN_SELF_UPDATE` | `1` | Set `0` to disable automatic self-updates. |

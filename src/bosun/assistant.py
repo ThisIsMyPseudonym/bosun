@@ -106,8 +106,9 @@ approve. So call the tool once, with exactly the input you mean; do not ask "sha
 declines, accept it and do not call it again unless they ask.
 - A tool that changed something answers with a trace_id. Call `wait_run` with it, then say how it ended. If it \
 failed, `diagnose` it.
-- Some actions are the user's alone: ignoring an item, Autopilot, notifications, budgets, what agents may do. You \
-cannot run them. Say where in the dashboard to do it (the item's details, Today, the bell, AI usage).
+- Some actions are the user's alone: ignoring an item, Autopilot, notifications, AI logins, AI routing, \
+letting background AI work past 75%, what agents may do. You cannot run them. Say where in the dashboard to do it \
+(the item's details, Today, the bell, AI usage).
 - An update that needs the user's password, or a run that failed: call `list_recipes` with the item's key or the \
 run's trace_id. If it lists recipes, the panel shows each as a button under your answer, and pressing one runs that \
 command in Bosun's own terminal where the user can type their password. Say what the button does. You cannot press \
@@ -408,7 +409,7 @@ class Assistant:
                     log.warning("assistant turn %s: claude said: %s", turn.trace_id[:8], " | ".join(stderr[-5:])[:1000])
         status = {"ok": "ok", "cancelled": "stopped", "budget": "budget"}.get(outcome, "error")
         if status == "budget":
-            error = "This answer reached the assistant's budget for today and was cut short"
+            error = "This answer hit a cost limit and was cut short"
         return status, "" if status == "ok" else error, usage.cost_usd
 
     async def _interrupt(self, turn: Turn) -> None:

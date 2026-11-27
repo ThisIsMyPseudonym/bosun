@@ -7,7 +7,7 @@ cannot run without the user's approval.
 
 `BOSUN_LIVE_EVALS=1 uv run pytest tests/test_assistant_evals.py -k live -s` runs a few of them against real
 Claude, on a temporary database, with every action that would change this machine replaced by a fake. It spends
-real tokens (about a dollar at most: BOSUN_ASSISTANT_BUDGET_USD caps it) and prints what each turn cost.
+real tokens (a few short turns, each bounded by the assistant's step limit) and prints what each turn cost.
 """
 
 import json
@@ -240,7 +240,6 @@ def live(panel, monkeypatch):
     fake that only notes it was called. set_view (a row in the temporary database) stays real."""
     if not LIVE:
         pytest.skip("set BOSUN_LIVE_EVALS=1 to run against real Claude (spends tokens)")
-    monkeypatch.setenv("BOSUN_ASSISTANT_BUDGET_USD", os.environ.get("BOSUN_LIVE_EVALS_BUDGET_USD", "1"))
     panel.stubbed = []
     for name in STUBBED:
         panel.actions._handlers[name] = (lambda n: lambda ctx, body: panel.stubbed.append((n, body.model_dump())) or {"queued": []})(name)

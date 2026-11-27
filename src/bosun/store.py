@@ -656,7 +656,7 @@ class Store:
 
     def llm_usage(self, days: float = 30, now: float | None = None) -> dict:
         """Where the tokens went: totals, per day, per purpose, model, source and item, the costliest calls, outliers
-        against their purpose's median, and what Bosun's own cache and budgets avoided."""
+        against their purpose's median, and what Bosun's own cache avoided."""
         now = time.time() if now is None else now
         since = now - days * 86400
         spent = "outcome NOT IN ('cached', 'skipped')"  # rows that reached Claude (or tried to)

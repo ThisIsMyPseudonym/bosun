@@ -91,7 +91,7 @@ function loginCard(lg, isDemo) {
       el("span", { class: "hint", text: `Background work may pass 75% until ${lg.override.reset}.` }),
       el("button", { class: "quiet", disabled: isDemo || null, text: "Clear override",
         onclick: () => setOverride(lg.bucket, false) })));
-  } else if (lg.line_hit) {
+  } else if (lg.line_hit && lg.installed) {
     foot.push(el("div", { class: "qfoot" },
       el("button", { class: "quiet", disabled: isDemo || null,
         text: "Let background work go past 75% until it resets",
@@ -139,6 +139,7 @@ async function saveRouting(body) {
 
 function routingPanel(routing, logins, isDemo) {
   const r = routing || { mode: "default", order: [], pins: {}, jobs: [] };
+  logins = logins.filter((lg) => lg.installed);  // the server only routes to installed logins
   const buckets = logins.map((lg) => lg.bucket);
   const labelFor = new Map(logins.map((lg) => [lg.bucket, loginName(lg)]));
   const ordered = [...new Set([...(r.order || []).filter((b) => labelFor.has(b)), ...buckets])];

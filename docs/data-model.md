@@ -172,7 +172,7 @@ What Claude cost: calls, tokens and list-price cost per day, purpose, model and 
 | `project` |  |
 | `calls` | Calls that reached Claude (or tried to). |
 | `cached` | Calls Bosun's own cache made unnecessary. |
-| `skipped` | Calls not made: a budget was spent, or there was nothing to summarize. |
+| `skipped` | Calls not made: nothing to summarize (older rows: a retired dollar budget was spent). |
 | `cost_usd` |  |
 | `input_tokens` |  |
 | `output_tokens` |  |

@@ -310,3 +310,20 @@ def test_v11_skips_notice_when_no_budgets_were_stored_and_is_idempotent(tmp_path
     assert rows["ai_budgets_notice"] == "shown"
     assert rows["ai_budgets_retired"] == '{"daily_usd": 4.0}'
     db.close()
+
+
+def test_v11_records_only_real_caps(tmp_path):
+    import json
+
+    path = tmp_path / "bosun.db"
+    db = sqlite3.connect(path)
+    migrate(db, path, migrations.MIGRATIONS[:10])
+    db.execute("INSERT INTO settings (key, value) VALUES ('llm_daily_budget_usd', 'abc')")  # never a cap
+    db.execute("INSERT INTO settings (key, value) VALUES ('llm_refresh_budget_usd', '0')")  # 0 meant no cap
+    db.execute("INSERT INTO settings (key, value) VALUES ('llm_assistant_budget_usd', '2.5')")
+    db.commit()
+    assert migrate(db, path, migrations.MIGRATIONS[:11]) == [11]
+    rows = dict(db.execute("SELECT key, value FROM settings").fetchall())
+    retired = json.loads(rows["ai_budgets_retired"])
+    assert retired["assistant_usd"] == 2.5 and "daily_usd" not in retired and "refresh_usd" not in retired
+    db.close()

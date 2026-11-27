@@ -142,9 +142,20 @@ def dismiss_notice(store: Store) -> dict[str, Any]:
     return {"dismissed": True}
 
 
+def _shortest_window(readings: tuple[windows.Reading, ...], now: float) -> str | None:
+    """The current window with the shortest length. A call's `window_draw` is its largest rise in any window,
+    which is the shortest window's rise (the same use is a bigger share of a smaller window), so Bosun's share
+    is shown there and nowhere else."""
+    timed = [(h, r.window) for r in readings if not quota.stale(r, now) and (h := windows.window_hours(r.window))]
+    return min(timed)[1] if timed else None
+
+
 def _login_card(store: Store, lg: accounts.Login, readings: tuple[windows.Reading, ...],
                 overrides: tuple[quota.Override, ...], stats: dict[str, Any], now: float) -> dict[str, Any]:
-    win_rows = [_window_entry(store, lg.provider, lg.id, r, now) for r in sorted(readings, key=_window_sort_key)]
+    shortest = _shortest_window(readings, now)
+    win_rows = [{**entry, "bosun_share": entry["bosun_share"] if r.window == shortest else None}
+                for r in sorted(readings, key=_window_sort_key)
+                if (entry := _window_entry(store, lg.provider, lg.id, r, now))]
     curr = quota.current(readings, now)
     raw_pace = quota.login_pace(readings, now)
     return {
@@ -183,7 +194,7 @@ def report(store: Store, days: float = 30, now: float | None = None, *, demo: bo
     for lg in found:
         card = _login_card(store, lg, all_r.get(lg.bucket, ()), active_overrides, by_login.get(lg.bucket, {}), when)
         logins_out.append(card)
-        win_shares = {w["window"]: w["bosun_share"] for w in card["windows"] if not w["stale"]}
+        win_shares = {w["window"]: w["bosun_share"] for w in card["windows"] if w["bosun_share"] is not None}
         if win_shares:
             bosun_share[lg.bucket] = win_shares
         if card["estimated"]:

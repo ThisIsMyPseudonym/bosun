@@ -166,7 +166,7 @@ function add(node) {
 }
 
 // ---------- a turn, live ----------
-const DONE = { stopped: "Stopped.", budget: "This answer reached today's budget for the assistant and was cut short.", error: "" };
+const DONE = { stopped: "Stopped.", budget: "This answer hit a cost limit and was cut short.", error: "" };
 
 function closeStream() {
   if (A.es) { A.es.close(); A.es = null; }
@@ -198,7 +198,7 @@ function listen(cid) {
     const said = d.status === "error" ? d.error || "Something went wrong." : DONE[d.status];
     if (said) add(notice(said, d.status === "error" ? "bad" : ""));
     setRunning(false);
-    // an approved action may have changed what the page shows, and the turn used some of today's budget
+    // an approved action may have changed what the page shows, and the turn used some of the plan's quota
     if (MC.refreshNow) MC.refreshNow().then(renderFoot, () => {});
   });
   es.onerror = () => { if (es.readyState === EventSource.CLOSED && A.es === es) { A.es = null; setRunning(false); } };

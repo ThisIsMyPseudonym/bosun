@@ -504,14 +504,15 @@ RETIRED_BUDGET_KEYS = (
 )
 
 
-def _budget_number(raw: object) -> float | str | None:
+def _budget_number(raw: object) -> float | None:
+    """A stored cap that was really enforced: a finite amount above 0 (0 meant no cap, and text was ignored)."""
     if not isinstance(raw, str) or not raw.strip():
         return None
     try:
         val = float(raw)
     except ValueError:
-        return raw.strip()
-    return val if math.isfinite(val) else None
+        return None
+    return val if math.isfinite(val) and val > 0 else None
 
 
 def _retire_budgets(db: sqlite3.Connection) -> None:
