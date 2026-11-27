@@ -1,10 +1,13 @@
-"""Bosun's final word on triage verdicts: per-item next-step checks."""
+"""Bosun's final word on triage verdicts: grounding, sanitization, and per-item next-step checks."""
 
 from __future__ import annotations
 
-from bosun import mcp_server, recipes
+import re
+from collections.abc import Mapping
+
+from bosun import mcp_server, recipes, redact
 from bosun.models import Item, Source
-from bosun.triage.schema import NextStep
+from bosun.triage.schema import Confidence, Evidence, NextStep, Verdict
 
 _BREW_SOURCES = frozenset({Source.BREW, Source.BREW_CASK, Source.MAC_APP})
 _APT_SOURCES = frozenset({Source.APT, Source.WSL_APT})
@@ -14,6 +17,22 @@ CATEGORY_RUNBOOK: dict[str, str] = {
     "password_needed": "cask-needs-password",
     "not_signed_in": "claude-not-logged-in",
 }
+
+_UNSAFE_RE = re.compile(
+    r"(?:"
+    r"https?://|"
+    r"ftp://|"
+    r"`|"
+    r"\$\(|"
+    r"\|\s*(?:sh|bash|zsh)\b|"
+    r"\bsudo\b|"
+    r"<[a-z/]|"
+    r"\[[^\]]*\]\(|"
+    r"\]\(|"
+    r"\bignore\s+(?:all\s+|previous\s+|your\s+|prior\s+)?instructions\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _runbook_exists(topic: str | None) -> bool:
@@ -83,3 +102,80 @@ def recheck_step(
         return _runbook_or_none(category, item, output, step.why)
 
     return NextStep(kind=step.kind, why=step.why)
+
+
+def _norm_ws(text: str) -> str:
+    return " ".join(text.split())
+
+
+def evidence_matches(line: str, source_text: str) -> bool:
+    """True when `line` appears in `source_text` after whitespace normalization (and is not empty/mask-only)."""
+    norm_line = _norm_ws(line)
+    if not norm_line or norm_line == redact.MASK:
+        return False
+    return norm_line in _norm_ws(source_text)
+
+
+def sanitize_text(text: str) -> tuple[str, bool]:
+    """Redact secrets and cut at any URL, shell command, markup, or echoed prompt-injection instruction."""
+    clean = redact.text(text)
+    match = _UNSAFE_RE.search(clean)
+    if match is None:
+        return clean, False
+    return clean[: match.start()].rstrip(), True
+
+
+def _checked_evidence(evidence: list[Evidence], clean_sources: Mapping[str, str]) -> list[Evidence]:
+    kept: list[Evidence] = []
+    for ev in evidence:
+        clean_line = redact.text(ev.line)
+        clean_ref = redact.text(ev.ref)
+        if evidence_matches(clean_line, clean_sources.get(ev.source, "")):
+            kept.append(ev.model_copy(update={"ref": clean_ref, "line": clean_line}))
+    return kept
+
+
+def _constrain_unknown(step: NextStep, item: Item | None, run_kind: str) -> NextStep:
+    if (item is not None and item.project_scoped) or run_kind == "fix":
+        return NextStep(kind="agent_prompt", why=step.why)
+    if step.kind == "runbook" and _runbook_exists(step.runbook):
+        return step
+    return NextStep(kind="none", why=step.why)
+
+
+def check_verdict(
+    verdict: Verdict,
+    *,
+    sources: Mapping[str, str],
+    item: Item | None,
+    output: str,
+    run_kind: str,
+) -> Verdict:
+    """Apply Bosun's final checks: redact, ground evidence, sanitize free text, and re-check the next step."""
+    clean_sources = {k: redact.text(v) for k, v in sources.items()}
+    kept = _checked_evidence(verdict.evidence, clean_sources)
+    cause, cause_cut = sanitize_text(verdict.cause)
+    why, why_cut = sanitize_text(verdict.next_step.why)
+
+    confidence: Confidence = verdict.confidence
+    if not kept or cause_cut or why_cut:
+        confidence = "low"
+
+    step = recheck_step(
+        verdict.next_step.model_copy(update={"why": why}),
+        category=verdict.category,
+        item=item,
+        output=redact.text(output),
+        run_kind=run_kind,
+    )
+    if verdict.category == "unknown":
+        step = _constrain_unknown(step, item, run_kind)
+
+    return verdict.model_copy(
+        update={
+            "cause": cause,
+            "confidence": confidence,
+            "evidence": kept,
+            "next_step": step,
+        },
+    )
