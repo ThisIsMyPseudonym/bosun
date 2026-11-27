@@ -10,7 +10,7 @@ const TONE = { ok: "ok", partial: "warn", failed: "bad", interrupted: "bad", run
 const KIND_LABEL = { refresh: "Refresh", recheck: "Re-check", "recheck-project": "Project re-check", upgrade: "Update",
   fix: "Branch + test", pin: "MCP pin", relaunch: "Relaunch", action: "Action", manual: "Run here" };
 
-const R = { list: null, listKey: "", listAt: 0, trace: null, traceId: "", traceAt: 0, filter: { status: "", kind: "" }, loading: false };
+const R = { list: null, listKey: "", listAt: 0, trace: null, traceId: "", traceAt: 0, filter: { status: "", kind: "" }, loading: false, triaging: "" };
 
 const took = (ms) => ms == null ? "" : ms < 1000 ? `${Math.round(ms)} ms` : ms < 120000 ? `${(ms / 1000).toFixed(1)} s` : `${(ms / 60000).toFixed(1)} min`;
 const firstLine = (s) => (s || "").split("\n").find((l) => l.trim()) || "";
@@ -179,18 +179,60 @@ async function sendFeedback(traceId, value) {
   } catch (e) { if (MC.banner) MC.banner(`Could not save feedback: ${e.message}`); }
 }
 
+async function runTriage(traceId, deep = false) {
+  if (R.triaging === traceId) return;
+  R.triaging = traceId;
+  MC.render();
+  try {
+    const updated = await api(`/api/runs/${encodeURIComponent(traceId)}/triage`,
+      { method: "POST", body: JSON.stringify({ deep: Boolean(deep) }) });
+    if (R.trace && R.trace.run.trace_id === traceId) R.trace.triage = updated;
+  } catch (e) { if (MC.banner) MC.banner(`Triage failed: ${e.message}`); }
+  R.triaging = "";
+  MC.render();
+}
+
 function triageProvenance(triage, S) {
   if (triage.source === "rules") return el("span", { class: "triage-src", text: "Rules" });
   if (triage.source === "cache") {
     const o = triage.same_as_run;
     if (o && o.trace_id) {
       const label = `${subjectName(S, { kind: o.kind || "upgrade", subject: o.subject || "" })} ${KIND_LABEL[o.kind] || o.kind || "run"}`;
-      return el("span", { class: "triage-src" }, "Same as ",
-        el("a", { href: `#/runs/${o.trace_id}`, text: label }));
+      return el("span", { class: "triage-src" }, "Same as ", el("a", { href: `#/runs/${o.trace_id}`, text: label }));
     }
     return el("span", { class: "triage-src", text: "Same as an earlier run" });
   }
+  if (triage.source === "model") {
+    const m = triage.model_info || {};
+    const parts = [m.provider_label || m.provider || "Model",
+      m.login_label ? `${m.login_label} login` : null, m.tier ? `${m.tier} model` : null].filter(Boolean);
+    return el("span", { class: "triage-src", text: parts.join(", ") });
+  }
   return el("span", { class: "triage-src", text: triage.source ? `Source: ${triage.source}` : "" });
+}
+
+function seenSummary(trace) {
+  const rel = trace && Array.isArray(trace.related_failures) ? trace.related_failures : [];
+  if (!rel.length) return null;
+  const times = rel.map((r) => r.started).filter((t) => typeof t === "number" && Number.isFinite(t));
+  const since = times.length ? new Date(Math.min(...times) * 1000).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }) : "earlier";
+  return el("span", { class: "triage-seen hint", text: `seen ${rel.length + 1} times since ${since}` });
+}
+
+function triageAction(trace) {
+  const r = trace && trace.run, tri = trace && trace.triage;
+  if (!r || !["failed", "partial"].includes(r.status)) return null;
+  if (tri && ["done", "fixed_since"].includes(tri.status)) return null;
+  const avail = trace.triage_available !== false;
+  const why = trace.triage_unavailable_reason || "Model triage is unavailable";
+  const busy = R.triaging === r.trace_id;
+  const force = Boolean(tri && ["failed", "disputed"].includes(tri.status));
+  return el("span", { class: "triage-run-action" },
+    el("button", {
+      class: "quiet", disabled: !avail || busy, title: !avail ? why : "Ask an AI model to diagnose this failure",
+      text: busy ? "Triaging…" : "Triage", onclick: () => runTriage(r.trace_id, force),
+    }),
+    !avail ? el("span", { class: "hint", text: why }) : null);
 }
 
 function fixRetryKeys(trace, triage) {
@@ -206,21 +248,14 @@ function fixRetryKeys(trace, triage) {
 
 function retryAction(trace, triage, S) {
   const r = trace.run;
-  if (r.kind === "fix" && MC.actions.fix) {
-    const keys = fixRetryKeys(trace, triage);
-    return keys.length ? () => MC.actions.fix(keys) : null;
-  }
+  if (r.kind === "fix" && MC.actions.fix) { const keys = fixRetryKeys(trace, triage); return keys.length ? () => MC.actions.fix(keys) : null; }
   if (["upgrade", "manual"].includes(r.kind) && MC.actions.upgrade) {
     const jobKeys = (trace.jobs || []).map((j) => j.item_key).filter((k) => k && k.includes(":"));
     const keys = jobKeys.length ? jobKeys : (r.subject && r.subject.includes(":") ? [r.subject] : []);
     return keys.length ? () => MC.actions.upgrade(keys) : null;
   }
-  if (r.kind === "recheck-project" && r.subject && MC.actions.recheckProject) {
-    return () => MC.actions.recheckProject(r.subject, subjectName(S, r));
-  }
-  if (["refresh", "recheck"].includes(r.kind)) {
-    return () => api("/api/refresh", { method: "POST" }).catch((e) => { if (MC.banner) MC.banner(e.message); });
-  }
+  if (r.kind === "recheck-project" && r.subject && MC.actions.recheckProject) return () => MC.actions.recheckProject(r.subject, subjectName(S, r));
+  if (["refresh", "recheck"].includes(r.kind)) return () => api("/api/refresh", { method: "POST" }).catch((e) => { if (MC.banner) MC.banner(e.message); });
   return null;
 }
 
@@ -231,17 +266,13 @@ function triageStepAction(step, trace, triage, S) {
   }
   if (step.kind === "recipe" && MC.recipeButtons) return MC.recipeButtons({ trace_id: trace.run.trace_id });
   if (step.kind === "retry") {
-    const go = retryAction(trace, triage, S);
-    const out = [];
+    const go = retryAction(trace, triage, S), out = [];
     if (go) out.push(el("button", { class: "primary", text: "Try again", onclick: go }));
-    if (step.runbook) {
-      out.push(el("button", { class: go ? "quiet" : "primary", text: "Open guide", onclick: () => openRunbook(step.runbook) }));
-    }
+    if (step.runbook) out.push(el("button", { class: go ? "quiet" : "primary", text: "Open guide", onclick: () => openRunbook(step.runbook) }));
     return out.length ? out : null;
   }
   if (step.kind === "rescan") {
-    const r = trace.run;
-    const go = () => (r.kind === "recheck-project" && r.subject && MC.actions.recheckProject
+    const r = trace.run, go = () => (r.kind === "recheck-project" && r.subject && MC.actions.recheckProject
       ? MC.actions.recheckProject(r.subject, subjectName(S, r))
       : api("/api/refresh", { method: "POST" }).catch((e) => { if (MC.banner) MC.banner(e.message); }));
     return el("button", { class: "primary", text: "Re-scan", onclick: go });
@@ -264,42 +295,38 @@ function jumpToSpan(ref) {
 function verdictCard(triage, trace, S) {
   if (!triage || !["done", "disputed", "fixed_since"].includes(triage.status)) return null;
   if (triage.status === "fixed_since") {
-    return el("div", { class: "panel triage-card triage-fixed" },
-      el("div", { class: "triage-head" }, el("span", { class: "runstatus ok", text: "Fixed since" }),
-        el("span", { class: "hint", text: "A later run of the same kind succeeded." })));
+    return el("div", { class: "panel triage-card triage-fixed" }, el("div", { class: "triage-head" },
+      el("span", { class: "runstatus ok", text: "Fixed since" }), el("span", { class: "hint", text: "A later run of the same kind succeeded." })));
   }
   const v = triage.verdict;
   if (!v) return null;
   const heading = v.category === "unknown" ? "Not sure" : "Likely cause";
   const spanIds = new Set((trace.spans || []).map((sp) => sp.span_id));
-  const evList = (v.evidence || []).length
-    ? el("ul", { class: "triage-ev" }, ...v.evidence.map((ev) => {
-        const ref = ev.ref && spanIds.has(ev.ref)
-          ? el("a", { href: `#span-${ev.ref}`, class: "triage-evref", text: ev.source,
-              onclick: (e) => { e.preventDefault(); jumpToSpan(ev.ref); } })
-          : el("span", { class: "triage-evref", text: ev.source });
-        return el("li", {}, ref, " ", el("code", { text: ev.line }));
-      })) : null;
-  const tid = trace.run.trace_id;
-  const fbBtn = (label, val) => el("button", {
-    class: `quiet${triage.feedback === val ? " on" : ""}`, "aria-pressed": String(triage.feedback === val),
-    text: label, onclick: () => sendFeedback(tid, val),
-  });
+  const evList = (v.evidence || []).length ? el("ul", { class: "triage-ev" }, ...v.evidence.map((ev) => {
+    const ref = ev.ref && spanIds.has(ev.ref)
+      ? el("a", { href: `#span-${ev.ref}`, class: "triage-evref", text: ev.source, onclick: (e) => { e.preventDefault(); jumpToSpan(ev.ref); } })
+      : el("span", { class: "triage-evref", text: ev.source });
+    return el("li", {}, ref, " ", el("code", { text: ev.line }));
+  })) : null;
+  const tid = trace.run.trace_id, avail = trace.triage_available !== false;
+  const whyOff = trace.triage_unavailable_reason || "Model triage is unavailable", busy = R.triaging === tid;
+  const fbBtn = (label, val) => el("button", { class: `quiet${triage.feedback === val ? " on" : ""}`, "aria-pressed": String(triage.feedback === val), text: label, onclick: () => sendFeedback(tid, val) });
+  const deeperBtn = ["rules", "cache"].includes(triage.source) ? el("button", {
+    class: "quiet", disabled: !avail || busy, title: !avail ? whyOff : "Ask a model directly, skipping rules and cache",
+    text: busy ? "Triaging…" : "Look deeper", onclick: () => runTriage(tid, true),
+  }) : null;
+  const disputed = triage.status === "disputed" || triage.feedback === "disputed" || triage.feedback === "wrong";
   return el("div", { class: "panel triage-card" },
-    el("div", { class: "triage-head" },
-      el("strong", { text: heading }),
+    el("div", { class: "triage-head" }, el("strong", { text: heading }),
       el("span", { class: `triage-conf ${CONF_TONE[v.confidence] || ""}`, text: CONF_LABEL[v.confidence] || v.confidence }),
-      (triage.status === "disputed" || triage.feedback === "disputed" || triage.feedback === "wrong")
-        ? el("span", { class: "triage-conf warn", text: "Disputed" }) : null),
-    el("p", { class: "triage-cause", text: v.cause }),
-    evList,
-    el("div", { class: "triage-step" }, triageStepAction(v.next_step, trace, triage, S),
-      v.next_step && v.next_step.why ? el("span", { class: "hint", text: v.next_step.why }) : null),
+      disputed ? el("span", { class: "triage-conf warn", text: "Disputed" }) : null, seenSummary(trace)),
+    el("p", { class: "triage-cause", text: v.cause }), evList,
+    el("div", { class: "triage-step" }, triageStepAction(v.next_step, trace, triage, S), v.next_step && v.next_step.why ? el("span", { class: "hint", text: v.next_step.why }) : null),
     el("div", { class: "triage-foot" }, triageProvenance(triage, S),
-      el("div", { class: "triage-fb" }, fbBtn("Helpful", "helpful"), fbBtn("Wrong", "wrong"))));
+      el("div", { class: "triage-fb" }, fbBtn("Helpful", "helpful"), fbBtn("Wrong", "wrong"), deeperBtn)));
 }
 
-MC.triageHelpers = { verdictCard, renderRunbookMarkdown, triageProvenance, openRunbook };
+MC.triageHelpers = { verdictCard, renderRunbookMarkdown, triageProvenance, openRunbook, triageAction, seenSummary, runTriage };
 
 function agentText(t) {
   const r = t.run, fails = t.failures || [];
@@ -350,6 +377,7 @@ MC.views.trace = function traceView(S, id) {
     el("div", { class: "actions" },
       ["failed", "partial", "interrupted"].includes(r.status) ? el("button", { class: "primary", text: "Why did this fail?",
         title: "Ask Bosun: it reads this run and explains", onclick: () => MC.ask("Why did this fail?", { page: "runs", run: r.trace_id }) }) : null,
+      triageAction(t),
       copy,
       el("button", { class: "quiet", text: "Download diagnostic bundle", title: "Redacted JSON: failed steps, timeline, log lines, machine and tool versions", onclick: () => download(t) })),
     // an update that failed: what one click can try next (the server says which recipes apply; you start them)

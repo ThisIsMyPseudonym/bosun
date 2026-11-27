@@ -41,7 +41,10 @@ def test_run_triage_feedback_is_owner_only_and_runbooks_are_read_only(tmp_path):
         agent = TestClient(app, base_url="http://127.0.0.1:8787")
 
         # get_trace and get_triage both return the verdict (and agent may read them)
-        assert user.get(f"/api/runs/{r.trace_id}").json()["triage"]["source"] == "rules"
+        trace_data = user.get(f"/api/runs/{r.trace_id}").json()
+        assert trace_data["triage"]["source"] == "rules"
+        assert trace_data["triage_available"] is True and trace_data["triage_unavailable_reason"] == ""
+        assert isinstance(trace_data["related_failures"], list)
         assert user.get(f"/api/runs/{r.trace_id}/triage").json()["verdict"]["category"] == "permissions"
         assert agent.get(f"/api/runs/{r.trace_id}/triage", auth=auth.AgentAuth(SESSION_KEY)).status_code == 200
 
@@ -311,7 +314,7 @@ def test_triage_action_runs_model_on_click_refuses_demo_and_refuses_triage_actor
         )
         app = create_app(load_settings(), st, TOKEN)
         user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
-        resp = user.post(f"/api/runs/{r.trace_id}/triage", json={"force": True}, headers=H)
+        resp = user.post(f"/api/runs/{r.trace_id}/triage", json={"deep": True}, headers=H)
         assert resp.status_code == 200 and resp.json()["source"] == "model"
         assert resp.json()["verdict"]["category"] == "upstream_broken"
         assert resp.json()["triage_trace"]
@@ -326,7 +329,7 @@ def test_triage_action_runs_model_on_click_refuses_demo_and_refuses_triage_actor
             old_run.fail("old error")
         with st._tx(write=True) as db:
             db.execute("DELETE FROM spans WHERE trace_id = ?", (old_run.trace_id,))
-        aged = user.post(f"/api/runs/{old_run.trace_id}/triage", json={"force": True}, headers=H)
+        aged = user.post(f"/api/runs/{old_run.trace_id}/triage", json={"deep": True}, headers=H)
         assert aged.status_code == 409 and "aged out" in aged.json()["detail"].lower()
 
         # Concurrent triage for the same run is rejected with Conflict
@@ -344,12 +347,12 @@ def test_triage_action_runs_model_on_click_refuses_demo_and_refuses_triage_actor
             })
 
         fake.reply("claude", slow_reply)
-        t = threading.Thread(target=lambda: app.state.triager.triage_click(r.trace_id, force=True))
+        t = threading.Thread(target=lambda: app.state.triager.triage_click(r.trace_id, deep=True))
         t.start()
         assert started.wait(5)
         try:
             with pytest.raises(Conflict):
-                app.state.triager.triage_click(r.trace_id, force=True)
+                app.state.triager.triage_click(r.trace_id, deep=True)
         finally:
             release.set()
             t.join(5)

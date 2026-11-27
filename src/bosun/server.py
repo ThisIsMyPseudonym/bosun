@@ -52,7 +52,7 @@ from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPol
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
-from .triage import store as tstore, worker as tworker
+from .triage import model as tmodel, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -970,17 +970,30 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         return store.runs(limit=body.limit, kind=body.kind, status=body.status, subject=body.subject,
                           before=body.before)
 
+    def _triage_availability() -> tuple[bool, str]:
+        if s.demo:
+            return False, "Model triage is off in demo mode"
+        try:
+            return tmodel.availability(store)
+        except Exception:  # noqa: BLE001 - never break the run page
+            log.exception("triage availability check failed")
+            return False, "Model triage availability could not be checked"
+
     @actions.bind("get_trace")
     def get_trace(ctx: ActionContext, body: TraceIn):
         found = store.trace(body.trace_id)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
         tid = found["run"]["trace_id"]
+        avail, reason = _triage_availability()
         return {
             **found,
             "tree": diagnose.span_tree(found["spans"]),
             "failures": diagnose.failures(found["spans"]),
+            "related_failures": diagnose.related(store, found["run"]),
             "triage": _triage_or_none(tid),
+            "triage_available": avail,
+            "triage_unavailable_reason": reason,
         }
 
     @actions.bind("diagnose")
@@ -996,11 +1009,13 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
         tid = found["run"]["trace_id"]
-        return _triage_or_none(tid) or {"trace_id": tid, "status": None, "verdict": None}
+        avail, reason = _triage_availability()
+        base = _triage_or_none(tid) or {"trace_id": tid, "status": None, "verdict": None}
+        return {**base, "triage_available": avail, "triage_unavailable_reason": reason}
 
     @actions.bind("triage")
     def run_triage(ctx: ActionContext, body: TriageIn):
-        return triager.triage_click(body.trace_id, force=body.force)
+        return triager.triage_click(body.trace_id, deep=body.deep)
 
     def _triage_or_none(tid: str) -> dict | None:
         """A run's verdict, worked out on first read. Triage is advice: a bug in it never breaks the run page."""

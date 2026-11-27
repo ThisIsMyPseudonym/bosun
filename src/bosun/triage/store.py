@@ -47,6 +47,8 @@ def _decode_row(db: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str, An
 
 
 def _model_provenance(db: sqlite3.Connection, triage_trace: str) -> dict[str, str] | None:
+    from bosun.providers import catalog
+
     call = db.execute(
         "SELECT provider, account, model FROM llm_calls "
         "WHERE trace_id = ? AND job = 'triage' AND outcome = 'ok' ORDER BY id DESC LIMIT 1",
@@ -57,8 +59,34 @@ def _model_provenance(db: sqlite3.Connection, triage_trace: str) -> dict[str, st
     run = db.execute("SELECT actor FROM runs WHERE trace_id = ?", (triage_trace,)).fetchone()
     provider = str(call["provider"] or "claude")
     account = str(call["account"] or "default")
+    spec = catalog.CATALOG.get(provider)
+    provider_label = spec.label if spec is not None else provider.title()
+    login_label = _login_label(db, provider, account)
     tier = "strong" if (run is not None and run["actor"] == "user") else "light"
-    return {"provider": provider, "account": account, "model": str(call["model"] or ""), "tier": tier}
+    return {
+        "provider": provider,
+        "provider_label": provider_label,
+        "account": account,
+        "login_label": login_label,
+        "model": str(call["model"] or ""),
+        "tier": tier,
+    }
+
+
+def _login_label(db: sqlite3.Connection, provider: str, account: str) -> str:
+    if not account or account == "default":
+        return ""
+    row = db.execute("SELECT value FROM settings WHERE key = 'ai_logins'").fetchone()
+    if row and row["value"]:
+        try:
+            entries = json.loads(row["value"])
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("provider") == provider and entry.get("id") == account:
+                        return str(entry.get("label") or account)
+        except ValueError:
+            pass
+    return account
 
 
 def save_verdict(
