@@ -8,13 +8,14 @@ words it looks for can appear in an answer about rate limits.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from types import MappingProxyType
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -22,7 +23,17 @@ from bosun.providers.windows import Reading
 
 NO_RESET_S = 3600  # a limit that names no reset keeps the login out for an hour
 MAX_RESET_S = 31 * 86400.0  # resets further out than a month are unreadable (fall back to an hour)
-MAX_LIMIT_CHARS = 500  # real limit errors are short; longer text is a normal answer quoting limit words
+EDGE_LINES = 5  # a refusal leads or ends a reply: only its first and last few lines are read...
+MAX_LINE_CHARS = 400  # ...each cut to this length
+MAX_REPLY_CHARS = 128_000
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_HUGE_NUMBER = re.compile(r"\d{16,}")  # no reset needs this many digits: shortened, still absurd, so the line fits
+# US zone abbreviations a reply may use, read as their zone (standard or daylight, whichever is in force then)
+_US_ZONES = {"ET": "America/New_York", "EST": "America/New_York", "EDT": "America/New_York",
+             "CT": "America/Chicago", "CST": "America/Chicago", "CDT": "America/Chicago",
+             "MT": "America/Denver", "MST": "America/Denver", "MDT": "America/Denver",
+             "PT": "America/Los_Angeles", "PST": "America/Los_Angeles", "PDT": "America/Los_Angeles"}
+_OFFSET = re.compile(r"^(?:UTC|GMT)([+-])(\d{1,2})(?::?(\d\d))?$", re.I)
 
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
 _UNIT = r"(?:weeks?|wks?|w|days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])"
@@ -50,8 +61,9 @@ _CLOCK = re.compile(
     rf"(?:(?P<mon>{_MONTH})[a-z]*\.?\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?,?\s+"
     r"(?:(?P<year>20\d\d),?\s+)?(?:at\s+)?)?"
     r"(?P<hour>\d{1,2})(?::(?P<min>\d\d)\s*(?P<ampm1>am|pm)?|\s*(?P<ampm2>am|pm))\b"
-    r"(?:\s*\(\s*(?P<pzone>[A-Za-z][A-Za-z0-9_/+-]{0,40})\s*\)"
-    r"|\s+(?P<zone>UTC|GMT|[A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+|(?-i:[A-Z]{2,5}))\b)?",
+    r"(?:\s*\(\s*(?P<pzone>[A-Za-z][A-Za-z0-9_/+:-]{0,40})\s*\)"
+    r"|\s+(?P<zone>(?:UTC|GMT)(?:[+-]\d{1,2}(?::?\d\d)?)?|[A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+|(?-i:[A-Z]{2,5}))\b)?"
+    r"(?P<paren>\s*\()?",
     re.I)
 _MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
                                        "dec"), start=1)}
@@ -98,6 +110,13 @@ def _zone(name: str | None, fallback: tzinfo | None) -> tuple[bool, tzinfo | Non
         return True, fallback
     if name.upper() in ("UTC", "GMT"):
         return True, UTC
+    offset = _OFFSET.match(name)
+    if offset:
+        sign, hours, minutes = offset.groups()
+        delta = timedelta(hours=int(hours), minutes=int(minutes or 0))
+        return (True, timezone(-delta if sign == "-" else delta)) if delta <= timedelta(hours=14) else (False, None)
+    if name.upper() in _US_ZONES:
+        return True, ZoneInfo(_US_ZONES[name.upper()])
     try:
         return True, ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
@@ -119,8 +138,8 @@ def _hour(m: re.Match[str]) -> tuple[int, int] | None:
 def _clock_match(m: re.Match[str], now: float, tz: tzinfo | None) -> float | None:
     hm = _hour(m)
     ok, zone = _zone(m["pzone"] or m["zone"], tz)
-    if hm is None or not ok:
-        return None
+    if hm is None or not ok or (m["paren"] and not m["pzone"]):
+        return None  # a parenthesis right after the time that isn't a zone Bosun reads: the zone is unknown
     today = datetime.fromtimestamp(now, zone)
     try:
         at = today.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
@@ -129,7 +148,7 @@ def _clock_match(m: re.Match[str], now: float, tz: tzinfo | None) -> float | Non
     except ValueError:  # Feb 30
         return None
     if at.timestamp() > now:
-        return at.timestamp() if at.timestamp() <= now + 366 * 86400 else None
+        return at.timestamp() if _in_horizon(at.timestamp(), now) else None
     if m["year"]:
         return None  # a named date already past says nothing about when
     wall = at.replace(tzinfo=None)  # step the wall clock, then read it in the zone again (DST moves the offset)
@@ -137,7 +156,8 @@ def _clock_match(m: re.Match[str], now: float, tz: tzinfo | None) -> float | Non
         wall = wall.replace(year=wall.year + 1) if m["mon"] else wall + timedelta(days=1)
     except ValueError:  # Feb 29 next year
         return None
-    return wall.replace(tzinfo=zone).timestamp()
+    rolled = wall.replace(tzinfo=zone).timestamp()
+    return rolled if _in_horizon(rolled, now) else None  # a year ahead is no limit's reset
 
 
 def _clock(text: str, now: float, tz: tzinfo | None) -> list[float]:
@@ -154,12 +174,44 @@ def reset_time(text: str, now: float, tz: tzinfo | None = None) -> float | None:
     return max(candidates) if candidates else None
 
 
-def limit_reading(text: str, now: float, tz: tzinfo | None = None) -> Reading | None:
-    """A usage-limit reply as a `rejected` reading of the `limit` window, or None when the text is not one."""
-    trimmed = text.strip()
-    if not trimmed or len(trimmed) > MAX_LIMIT_CHARS or not LIMIT_WORDS.search(trimmed):
+def _envelope_message(line: str) -> str | None:
+    """The message of a CLI's JSON error envelope on one line (`{"is_error": true, "result": "..."}`), if it is one."""
+    if not line.startswith("{") or len(line) > MAX_REPLY_CHARS:
         return None
-    resets = reset_time(trimmed, now, tz)
+    try:
+        obj = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(obj, dict) or not (obj.get("is_error") is True or obj.get("type") == "error"):
+        return None
+    error = obj.get("error")
+    for value in (obj.get("result"), obj.get("message"), error.get("message") if isinstance(error, dict) else error):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _excerpt(text: str) -> str:
+    """Where a refusal can be: an error envelope's message, else the first and last few lines (each cut short)."""
+    plain = _HUGE_NUMBER.sub("9" * 16, _ANSI.sub("", text[:MAX_REPLY_CHARS]))
+    lines = [ln.strip() for ln in plain.splitlines() if ln.strip()]
+    edges = lines if len(lines) <= 2 * EDGE_LINES else lines[:EDGE_LINES] + lines[-EDGE_LINES:]
+    out = []
+    for ln in edges:
+        message = _envelope_message(ln)
+        out.append((message if message is not None else ln)[:MAX_LINE_CHARS])
+    return "\n".join(out)
+
+
+def limit_reading(text: str, now: float, tz: tzinfo | None = None) -> Reading | None:
+    """A usage-limit reply as a `rejected` reading of the `limit` window, or None when the text is not one.
+
+    Only the first and last few lines (or a JSON error envelope's message) are read: a CLI's refusal leads or
+    ends its output however long the trace around it, while an answer quoting limit words mid-text is an answer."""
+    excerpt = _excerpt(text)
+    if not excerpt or not LIMIT_WORDS.search(excerpt):
+        return None
+    resets = reset_time(excerpt, now, tz)
     return Reading("limit", "rejected", None, resets if resets is not None else now + NO_RESET_S, now, "limit")
 
 
