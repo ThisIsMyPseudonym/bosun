@@ -130,6 +130,7 @@ def override_until(hit: Hit, now: float) -> float:
 # --- a call's draw -----------------------------------------------------------------------------------------------
 
 SAME_RESET_S = 60  # resets this close apart are the same window; further apart, it reset in between
+DRAW_DROP_EPS = 1e-4  # a fall larger than float noise means a reset or inconsistent reading, not 0 draw
 
 
 def draw(before: Mapping[str, Reading], after: Iterable[Reading]) -> float | None:
@@ -142,7 +143,10 @@ def draw(before: Mapping[str, Reading], after: Iterable[Reading]) -> float | Non
             continue
         if prev.resets_at is not None and r.resets_at is not None and abs(prev.resets_at - r.resets_at) > SAME_RESET_S:
             continue
-        rises.append(max(0.0, r.used - prev.used))
+        delta = r.used - prev.used
+        if delta < -DRAW_DROP_EPS:
+            continue
+        rises.append(max(0.0, delta))
     return max(rises) if rises else None
 
 

@@ -139,7 +139,11 @@ def test_draw_is_the_largest_rise_in_a_window_that_kept_its_reset():
     assert quota.draw(before, both) == pytest.approx(0.04)
     assert quota.draw(before, (R("five_hour", "allowed", 0.05, r + 18000, NOW + 9),)) is None  # it reset
     assert quota.draw({}, (R("five_hour", "allowed", 0.34, r, NOW + 9),)) is None
-    assert quota.draw(before, (R("five_hour", "allowed", 0.20, r, NOW + 9),)) == 0.0  # a fall is no draw
+    assert quota.draw(before, (R("five_hour", "allowed", 0.20, r, NOW + 9),)) is None  # a drop beyond epsilon is unknown
+    assert quota.draw(before, (R("seven_day", "allowed", 0.10, None, NOW + 9),)) is None  # drop with unknown reset
+    assert quota.draw(before, (R("five_hour", "allowed", 0.30 - 1e-6, r, NOW + 9),)) == 0.0  # tiny float noise is 0
+    assert quota.draw(before, (R("five_hour", "allowed", 0.20, r, NOW + 9),
+                               R("seven_day", "allowed", 0.52, None, NOW + 9))) == pytest.approx(0.02)
     assert quota.draw(before, (R("five_hour", "rejected", None, r, NOW + 9),)) is None  # no figure to compare
 
 
