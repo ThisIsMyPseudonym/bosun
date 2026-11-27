@@ -1,6 +1,7 @@
 """A local agent's way into the dashboard: a credential from the key file, an actor in the audit trail, and a
 policy in the server that the agent cannot change."""
 
+import time
 import tempfile
 
 import pytest
@@ -173,6 +174,10 @@ def test_nobody_but_the_user_loosens_a_limit(app, agent, user, name):
     assert dict(app.store._db.execute("SELECT key, value FROM settings").fetchall()) == before
     refused = app.store.audit(limit=1)[0]  # the attempt is on record
     assert refused["action"] == name and refused["outcome"] == "error" and refused["error"].startswith("Forbidden")
+    if name == "set_quota_override":  # an override needs a window at the line to lift
+        from bosun.providers import ledger, windows
+        now = time.time()
+        ledger.save(app.store, "claude", (windows.Reading("five_hour", "allowed", 0.8, now + 3600, now),), now=now)
     assert user.post(path, json=USER_ONLY[name], headers=USER).status_code == 200
 
 
