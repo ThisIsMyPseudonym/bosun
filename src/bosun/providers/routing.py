@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from ..registry import Conflict, Invalid
-from . import accounts, catalog, ledger, quota, router, windows
+from . import accounts, catalog, contract, ledger, limits, quota, router, windows
 
 if TYPE_CHECKING:
     from ..store import Store
@@ -188,3 +188,25 @@ def overview(store: Store, now: float | None = None) -> dict[str, Any]:
         "job_modes": dict(rs.job_modes),
         "overrides": [{"bucket": o.bucket, "window": o.window, "until": o.until} for o in active],
     }
+
+
+def context(store: Store, *, cooldowns: limits.Cooldowns | None = None, now: float | None = None,
+            logins: tuple[accounts.Login, ...] | None = None) -> router.Context:
+    """Build a pure `router.Context` from the store, installed CLIs, contract verdicts, ledger and cool-downs."""
+    when = time.time() if now is None else now
+    found = accounts.logins(store) if logins is None else logins
+    contracts: dict[str, contract.ContractStatus] = {}
+    for lg in found:
+        if lg.binary and lg.provider not in contracts:
+            contracts[lg.provider] = contract.check(store, lg.provider, lg.binary, now=lambda: when)
+    all_r = ledger.all_readings(store)
+    if not store.read_only:
+        for lg in found:
+            if lg.bucket not in all_r and ledger.seed_from_coho(store, lg.bucket, now=when):
+                all_r[lg.bucket] = ledger.readings(store, lg.bucket)
+    cool_map: dict[str, float] = {}
+    if cooldowns is not None:
+        for lg in found:
+            if (until := cooldowns.until(lg.bucket)) is not None:
+                cool_map[lg.bucket] = until
+    return router.Context(found, contracts, all_r, cool_map, overrides(store, now=when), when, router.settings(store))
