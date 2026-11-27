@@ -100,3 +100,33 @@ def test_will_this_break_is_a_clicked_job_that_ignores_the_line_and_names_each_l
     msg = str(exc.value)
     assert "Claude Code" in msg and "Codex" in msg and "Gemini CLI" in msg and "resets" in msg
     assert ex.cached(item3) is None
+
+
+def test_with_every_login_out_summaries_use_built_in_rules_and_say_so_once(store, fake):
+    import time
+
+    now = time.time()
+    # Case 1: every capable login already at its limit before the refresh starts
+    for bucket in ("claude", "codex", "gemini"):
+        ledger.save(store, bucket, (windows.Reading("five_hour", "rejected", 1.0, now + 3600, now),), now=now)
+    sm = Summarizer(store, "sonnet", store.path.parent / "sb", routine_model="haiku")
+    a, b = Item(Source.BREW, "a", "a", "1.0", "1.1"), Item(Source.BREW, "b", "b", "1.0", "1.1")
+    out_a = sm.summarize(a, "notes")
+    first_problem = sm.problem
+    out_b = sm.summarize(b, "notes")
+    assert out_a.generated_by == "heuristic" and out_b.generated_by == "heuristic"
+    assert first_problem and sm.problem == first_problem and not sm.enabled
+    assert "Claude Code" in sm.problem and "Codex" in sm.problem and "Gemini CLI" in sm.problem
+    assert fake.calls == []
+
+    # Case 2: every login hits a limit at call time on the first item -> second item spawns no CLI
+    st2 = Store(store.path.parent / "db2.sqlite")
+    fake.reply("claude", fake.limit("claude", "2h"))
+    fake.reply("codex", fake.limit("codex", "1h"))
+    fake.reply("gemini", fake.limit("gemini", "30m"))
+    sm2 = Summarizer(st2, "sonnet", store.path.parent / "sb2", routine_model="haiku")
+    assert sm2.summarize(a, "notes").generated_by == "heuristic"
+    calls_after_first = len(fake.calls)
+    assert calls_after_first == 3 and sm2.problem and not sm2.enabled
+    assert sm2.summarize(b, "notes").generated_by == "heuristic"
+    assert len(fake.calls) == calls_after_first  # no CLI spawned for the second item
