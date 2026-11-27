@@ -24,7 +24,7 @@ from typing import Any, cast
 from bosun.providers.accounts import DEFAULT, ID
 from bosun.providers.catalog import CATALOG
 from bosun.providers.quota import stale
-from bosun.providers.windows import NAME, SOURCES, Reading, Source, epoch, fraction, status_of
+from bosun.providers.windows import NAME, SOURCES, Reading, Source, epoch, fraction, status_of, worse
 from bosun.store import Store
 
 log = logging.getLogger(__name__)
@@ -32,14 +32,7 @@ log = logging.getLogger(__name__)
 WINDOW = re.compile(r"^quota(:[a-z0-9.-]{1,40})?$")  # Antigravity's per-model windows, beside windows.NAME
 MAX_FUTURE_AT_S = 5 * 60.0  # reject readings further ahead of `now` than plausible clock skew
 COLUMNS = "bucket, provider, account, window, status, used, resets_at, at, source"
-UPSERT = (
-    f"INSERT INTO quota_windows ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-    "ON CONFLICT(bucket, window) DO UPDATE SET provider = excluded.provider, account = excluded.account, "
-    "status = excluded.status, used = excluded.used, resets_at = excluded.resets_at, at = excluded.at, "
-    "source = excluded.source WHERE excluded.at >= quota_windows.at "
-    "OR (quota_windows.resets_at IS NOT NULL AND quota_windows.resets_at <= excluded.at) "
-    "OR quota_windows.at > ?"
-)
+REPLACE = f"INSERT OR REPLACE INTO quota_windows ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 
 def split(bucket: str) -> tuple[str, str]:
@@ -61,29 +54,67 @@ def _time(value: object) -> float | None:
     return f if math.isfinite(f) else None
 
 
-def _row(bucket: str, provider: str, account: str, r: Reading, max_at: float) -> tuple[object, ...]:
-    at = _time(r.at)
+def _clean(r: Reading, max_at: float) -> Reading:
+    at, status = _time(r.at), status_of(r.status)
     used = None if r.used is None else fraction(r.used)
     resets = None if r.resets_at is None else _time(r.resets_at)
-    bad = (not valid_window(r.window) or status_of(r.status) is None or r.source not in SOURCES
+    bad = (not valid_window(r.window) or status is None or r.source not in SOURCES
            or at is None or at > max_at
            or (r.used is not None and used is None) or (r.resets_at is not None and resets is None))
-    if bad:
+    if bad or status is None or at is None:
         raise ValueError(f"not a reading Bosun keeps: {r!r}")
-    return (bucket, provider, account, r.window, r.status, used, resets, at, r.source)
+    return Reading(r.window, status, used, resets, at, cast(Source, r.source))
+
+
+def _row(bucket: str, provider: str, account: str, r: Reading) -> tuple[object, ...]:
+    return (bucket, provider, account, r.window, r.status, r.used, r.resets_at, r.at, r.source)
+
+
+def _higher(a: float | None, b: float | None) -> float | None:
+    if a is None:
+        return b
+    return a if b is None else max(a, b)
+
+
+def _resolve(existing: Reading | None, incoming: Reading, max_at: float) -> Reading:
+    """Keep the safer reading for one window: replace stale/far-future rows, keep worse status on equal `at`,
+    and never let a bare `allowed` (no used, no reset) erase an active `rejected` row."""
+    if existing is None or existing.at > max_at or stale(existing, incoming.at):
+        return incoming
+    if incoming.at < existing.at:
+        return existing
+    if incoming.at == existing.at:
+        status = worse(existing.status, incoming.status)
+        source = incoming.source if incoming.status == status else existing.source
+        return Reading(incoming.window, status, _higher(existing.used, incoming.used),
+                       _higher(existing.resets_at, incoming.resets_at), incoming.at, source)
+    if (existing.status == "rejected" and incoming.status == "allowed"
+            and incoming.used is None and incoming.resets_at is None):
+        return existing
+    return incoming
 
 
 def save(store: Store, bucket: str, readings: Iterable[Reading], now: float | None = None) -> None:
-    """Keep each reading as its window's latest for this login, unless a newer one is already kept."""
+    """Keep each reading as its window's latest for this login, unless a newer or safer one holds."""
     if store.read_only:
         raise RuntimeError("Store is read-only")
     provider, account = split(bucket)
     max_at = (time.time() if now is None else now) + MAX_FUTURE_AT_S
-    rows = [(*_row(bucket, provider, account, r, max_at), max_at) for r in readings]
-    if not rows:
+    cleaned = [_clean(r, max_at) for r in readings]
+    if not cleaned:
         return
     with store._tx(write=True) as db:
-        db.executemany(UPSERT, rows)
+        rows = db.execute(f"SELECT {COLUMNS} FROM quota_windows WHERE bucket = ?", (bucket,)).fetchall()
+        current_by_win: dict[str, Reading | None] = {str(row["window"]): _reading(row) for row in rows}
+        changed: dict[str, Reading] = {}
+        for r in cleaned:
+            prev = current_by_win.get(r.window)
+            merged = _resolve(prev, r, max_at)
+            if prev is None or merged != prev:
+                current_by_win[r.window] = merged
+                changed[r.window] = merged
+        if changed:
+            db.executemany(REPLACE, [_row(bucket, provider, account, r) for r in changed.values()])
 
 
 def _reading(row: sqlite3.Row) -> Reading | None:
@@ -177,12 +208,10 @@ def _coho_reading(name: str, entry: object) -> Reading | None:
     return Reading(str(window), status, used, resets, at, "coho")
 
 
-def _newest_per_window(items: Iterable[Reading]) -> tuple[Reading, ...]:
+def _newest_per_window(items: Iterable[Reading], max_at: float) -> tuple[Reading, ...]:
     kept: dict[str, Reading] = {}
     for r in items:
-        prev = kept.get(r.window)
-        if prev is None or r.at >= prev.at:
-            kept[r.window] = r
+        kept[r.window] = _resolve(kept.get(r.window), r, max_at)
     return tuple(kept.values())
 
 
@@ -205,6 +234,6 @@ def seed_from_coho(store: Store, bucket: str, path: Path | None = None, now: flo
     max_at = when + MAX_FUTURE_AT_S
     valid = (r for r in (_coho_reading(str(k), v) for k, v in windows.items())
              if r is not None and r.at <= max_at and not stale(r, when))
-    seeds = _newest_per_window(valid)
+    seeds = _newest_per_window(valid, max_at)
     save(store, bucket, seeds, now=when)
     return len(seeds)

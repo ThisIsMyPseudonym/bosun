@@ -66,6 +66,30 @@ def test_far_future_at_is_rejected_and_stale_or_future_rows_are_replaced(store, 
     assert ledger.readings(store, "gemini") == ()
 
 
+def test_equal_at_keeps_worse_status_and_bare_allowed_never_clears_active_rejection(store):
+    # Equal `at`: rejected beats allowed regardless of arrival order
+    ledger.save(store, "claude", (R("five_hour", "rejected", 1.0, NOW + 3600, NOW),), now=NOW)
+    ledger.save(store, "claude", (R("five_hour", "allowed", 0.2, NOW + 3600, NOW),), now=NOW)
+    assert ledger.readings(store, "claude")[0].status == "rejected"
+
+    ledger.save(store, "codex", (R("five_hour", "allowed", 0.2, NOW + 3600, NOW),), now=NOW)
+    ledger.save(store, "codex", (R("five_hour", "allowed_warning", 0.8, NOW + 3600, NOW),), now=NOW)
+    assert ledger.readings(store, "codex")[0].status == "allowed_warning"
+
+    # A newer bare `allowed` (no used, no reset) must not replace a stored `rejected` row before its reset
+    ledger.save(store, "claude", (R("five_hour", "allowed", None, None, NOW + 10),), now=NOW + 10)
+    assert ledger.readings(store, "claude") == (R("five_hour", "rejected", 1.0, NOW + 3600, NOW),)
+
+    # Once the reset has arrived, even a bare `allowed` replaces the stale rejection
+    ledger.save(store, "claude", (R("five_hour", "allowed", None, None, NOW + 3600),), now=NOW + 3600)
+    assert ledger.readings(store, "claude") == (R("five_hour", "allowed", None, None, NOW + 3600),)
+
+    # A newer `allowed` with an actual figure or reset does replace an active rejection
+    ledger.save(store, "grok", (R("five_hour", "rejected", 1.0, NOW + 3600, NOW),), now=NOW)
+    ledger.save(store, "grok", (R("five_hour", "allowed", 0.1, NOW + 3600, NOW + 10),), now=NOW + 10)
+    assert ledger.readings(store, "grok") == (R("five_hour", "allowed", 0.1, NOW + 3600, NOW + 10),)
+
+
 def test_every_login_is_read_back_with_its_source_and_unknowns_kept_unknown(store):
     ledger.save(store, "claude", (R("five_hour", "allowed_warning", None, None, NOW),))
     ledger.save(store, "antigravity", (R("quota:flash", "allowed", 0.2, NOW + 60, NOW, "probe"),))
