@@ -132,7 +132,9 @@ def requested_model(argv: list[str]) -> str:
 
 def record(purpose: str, *, outcome: str, usage: Usage | None = None, model: str = "", item_key: str = "",
            project: str = "", duration_ms: float | None = None, api_ms: float | None = None, turns: int | None = None,
-           prompt_chars: int | None = None, session_id: str = "", error: str = "", **attrs: Any) -> None:
+           prompt_chars: int | None = None, session_id: str = "", error: str = "", provider: str = "claude",
+           account: str = "default", job: str = "", window_draw: float | None = None, estimated: bool = False,
+           **attrs: Any) -> None:
     u = usage or Usage()
     attrs_json = json.dumps(trace.redact.value(attrs), default=str)
     if len(attrs_json) > 4000:  # keep valid JSON so llm_usage() never chokes on a truncated row
@@ -140,16 +142,18 @@ def record(purpose: str, *, outcome: str, usage: Usage | None = None, model: str
     trace._write(
         "INSERT INTO llm_calls (ts, trace_id, span_id, purpose, item_key, project, model, models, input_tokens, "
         "output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, duration_ms, api_ms, turns, prompt_chars, "
-        "outcome, error, session_id, attrs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "outcome, error, session_id, attrs, provider, account, job, window_draw, estimated) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (time.time(), trace.current_trace_id(), trace.current_span_id(), purpose, item_key, project, model,
          json.dumps(u.models), u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
          round(u.cost_usd, 6), duration_ms, api_ms, turns, prompt_chars, outcome, trace.redact.text(error)[:500],
-         session_id, attrs_json))
+         session_id, attrs_json, provider, account, job or purpose, window_draw, int(bool(estimated))))
 
 
 def record_report(purpose: str, report: dict[str, Any] | None, *, outcome: str, model: str = "", error: str = "",
                   took_ms: float | None = None, prompt_chars: int | None = None, item_key: str = "", project: str = "",
-                  **attrs: Any) -> Usage:
+                  provider: str = "claude", account: str = "default", job: str = "",
+                  window_draw: float | None = None, estimated: bool = False, **attrs: Any) -> Usage:
     """One llm_calls row from what Claude Code reported about a call: the JSON envelope of `claude -p`, or the same
     fields from the Agent SDK's final message. None when it never got that far."""
     report = report or {}
@@ -157,7 +161,8 @@ def record_report(purpose: str, report: dict[str, Any] | None, *, outcome: str, 
     record(purpose, outcome=outcome, usage=usage, model=model, item_key=item_key, project=project,
            duration_ms=report.get("duration_ms") or (round(took_ms, 1) if took_ms is not None else None),
            api_ms=report.get("duration_api_ms"), turns=report.get("num_turns"), prompt_chars=prompt_chars,
-           session_id=report.get("session_id") or "", error=error, **attrs)
+           session_id=report.get("session_id") or "", error=error, provider=provider, account=account,
+           job=job or purpose, window_draw=window_draw, estimated=estimated, **attrs)
     return usage
 
 
