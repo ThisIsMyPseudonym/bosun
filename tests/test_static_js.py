@@ -721,3 +721,115 @@ def test_triage_buttons_look_deeper_disabled_provenance_and_related_seen():
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
 
+
+def test_today_shows_verdict_cause_step_button_and_rescan_fallback_without_innerhtml():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    src = (STATIC / "today.js").read_text(encoding="utf-8")
+    assert "innerHTML" not in code_only(src)
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    today_js = str(STATIC / "today.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.location = {{ hash: "#/" }};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    let openedRunbook = "", rendered = 0;
+    const apiCalls = [];
+    MC.api = async (path, opts) => {{
+      apiCalls.push({{ path, opts }});
+      if (path === "/api/terminal/run") throw new Error("recipe vanished");
+      return {{}};
+    }};
+    MC.render = () => {{ rendered += 1; }};
+    MC.banner = () => {{}};
+    MC.runHref = (id) => "#/runs/" + id;
+    MC.triageHelpers = {{ openRunbook: (topic) => {{ openedRunbook = topic; }} }};
+    MC.actions = {{ open: () => {{}}, upgrade: () => {{}}, upgradeKeys: () => {{}}, copyPrompt: () => {{}}, relaunch: () => {{}}, openUpdates: () => {{}}, showActivity: () => {{}}, setAutopilot: () => {{}} }};
+    eval(fs.readFileSync({json.dumps(today_js)}, "utf8"));
+
+    if (!MC.todayHelpers) throw new Error("MC.todayHelpers missing");
+    const mkPkg = (key, name) => ({{
+      key, name, installed: "1.0", available: "2.0", lane: "now", risk: 8, kev: false,
+      members: [{{ key, name, installed: "1.0", available: "2.0", lane: "now", risk: 8, source: "brew", upgradable: true }}],
+    }});
+    const S = {{ snapTs: 100, autopilot: {{ on: false, queued: [], waiting: [] }}, jobs: [] }};
+
+    // 1. Runbook verdict shows cause (escaped as text) and Open guide button
+    S.jobs = [{{
+      id: 1, item_key: "brew:jq", status: "failed", finished: 200, trace_id: "aa11bb22", hint: "See the output",
+      triage: {{
+        status: "done", source: "rules", category: "permissions",
+        cause: "Folder <img onerror=alert(1)> not writable.", confidence: "high",
+        next_step: {{ kind: "runbook", recipe: null, runbook: "homebrew-permissions", why: "Fix ownership." }},
+      }},
+    }}];
+    const e1 = MC.todayHelpers.machineEntry(S, mkPkg("brew:jq", "jq"));
+    if (e1.line !== "Folder <img onerror=alert(1)> not writable." || e1.verb !== "Open guide") {{
+      throw new Error("bad runbook entry: " + JSON.stringify(e1));
+    }}
+    e1.act();
+    if (openedRunbook !== "homebrew-permissions") throw new Error("expected openRunbook call");
+
+    // 2. None verdict shows "Nothing to do" status with no action button
+    S.jobs = [{{
+      id: 2, item_key: "brew:rg", status: "failed", finished: 200, trace_id: "bb22cc33",
+      triage: {{
+        status: "done", source: "rules", category: "already_current",
+        cause: "App updates itself.", confidence: "high",
+        next_step: {{ kind: "none", recipe: null, runbook: null, why: "Nothing to do." }},
+      }},
+    }}];
+    const e2 = MC.todayHelpers.machineEntry(S, mkPkg("brew:rg", "rg"));
+    if (e2.line !== "App updates itself." || e2.verb || e2.status !== "Nothing to do") {{
+      throw new Error("bad none entry: " + JSON.stringify(e2));
+    }}
+
+    // 3. Recipe verdict whose action refuses switches the card to Re-scan
+    S.jobs = [{{
+      id: 3, item_key: "apt:curl", status: "failed", finished: 200, trace_id: "cc33dd44",
+      triage: {{
+        status: "done", source: "rules", category: "busy_or_locked",
+        cause: "dpkg was interrupted.", confidence: "high",
+        next_step: {{ kind: "recipe", recipe: "dpkg-configure", runbook: null, why: "Finish dpkg." }},
+      }},
+    }}];
+    const e3 = MC.todayHelpers.machineEntry(S, mkPkg("apt:curl", "curl"));
+    if (e3.verb !== "Run fix") throw new Error("expected Run fix, got " + e3.verb);
+    (async () => {{
+      await e3.act();
+      const after = MC.todayHelpers.machineEntry(S, mkPkg("apt:curl", "curl"));
+      if (after.verb !== "Re-scan" || !after.line.includes("Re-scan")) {{
+        throw new Error("expected Re-scan fallback after refusal, got: " + JSON.stringify(after));
+      }}
+      console.log("OK");
+    }})().catch((err) => {{ console.error(err); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+

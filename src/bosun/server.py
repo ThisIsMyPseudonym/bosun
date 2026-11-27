@@ -690,9 +690,32 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             log.warning("explain failed for %s: %s", body.keys[0], exc)
             raise Failed(f"Assessment failed: {exc}")
 
+    def _job_triage_summary(trace_id: str | None) -> dict | None:
+        if not trace_id:
+            return None
+        row = tstore.get_by_trace(store, trace_id)
+        if row is None or row.get("status") != "done" or not row.get("verdict"):
+            return None
+        v = row["verdict"]
+        return {
+            "status": row["status"],
+            "source": row["source"],
+            "category": v["category"],
+            "cause": v["cause"],
+            "confidence": v["confidence"],
+            "next_step": v["next_step"],
+        }
+
     @actions.bind("list_jobs")
     def jobs(ctx: ActionContext, body: Empty):
-        return [{**j, "hint": failure_hint(j["item_key"], j["output"]) if j["status"] == "failed" else ""} for j in store.jobs()]
+        return [
+            {
+                **j,
+                "hint": failure_hint(j["item_key"], j["output"]) if j["status"] == "failed" else "",
+                "triage": _job_triage_summary(j.get("trace_id")) if j["status"] == "failed" else None,
+            }
+            for j in store.jobs()
+        ]
 
     @actions.bind("cancel_job")
     def cancel_job(ctx: ActionContext, body: JobIn):
