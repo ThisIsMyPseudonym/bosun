@@ -38,7 +38,7 @@ from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff,
                registry, relaunch, selfupdate, status as status_mod, takeover, terminal, trace)
 from . import appguard, goback  # noqa: E402
 from . import approvals as approving
-from .assistant import Assistant
+from .assistant import ApprovalDeclined, Assistant
 from .actions import ATTENDED, UnsafeItem, Upgrader, failure_hint
 from .enrich.explain import Explainer
 from .enrich.exposure import REACH_EXPLAIN, REACH_LABEL, impact, profile, reach
@@ -1021,17 +1021,17 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     unbound = actions.unbound()
     if unbound:  # the contract test catches this too; failing at startup beats a 404 for one button
         raise RuntimeError(f"actions declared but not bound: {', '.join(unbound)}")
-    mount_actions(app, actions)
+    mount_actions(app, actions, assistant=assistant)
     return app
 
 
-def mount_actions(app: FastAPI, actions: Actions) -> None:
+def mount_actions(app: FastAPI, actions: Actions, assistant: Assistant | None = None) -> None:
     """One HTTP route per action, from its spec. Errors keep FastAPI's shapes: 422 for bad input, {detail} otherwise."""
     for spec in actions.specs.values():
-        app.add_api_route(spec.path, _endpoint(actions, spec), methods=[spec.method], include_in_schema=False)
+        app.add_api_route(spec.path, _endpoint(actions, spec, assistant), methods=[spec.method], include_in_schema=False)
 
 
-def _endpoint(actions: Actions, spec: ActionSpec):
+def _endpoint(actions: Actions, spec: ActionSpec, assistant: Assistant | None = None):
     async def endpoint(request: Request):
         if spec.method == "GET":
             payload: dict[str, object] = dict(request.query_params)
@@ -1050,6 +1050,17 @@ def _endpoint(actions: Actions, spec: ActionSpec):
             body = actions.validate(spec.name, {**payload, **request.path_params})
         except ValidationError as exc:
             raise RequestValidationError(exc.errors(include_url=False))
+        grant = getattr(request.state, "assistant_grant", None)
+        if grant is not None and assistant is not None:
+            token = getattr(request.state, "assistant_token", "")
+            try:
+                result, tid = await run_in_threadpool(assistant.run_mcp_action, grant, spec, body, token)
+            except ApprovalDeclined as exc:
+                raise HTTPException(exc.status, exc.detail)
+            except ActionError as exc:
+                raise HTTPException(exc.status, exc.message)
+            headers = {TRACE_HEADER: tid} if tid else None
+            return JSONResponse(jsonable_encoder(result), status_code=spec.status_code, headers=headers)
         # the guard (create_app's _refuse_agent) names an agent; anyone else it let through is you, in the browser
         ctx = ActionContext(actor=getattr(request.state, "actor", "user"), surface=getattr(request.state, "surface", "http"))
         # an action that changes something is a run: say which, so whoever asked can follow it (wait_run, the Runs page)

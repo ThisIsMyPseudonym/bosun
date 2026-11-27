@@ -19,7 +19,6 @@ so a conversation survives restarts and can move between logins or providers wit
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 import time
@@ -32,24 +31,21 @@ import mcp_types as types
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, CLINotFoundError  # noqa: F401
 from pydantic import BaseModel
 
-from . import auth, llm, mcp_server, redact, trace
-from .approvals import Approval, Approvals
+from . import auth, llm, redact, trace
+from .approvals import Approvals
 from .assistant_prompt import (DECLINED, HISTORY_CHARS, HISTORY_RESULT_CHARS, MAX_STEPS, NOT_LOGGED_IN, PREFIX,  # noqa: F401
                                SERVER, SYSTEM, TOOL_TIMEOUT_MS, GuideIn, Turn, _record, compose, helpers, read_guide,
                                tool_names)
+from .assistant_tools import RESULT_CHARS, SHOWN_CHARS, STORED_CHARS, ApprovalDeclined, ToolRunner  # noqa: F401
 from .config import Settings
 from .providers import accounts, catalog, ledger, limits, quota, router, routing, run as provider_run, windows
 from .providers.engines import AssistantEngine, ClaudeSdkEngine, Connect, TurnReport
-from .registry import (ASSISTANT, ActionContext, ActionError, Actions, ActionSpec, AskIn, Conflict, Forbidden, NotFound,
-                       Risk, TraceIn)
+from .registry import Actions, ActionSpec, AskIn, Conflict, NotFound
 from .store import Store
 
 log = logging.getLogger(__name__)
 
 MAX_RUNNING = 3  # turns at once, across conversations: each is a CLI process
-RESULT_CHARS = 30_000  # of one tool result given to the model: a panel answer shouldn't cost a whole refresh's trace
-STORED_CHARS = 4_000  # of a tool result kept in messages
-SHOWN_CHARS = 1_500  # of a tool result sent to the panel
 STOP_GRACE_S = 5.0  # after Stop: how long the CLI gets to report what the turn used before it is cancelled
 
 
@@ -65,6 +61,7 @@ class Assistant:
         self._turns: dict[str, Turn] = {}
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="assistant-tool")
+        self._tools = ToolRunner(store, actions, approvals, self.tokens, self._pool)
 
     # --- what the panel calls (through the registry's assistant_* actions) -----------------------------------------
     def ask(self, body: AskIn) -> dict[str, Any]:
@@ -135,6 +132,12 @@ class Assistant:
                 raise NotFound("No such conversation (it may have been deleted)")
         return {"deleted": conversation_id}
 
+    def run_mcp_action(self, grant: auth.TokenGrant, spec: ActionSpec, body: BaseModel, token: str) -> tuple[Any, str]:
+        """Run an action called over loopback HTTP by `bosun mcp --as assistant`."""
+        cand = self._turns.get(grant.conversation_id)
+        turn = cand if cand is not None and cand.number == grant.turn else None
+        return self._tools.run_mcp_action(grant, turn, spec, body, token)
+
     def _running(self, conversation_id: str) -> bool:
         turn = self._turns.get(conversation_id)
         return turn is not None and not turn.done
@@ -184,7 +187,7 @@ class Assistant:
     def options(self, turn: Turn, stderr: list[str] | None = None) -> ClaudeAgentOptions:
         """Everything the model is given on the Claude SDK path. Tests assert on this."""
         async def call(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
-            return await self._call_tool(turn, name, arguments)
+            return await self._tools.call_sdk_tool(turn, name, arguments)
 
         return self._sdk_engine(self.model).options(call, stderr)
 
@@ -244,7 +247,7 @@ class Assistant:
         result: TurnReport | None = None
 
         async def call_tool(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
-            return await self._call_tool(turn, name, arguments)
+            return await self._tools.call_sdk_tool(turn, name, arguments)
 
         with trace.span("llm", "assistant", model=model, provider=cand.provider, account=cand.login.id,
                         prompt_chars=len(prompt)) as sp:
@@ -318,91 +321,3 @@ class Assistant:
                 await turn.engine.stop()
             except Exception:  # it was already going away
                 pass
-
-    # --- tools -----------------------------------------------------------------------------------------------------
-    async def _call_tool(self, turn: Turn, name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
-        """One tool call from the model. Reads run; anything else waits for the user's answer first."""
-        checked = mcp_server.check(name, arguments, helpers())
-        if isinstance(checked, types.CallToolResult):
-            return checked
-        spec, body = checked
-        approval: Approval | None = None
-        # a user-only action gets no card: permit refuses it whatever anyone clicks, and says where to do it
-        if spec is not None and spec.risk != Risk.READ and not spec.user_only:
-            approval = await self._ask_approval(turn, spec, body)
-            if approval.state != "approved":
-                return mcp_server.frame(name, False, {
-                    "not_run": DECLINED[approval.state], "reason": approval.reason or None})
-        return await turn.offload(self._run_tool, turn, name, spec, body, approval.id if approval else None)
-
-    async def _ask_approval(self, turn: Turn, spec: ActionSpec, body: BaseModel) -> Approval:
-        asked = self.approvals.request(spec.name, body, turn.conversation_id)
-        risk = spec.risk.name.lower()
-        row = self.store.add_message(turn.conversation_id, turn.number, "approval", tool=spec.name, input=asked.input,
-                                     outcome="pending", risk=risk, approval_id=asked.id)
-        turn.emit("approval", id=asked.id, message_id=row, tool=spec.name, summary=spec.summary,
-                  tier=mcp_server.TIER_PLAIN[spec.risk], risk=risk, input=redact.value(asked.input),
-                  items=self._items(asked.input), expires=asked.expires)
-        assert turn.loop is not None
-        try:
-            answer = await turn.loop.run_in_executor(self._pool, self.approvals.wait, asked.id)
-        except asyncio.CancelledError:  # Stop can end the turn before the wait hands back its answer: close the card
-            self.approvals.stop(turn.conversation_id)
-            answer = self.approvals.get(asked.id) or asked
-            self._approval_done(turn, row, answer)
-            raise
-        self._approval_done(turn, row, answer)
-        return answer
-
-    def _approval_done(self, turn: Turn, row: int, answer: Approval) -> None:
-        self.store.update_message(row, outcome=answer.state, text=answer.reason)
-        turn.emit("approval_done", id=answer.id, outcome=answer.state, reason=redact.text(answer.reason))
-
-    def _items(self, args: dict[str, Any]) -> list[dict[str, Any]]:
-        """What an approval is about, by name and version: the card shows these, not just keys."""
-        keys = list(args.get("keys") or ([args["key"]] if isinstance(args.get("key"), str) else []))
-        if isinstance(args.get("fix_id"), int):
-            fix = self.store.fix(args["fix_id"])
-            keys += [fix["item_key"]] if fix else []
-        known = {i["key"]: i for i in (self.store.latest_snapshot() or {}).get("items", [])} if keys else {}
-        return [{"key": k, "name": known[k].get("name"), "installed": known[k].get("installed"),
-                 "available": known[k].get("available")} if k in known else {"key": k, "unknown": True}
-                for k in keys[:50]]
-
-    def _run_tool(self, turn: Turn, name: str, spec: ActionSpec | None, body: BaseModel,
-                  approval_id: str | None) -> types.CallToolResult:
-        """Run one checked call as the assistant and write down what happened. In a worker thread, so a call that
-        has started is recorded to its end even if the turn is stopped meanwhile."""
-        ctx = ActionContext(actor=ASSISTANT, surface="assistant", approval=approval_id)
-        changes = spec is not None and spec.risk != Risk.READ
-        args = body.model_dump(mode="json", exclude_defaults=True)
-        risk = spec.risk.name.lower() if spec else "read"
-        row = self.store.add_message(turn.conversation_id, turn.number, "tool", tool=name, input=args, outcome="running",
-                                     risk=risk, trace_id=ctx.trace_id if changes else "", approval_id=approval_id or "")
-        turn.emit("tool", id=row, name=name, input=redact.value(args), risk=risk)
-        try:
-            payload = self._helper(name, body, ctx) if spec is None else self.actions.run(name, body, ctx)
-            ok, outcome = True, "ok"
-        except ActionError as exc:
-            ok, payload, outcome = False, exc.message, "refused" if isinstance(exc, Forbidden) else "error"
-        except Exception as exc:
-            log.exception("assistant tool %s failed", name)
-            ok, payload, outcome = False, f"Bosun hit an internal error ({exc.__class__.__name__})", "error"
-        text = redact.text(payload if isinstance(payload, str) else json.dumps(payload, default=str))
-        self.store.update_message(row, outcome=outcome, text=text, max_chars=STORED_CHARS)
-        turn.emit("tool_result", id=row, ok=ok, outcome=outcome, trace_id=ctx.trace_id if changes else "",
-                  result=text[:SHOWN_CHARS])
-        return mcp_server.frame(name, ok, payload, ctx.trace_id if changes else None, limit=RESULT_CHARS)
-
-    def _helper(self, name: str, body: BaseModel, ctx: ActionContext) -> Any:
-        if name == mcp_server.WAIT_RUN:
-            def fetch() -> dict | None:
-                try:
-                    return self.actions.run("get_trace", TraceIn(trace_id=body.trace_id), ctx)  # type: ignore[attr-defined]
-                except NotFound:
-                    return None
-            progress = mcp_server.follow(fetch, body.timeout_s)  # type: ignore[attr-defined]
-            if progress is None:
-                raise NotFound("No run with that id (or the prefix matches more than one)")
-            return progress
-        return read_guide(body.topic)  # type: ignore[attr-defined]

@@ -270,5 +270,83 @@ def test_cli_mcp_accepts_as_assistant_flag(monkeypatch, tmp_path):
     assert called[-1][0] == "agent"
 
 
+def test_mcp_assistant_approval_approve_decline_replay_and_user_only(panel):
+    import concurrent.futures
+    import json
+    from fastapi.testclient import TestClient
+
+    from assistant_panel import BASE, JQ
+    from bosun import mcp_server
+    from bosun.registry import ActionContext, Forbidden, KeysIn
+    import pytest
+
+    cid = "a" * 32
+    panel.store.create_conversation(cid, "mcp approvals", "codex")
+    turn_num = panel.store.note_turn(cid, started=True)
+    turn = panel.assistant._turns[cid] = __import__("bosun.assistant", fromlist=["Turn"]).Turn(cid, turn_num)
+    tok = panel.app.state.assistant_tokens.issue(cid, turn_num)
+    dash = mcp_server.Dashboard(
+        panel.settings,
+        http=TestClient(panel.app, base_url=BASE),
+        up=lambda: True,
+        sleep=lambda _s: None,
+        as_role="assistant",
+        assistant_token=tok,
+    )
+
+    def _call(name, args):
+        res = mcp_server.dispatch(dash, name, args)
+        return res, json.loads(res.content[0].text)
+
+    # 1. User-only action: refused immediately with NO approval card
+    res_uo, body_uo = _call("set_autopilot", {"on": True})
+    assert res_uo.is_error and "only be done by you" in body_uo["error"]
+    assert not [k for k, _ in turn.events if k == "approval"]
+    assert panel.store.setting("autopilot") in (None, "0")
+
+    # 2. Decline: raises approval card, blocks until user declines, nothing runs
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_call, "upgrade", {"keys": [JQ]})
+        card = panel.wait(cid, "approval")[-1][1]
+        assert card["tool"] == "upgrade" and card["input"] == {"keys": [JQ]} and panel.upgrades == []
+        assert panel.decide(card["id"], False, "not now").status_code == 200
+        res_dec, body_dec = fut.result(timeout=5)
+    assert res_dec.is_error and "declined" in body_dec["error"] and panel.upgrades == []
+
+    # 3. Approve: raises a new card, blocks until user approves, runs ONCE with spent approval
+    seen_before = len(turn.events)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_call, "upgrade", {"keys": [JQ]})
+        card2 = panel.wait(cid, "approval", after=seen_before)[-1][1]
+        assert card2["id"] != card["id"] and panel.upgrades == []
+        assert panel.decide(card2["id"], True).status_code == 200
+        res_ok, body_ok = fut.result(timeout=5)
+    assert not res_ok.is_error and body_ok["ok"] and len(body_ok["trace_id"]) == 32
+    assert panel.upgrades == [(JQ, False)]
+    audit_row = panel.audit("upgrade")[-1]
+    assert (audit_row["actor"], audit_row["surface"], audit_row["approved_by"], audit_row["approval_id"]) == (
+        "assistant", "assistant", "user", card2["id"]
+    )
+    # Messages table recorded both approval cards and the tool execution
+    cards = [m for m in panel.conversation(cid)["messages"] if m["role"] == "approval"]
+    assert [(c["outcome"], c["text"]) for c in cards] == [("declined", "not now"), ("approved", "")]
+
+    # 4. Replaying with the spent approval fails in permit
+    with pytest.raises(Forbidden):
+        panel.actions.run("upgrade", KeysIn(keys=[JQ]),
+                          ActionContext(actor="assistant", surface="assistant", approval=card2["id"]))
+
+    # 5. Replaying the HTTP call after approval TTL expires (unanswered) is refused, and after token revoke is 401
+    panel.approvals.ttl_s = 0.05
+    res_exp, body_exp = _call("upgrade", {"keys": [JQ]})
+    assert res_exp.is_error and "declined" in body_exp["error"] and panel.upgrades == [(JQ, False)]
+
+    panel.app.state.assistant_tokens.revoke(tok)
+    res_rev, body_rev = _call("upgrade", {"keys": [JQ]})
+    assert res_rev.is_error and "invalid or expired assistant token" in body_rev["error"]
+    assert panel.upgrades == [(JQ, False)]
+
+
+
 
 
