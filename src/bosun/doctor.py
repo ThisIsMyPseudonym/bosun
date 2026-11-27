@@ -3,7 +3,8 @@
 It only looks. It never creates the data folder or the database, starts the dashboard, installs a service or
 downloads a tool, so it is safe to run on a machine where Bosun isn't set up yet (that is when it is most useful).
 The one thing it reads from an existing database, opened read-only, is each AI CLI's cached contract verdict; it
-asks the CLIs themselves only `--version` and `--help`, never a prompt.
+asks the CLIs themselves only `--version`, `--help` and, for Codex, `codex features list`, never a prompt
+(up to a minute per CLI on a cold cache, one after another).
 Everything it asks the machine goes through `Probe`, so a test can describe a machine without having one.
 """
 

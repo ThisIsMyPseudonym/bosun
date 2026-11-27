@@ -318,8 +318,8 @@ def describe(store: Store, login: Login, status: contract.ContractStatus | None 
         version = None
     else:
         if status is _UNSET:
-            status = contract.cached(store, login.provider, login.binary)
-            if status is None:
+            status = contract.cached(store, login.provider, login.binary, stale_ok=True)
+            if status is None or contract.due(login.binary):
                 contract.refresh_async(store, [(login.provider, login.binary)])
         if isinstance(status, contract.ContractStatus):
             version, verdict = status.version, {"ok": status.ok, "finding": status.finding}
@@ -334,8 +334,8 @@ def overview(store: Store) -> dict[str, Any]:
     """Every installed CLI's logins, and each catalog CLI: installed, and whether it can hold more logins.
     Serves cached contract verdicts immediately and refreshes any missing entries in the background."""
     found = installed()
-    statuses = {p: contract.cached(store, p, binary) for p, binary in found.items()}
-    missing = [(p, binary) for p, binary in found.items() if statuses[p] is None]
+    statuses = {p: contract.cached(store, p, binary, stale_ok=True) for p, binary in found.items()}
+    missing = [(p, binary) for p, binary in found.items() if statuses[p] is None or contract.due(binary)]
     if missing:
         contract.refresh_async(store, missing)
     clis = [{"provider": p, "label": s.label, "installed": p in found, "can_add": s.home_env is not None,

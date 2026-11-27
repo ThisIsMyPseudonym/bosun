@@ -38,6 +38,10 @@ def test_every_lockdown_flag_bosun_requires_is_passed_and_every_long_flag_is_che
         assert flag in inv.argv, flag
     emitted_long = {a for a in inv.argv if a.startswith("--")}
     assert emitted_long <= lockdown, f"{provider} emits unchecked long flags: {sorted(emitted_long - lockdown)}"
+    # Short flags too (Claude's and Gemini's `-p` is what makes the call headless). `-m` only picks a model: if
+    # it were renamed the call would fail, never run with its tools on.
+    emitted_short = {a for a in inv.argv if len(a) == 2 and a[0] == "-" and a[1].isalpha()} - {"-m"}
+    assert emitted_short <= lockdown, f"{provider} emits unchecked short flags: {sorted(emitted_short - lockdown)}"
     assert not any("SECRET-PROMPT" in a for a in inv.argv)
     assert inv.argv[0] == provider and "m" in inv.argv
     assert all(f.parent == tmp_path and f.exists() for f in inv.files)

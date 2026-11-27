@@ -186,6 +186,19 @@ def test_overview_serves_cached_state_immediately_and_refreshes_in_background(st
     assert warm["claude"]["version"] == "2.1.332" and warm["claude"]["contract"] == {"ok": True, "finding": ""}
     assert warm["codex"]["version"] == "0.172.0" and warm["codex"]["contract"] == {"ok": True, "finding": ""}
 
+    # Ten minutes on, the version check is due: the page still shows the last verdict, not "checking", while a
+    # background refresh asks again
+    for key, (at, version) in list(contract._versions.items()):
+        contract._versions[key] = (at - contract.VERSION_TTL - 1, version)
+    started.clear(); release.clear(); calls.clear()
+    monkeypatch.setattr(proc, "run", blocking_run)
+    third = {lg["bucket"]: lg for lg in accounts.overview(store)["logins"]}
+    assert third["claude"]["contract"] == {"ok": True, "finding": ""} and third["claude"]["version"] == "2.1.332"
+    assert started.wait(timeout=2)
+    release.set()
+    contract.wait_pending(timeout=5)
+    assert any(c[-1] == "--version" for c in calls)
+
 
 @pytest.mark.real_contract
 def test_overview_end_to_end_surfaces_a_failing_contract_verdict(store, monkeypatch):

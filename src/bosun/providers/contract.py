@@ -183,15 +183,22 @@ def _status_from_cache(provider: str, version: str, found: dict[str, Any]) -> Co
     return ContractStatus(provider, version, found.get("ok") is True, missing, str(found.get("finding") or ""))
 
 
-def cached(store: Store | None, provider: str, binary: str,
-           now: Callable[[], float] = time.time) -> ContractStatus | None:
-    """The cached verdict for `binary` without starting a subprocess; None on a cold or expired cache."""
+def due(binary: str, now: Callable[[], float] = time.time) -> bool:
+    """Whether `binary`'s version should be asked again: never asked, or asked too long ago."""
+    known = _versions.get(_binary_key(binary))
+    return known is None or now() - known[0] >= (VERSION_TTL if known[1] is not None else UNREADABLE_TTL)
+
+
+def cached(store: Store | None, provider: str, binary: str, now: Callable[[], float] = time.time,
+           stale_ok: bool = False) -> ContractStatus | None:
+    """The cached verdict for `binary` without starting a subprocess; None on a cold cache, or on an expired one
+    unless `stale_ok` (the dashboard shows the last verdict while `refresh_async` asks again)."""
     s, at = spec(provider), now()
     known = _versions.get(_binary_key(binary))
     if known is None:
         return None
     checked_at, version = known
-    if at - checked_at >= (VERSION_TTL if version is not None else UNREADABLE_TTL):
+    if not stale_ok and due(binary, now=lambda: at):
         return None
     if version is None:
         return ContractStatus(provider, None, False, (), f"{s.label}: its --version could not be read")

@@ -73,7 +73,7 @@ class ProviderSpec:
     home_string_is_login: bool = False
 
 
-CLAUDE_FLAGS = ("--tools", "--disallowedTools", "--strict-mcp-config", "--setting-sources", "--no-session-persistence",
+CLAUDE_FLAGS = ("-p", "--tools", "--disallowedTools", "--strict-mcp-config", "--setting-sources", "--no-session-persistence",
                 "--json-schema", "--output-format", "--verbose", "--disable-slash-commands", "--permission-mode",
                 "--model", "--system-prompt")
 CLAUDE_FIXER_FLAGS = ("--restricted", "--permission-prompts")
@@ -82,7 +82,7 @@ CODEX_DISABLED_FEATURES = ("shell_tool", "unified_exec", "apps", "browser_use", 
                            "hooks", "skill_search", "remote_plugin", "tool_suggest", "memories")
 CODEX_FLAGS = ("--sandbox", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
                "--strict-config", "--disable", "-c", "--output-schema", "--json")
-GEMINI_FLAGS = ("--approval-mode", "--policy", "--output-format", "--allowed-mcp-server-names", "--extensions")
+GEMINI_FLAGS = ("-p", "--approval-mode", "--policy", "--output-format", "--allowed-mcp-server-names", "--extensions")
 GROK_FLAGS = ("--permission-mode", "--disable-web-search", "--tools", "--disallowed-tools", "--no-subagents",
               "--no-plan", "--no-memory", "--verbatim", "--prompt-file", "--output-format", "--json-schema",
               "--system-prompt-override")
