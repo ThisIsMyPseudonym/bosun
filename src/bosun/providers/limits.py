@@ -185,27 +185,37 @@ class Cooldowns:
         self._state: Mapping[str, Cooldown] = MappingProxyType({})
 
     def hit(self, bucket: str) -> float:
-        """A rate limit on this login: out for 30 s, doubling with each one before a success. Returns until when."""
+        """A rate limit on this login: out for 30 s, doubling only after the current cool-down expires."""
         with self._lock:
+            now = self._clock()
             prev = self._state.get(bucket)
-            step = COOLDOWN_START_S if prev is None else min(prev.step * 2, COOLDOWN_MAX_S)
-            entry = Cooldown(self._clock() + step, step)
+            if prev is not None and now < prev.until:
+                return prev.until
+            step = COOLDOWN_START_S if prev is None or prev.step <= 0 else min(prev.step * 2, COOLDOWN_MAX_S)
+            entry = Cooldown(now + step, step)
             self._state = MappingProxyType({**self._state, bucket: entry})
-        return entry.until
+            return entry.until
 
     def clear(self, bucket: str) -> None:
-        """A success on this login: the next rate limit starts at 30 s again."""
+        """A success on this login: reset the step, keeping any active cool-down until it expires."""
         with self._lock:
-            self._state = MappingProxyType({k: v for k, v in self._state.items() if k != bucket})
+            prev = self._state.get(bucket)
+            if prev is None:
+                return
+            if prev.until > self._clock():
+                self._state = MappingProxyType({**self._state, bucket: Cooldown(prev.until, 0.0)})
+            else:
+                self._state = MappingProxyType({k: v for k, v in self._state.items() if k != bucket})
 
     def until(self, bucket: str) -> float | None:
         """When this login's cool-down ends, or None when it is not cooling down."""
         with self._lock:
             entry = self._state.get(bucket)
-        return entry.until if entry is not None and entry.until > self._clock() else None
+            now = self._clock()
+        return entry.until if entry is not None and entry.until > now else None
 
     def active(self) -> frozenset[str]:
         """Every login currently cooling down."""
-        now = self._clock()
         with self._lock:
+            now = self._clock()
             return frozenset(b for b, e in self._state.items() if e.until > now)

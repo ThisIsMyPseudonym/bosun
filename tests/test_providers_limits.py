@@ -159,18 +159,28 @@ def test_a_rate_limit_cools_the_login_down_30s_doubling():
     assert cool.until("codex") is None and cool.active() == frozenset()
     assert cool.hit("codex") == NOW + 30 and cool.until("codex") == NOW + 30
     assert cool.active() == frozenset({"codex"})
-    assert cool.hit("codex") == NOW + 60
+    # Concurrent 429 during an active cool-down keeps the current `until` instead of doubling
+    clock.t = NOW + 5
+    assert cool.hit("codex") == NOW + 30
     assert cool.until("claude") is None  # per login
-    clock.t = NOW + 61
-    assert cool.until("codex") is None and cool.active() == frozenset()  # over by itself
-    assert cool.hit("codex") == NOW + 61 + 120  # still doubling: no success came in between
-    cool.clear("codex")  # a success resets the step
-    assert cool.until("codex") is None and cool.hit("codex") == NOW + 61 + 30
+    # Once the cool-down expires, the next 429 doubles the step
+    clock.t = NOW + 30
+    assert cool.until("codex") is None and cool.active() == frozenset()
+    assert cool.hit("codex") == NOW + 30 + 60
+    clock.t = NOW + 91
+    assert cool.hit("codex") == NOW + 91 + 120
+    # A late success resets the step, but never erases an active cool-down
+    cool.clear("codex")
+    assert cool.until("codex") == NOW + 91 + 120 and cool.active() == frozenset({"codex"})
+    clock.t = NOW + 91 + 120
+    assert cool.until("codex") is None and cool.hit("codex") == clock.t + 30
 
 
 def test_a_cool_down_is_capped_at_15_minutes():
-    cool = limits.Cooldowns(clock=Clock(NOW))
+    clock = Clock(NOW)
+    cool = limits.Cooldowns(clock=clock)
     for _ in range(10):
         last = cool.hit("grok@work")
-    assert last == NOW + limits.COOLDOWN_MAX_S == NOW + 900
+        clock.t = last
+    assert last == clock.t and cool.hit("grok@work") == clock.t + limits.COOLDOWN_MAX_S == clock.t + 900
     cool.clear("nobody")  # clearing a login that never cooled is fine
