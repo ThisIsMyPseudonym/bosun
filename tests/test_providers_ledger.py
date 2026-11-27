@@ -1,6 +1,8 @@
-"""The latest reading per login and window, kept in quota_windows."""
+"""The latest reading per login and window, kept in quota_windows, and a starting figure from Coho."""
 
+import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -77,3 +79,81 @@ def test_save_refuses_a_read_only_store_while_reads_still_work(tmp_path):
             ledger.save(ro, "claude", (R("five_hour", "allowed", 0.4, NOW + 60, NOW + 1),))
         with pytest.raises(RuntimeError, match="read-only"):
             ledger.save(ro, "claude", ())
+
+
+# --- Coho ---------------------------------------------------------------------------------------------------------
+
+SEEN = 1_795_700_000.0  # 2026-11-26: after the entries were read, before the reset on 2027-01-01
+
+
+def _coho(path: Path, entries: object) -> None:
+    path.write_text(json.dumps(entries))
+
+
+def test_coho_seeds_a_login_bosun_has_never_read_and_nothing_else(store, tmp_path):
+    f = tmp_path / "cli-windows.json"
+    _coho(f, {"claude": {"seven_day": {"type": "seven_day", "status": "allowed", "used": 0.6,
+                                       "resetsAt": "2027-01-01T00:00:00Z", "at": "2026-11-25T10:00:00Z"}}})
+    assert ledger.seed_from_coho(store, "claude", f, now=SEEN) == 1
+    assert ledger.readings(store, "claude") == (R("seven_day", "allowed", 0.6, 1798761600.0, 1795600800.0, "coho"),)
+    ledger.save(store, "codex", (R("five_hour", "allowed", 0.1, None, NOW),))
+    _coho(f, {"codex": {"five_hour": {"type": "five_hour", "status": "rejected", "at": "2026-11-25T10:00:00Z"}}})
+    assert ledger.seed_from_coho(store, "codex", f, now=SEEN) == 0  # Bosun's own reading wins
+    f.write_text("{not json")
+    assert ledger.seed_from_coho(store, "grok", f, now=SEEN) == 0
+    assert ledger.seed_from_coho(store, "grok", tmp_path / "missing.json", now=SEEN) == 0
+
+
+def test_coho_entries_go_through_the_same_checks_and_stale_ones_are_left_out(store, tmp_path):
+    f = tmp_path / "cli-windows.json"
+    at = "2026-11-25T10:00:00Z"
+    earlier = "2026-11-25T09:00:00Z"
+    _coho(f, {"claude@work": {
+        "five_hour": {"type": "five_hour", "status": "allowed_warning", "used": 1.7, "resetsAt": None, "at": at},
+        "five_hour_old": {"type": "five_hour", "status": "allowed", "used": 0.2, "at": earlier},  # older dup ignored
+        "seven_day": {"type": "seven_day", "status": "maybe", "used": 0.1, "at": at},  # no such status
+        "../x": {"type": "../x", "status": "allowed", "used": 0.1, "at": at},  # no such window
+        "one_day": {"type": "one_day", "status": "allowed", "used": "lots", "at": at},  # a share that isn't one
+        "seven_day_opus": {"type": "seven_day_opus", "status": "allowed", "used": 0.2, "at": at,
+                           "resetsAt": "2026-11-01T00:00:00Z"},  # past its reset: says nothing about now
+        "undated": {"status": "allowed", "used": 0.2},  # no time it was read
+        "bad_entry": "not a dict",
+    }, "codex": ["not", "a", "login"]})
+    assert ledger.seed_from_coho(store, "claude@work", f, now=SEEN) == 1
+    assert ledger.readings(store, "claude@work") == (
+        R("five_hour", "allowed_warning", 1.0, None, 1795600800.0, "coho"),)
+    assert ledger.seed_from_coho(store, "codex", f, now=SEEN) == 0
+    _coho(f, [1, 2])
+    assert ledger.seed_from_coho(store, "gemini", f, now=SEEN) == 0
+    f.write_bytes(b" " * (ledger.COHO_MAX_BYTES + 10))
+    assert ledger.seed_from_coho(store, "gemini", f, now=SEEN) == 0
+
+
+def test_cohos_file_is_found_where_coho_keeps_it(tmp_path):
+    home = tmp_path / "home"
+    assert ledger.coho_windows_path({"BOSUN_COHO_WINDOWS": "/x/w.json", "COHO_HOME": "/c"}, home) == Path("/x/w.json")
+    assert ledger.coho_windows_path({"COHO_HOME": "/c", "SIMPLEXITY_HOME": "/s"}, home) == Path("/c/cli-windows.json")
+    assert ledger.coho_windows_path({"SIMPLEXITY_HOME": "/s"}, home) == Path("/s/cli-windows.json")
+    assert ledger.coho_windows_path({}, home, "darwin") == home / "Library/Application Support/Coho/cli-windows.json"
+    assert ledger.coho_windows_path({}, home, "linux") == home / ".local/share/coho/cli-windows.json"
+    assert ledger.coho_windows_path({"XDG_DATA_HOME": "/xdg"}, home, "linux") == Path("/xdg/coho/cli-windows.json")
+    assert ledger.coho_windows_path({"LOCALAPPDATA": "/app"}, home, "win32") == Path("/app/Coho/cli-windows.json")
+    legacy = home / "Library/Application Support/Simplexity"
+    legacy.mkdir(parents=True)
+    (legacy / "cli-windows.json").write_text("{}")  # the folder from before Coho's rename, when only it has the file
+    assert ledger.coho_windows_path({}, home, "darwin") == legacy / "cli-windows.json"
+
+
+def test_seeding_never_writes_to_cohos_file_and_refuses_read_only_store(tmp_path):
+    f = tmp_path / "cli-windows.json"
+    _coho(f, {"claude": {"five_hour": {"type": "five_hour", "status": "allowed", "used": 0.3,
+                                       "at": "2026-11-25T10:00:00Z"}}})
+    f.chmod(0o444)
+    before = (f.read_bytes(), f.stat().st_mtime_ns)
+    db_path = tmp_path / "db.sqlite"
+    with Store(db_path) as rw:
+        assert ledger.seed_from_coho(rw, "claude", f, now=SEEN) == 1
+    assert (f.read_bytes(), f.stat().st_mtime_ns) == before
+    with Store(db_path, read_only=True) as ro:
+        with pytest.raises(RuntimeError, match="read-only"):
+            ledger.seed_from_coho(ro, "codex", f, now=SEEN)
