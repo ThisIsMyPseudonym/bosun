@@ -275,9 +275,50 @@ def _codex(result: proc.Result, at: float) -> Reply:
     return Reply("ok", text, text, usage, readings, "", est, "", sid)
 
 
+def _gemini(result: proc.Result, at: float) -> Reply:
+    if (pf := _proc_failure(result, estimated=True)) is not None:
+        return pf
+    stdout, stderr = result.stdout or "", result.stderr or ""
+    if result.ok and not stdout.strip():
+        return _fail("empty", "empty reply", estimated=True)
+    obj = _loads_dict(stdout)
+    if obj is None:
+        return _classify_error_text(stderr or stdout, result.returncode, at, estimated=True)
+    sid = str(obj.get("session_id") or "")
+    usage, model = llm.Usage(), ""
+    stats = obj.get("stats")
+    models = stats.get("models") if isinstance(stats, dict) else None
+    if isinstance(models, dict):
+        for name, info in models.items():
+            if not isinstance(name, str) or not isinstance(info, dict):
+                continue
+            model = model or name
+            tok = info.get("tokens")
+            if isinstance(tok, dict):
+                inp = _nonneg_int(tok.get("prompt") or tok.get("input"))
+                out = _nonneg_int(tok.get("candidates") or tok.get("output"))
+                cr = _nonneg_int(tok.get("cached"))
+                usage.models[name] = {"input": inp, "output": out, "cache_read": cr, "cache_write": 0, "cost_usd": 0.0}
+                usage.input_tokens += inp
+                usage.output_tokens += out
+                usage.cache_read_tokens += cr
+    err = obj.get("error")
+    if err or not result.ok:
+        code = _opt_int(err.get("code")) if isinstance(err, dict) else None
+        msg = (str(err.get("message") or err.get("type") or "") if isinstance(err, dict) else str(err or "")) or stderr or stdout
+        return _classify_error_text(msg, result.returncode, at, estimated=True, usage=usage, model=model, session_id=sid, code=code)
+    text = obj.get("response")
+    if not isinstance(text, str) or not text.strip():
+        return _fail("empty", "empty reply", estimated=True, usage=usage, model=model, session_id=sid)
+    if not _is_json_text(text) and (lim := limits.limit_reading(text, at)) is not None:
+        return _fail("usage_limit", text, estimated=True, usage=usage, readings=(lim,), model=model, session_id=sid)
+    return Reply("ok", text, text, usage, (), model, True, "", sid)
+
+
 PARSERS: dict[str, Callable[[proc.Result, float], Reply]] = {
     "claude": _claude,
     "codex": _codex,
+    "gemini": _gemini,
 }
 
 

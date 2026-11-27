@@ -1,0 +1,16 @@
+{
+  "session_id": "gemini-sess-1",
+  "response": "{\"headline\":\"h\",\"security_fixes\":[],\"notable_features\":[],\"breaking_changes\":[],\"upgrade_value\":\"low\",\"migration_effort\":\"none\",\"rationale\":\"r\"}",
+  "stats": {
+    "models": {
+      "gemini-3.8-flash": {
+        "tokens": {
+          "prompt": 120,
+          "candidates": 45,
+          "cached": 10,
+          "total": 165
+        }
+      }
+    }
+  }
+}

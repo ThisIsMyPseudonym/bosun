@@ -77,3 +77,15 @@ def test_codex_jsonl_gives_the_last_agent_message_tokens_and_rate_limits():
     assert lim.outcome == "usage_limit" and lim.readings[0].status == "rejected"
     assert replies.parse("codex", proc.Result(("codex",), 0, "", ""), at=at).outcome == "empty"
     assert replies.parse("codex", proc.Result(("codex",), 0, "not json", ""), at=at).outcome in ("empty", "error")
+
+
+def test_gemini_json_gives_response_and_token_stats_marked_estimated():
+    raw = (FIX / "gemini/handmade/ok-assessment.json").read_text()
+    rep = replies.parse("gemini", proc.Result(("gemini",), 0, raw, ""), at=100.0)
+    assert rep.outcome == "ok" and '"headline":"h"' in rep.text and rep.estimated and rep.readings == ()
+    assert (rep.usage.input_tokens, rep.usage.output_tokens, rep.usage.cache_read_tokens) == (120, 45, 10)
+    assert rep.model == "gemini-3.8-flash" and rep.session_id == "gemini-sess-1"
+    rl = json.dumps({"error": {"code": 429, "message": "Resource exhausted"}})
+    assert replies.parse("gemini", proc.Result(("gemini",), 1, rl, ""), at=100.0).outcome == "rate_limit"
+    assert replies.parse("gemini", proc.Result(("gemini",), 0, "{}", ""), at=100.0).outcome == "empty"
+    assert replies.parse("gemini", proc.Result(("gemini",), 0, "{broken", ""), at=100.0).outcome == "error"
