@@ -7,6 +7,7 @@ and a window with no figure has no share. Nothing here may make a login look lik
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 
 from bosun.providers.windows import Reading, window_hours
@@ -50,3 +51,15 @@ def pace(r: Reading, now: float) -> float | None:
         return None
     elapsed = 1 - (r.resets_at - now) / (hours * 3600)
     return used / min(1.0, max(MIN_ELAPSED, elapsed))
+
+
+def login_pace(readings: Iterable[Reading], now: float) -> float | None:
+    """A login is judged by its worst current window. A refused window is `inf`: balancing by pace never picks it.
+
+    None when no current window has a pace: the router ranks such a login in the middle, so it gets a turn.
+    """
+    now_readings = current(readings, now)
+    if any(r.status == "rejected" for r in now_readings):
+        return math.inf
+    paces = [p for p in (pace(r, now) for r in now_readings) if p is not None]
+    return max(paces) if paces else None

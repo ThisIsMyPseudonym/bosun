@@ -1,5 +1,7 @@
 """Staleness, share, pace, the 75% line and each call's draw on a usage window."""
 
+import math
+
 import pytest
 
 from bosun.providers import quota, windows
@@ -60,3 +62,24 @@ def test_pace_at_the_very_start_of_a_window_is_bounded():
     assert quota.pace(start, NOW) == pytest.approx(0.02 / quota.MIN_ELAPSED)
     longer = R("five_hour", "allowed", 0.5, NOW + 9 * 3600, NOW)  # a reset further off than the window is long
     assert quota.pace(longer, NOW) == pytest.approx(0.5 / quota.MIN_ELAPSED)
+
+
+# --- a login -----------------------------------------------------------------------------------------------------
+
+
+def _at_pace(window: str, p: float) -> windows.Reading:
+    """A reading halfway through its window (elapsed 0.5), so its pace is twice its share."""
+    hours = windows.window_hours(window) or 5
+    return R(window, "allowed", p / 2, NOW + hours * 1800, NOW)
+
+
+def test_login_pace_is_the_worst_current_window_and_none_without_one():
+    gone = R("seven_day_opus", "allowed", 0.99, NOW - 1, NOW - 9000)
+    readings = (_at_pace("five_hour", 0.4), _at_pace("seven_day", 1.2), gone)
+    assert quota.login_pace(readings, NOW) == pytest.approx(1.2)
+    assert quota.login_pace((), NOW) is None
+    assert quota.login_pace((gone,), NOW) is None
+    refused = R("five_hour", "rejected", None, NOW + 60, NOW)
+    assert quota.login_pace((_at_pace("seven_day", 0.1), refused), NOW) == math.inf
+    unknown = R("quota:flash", "allowed", 0.5, NOW + 60, NOW)  # a share but no length: no pace of its own
+    assert quota.login_pace((unknown,), NOW) is None
