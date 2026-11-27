@@ -10,7 +10,7 @@ from bosun.providers import ledger, windows
 from bosun.store import Store
 
 R = windows.Reading
-NOW = 1_800_000_000.0
+NOW = 1_700_000_000.0
 
 
 @pytest.fixture
@@ -34,6 +34,36 @@ def test_an_older_reading_never_replaces_a_newer_one(store):
     ledger.save(store, "codex", (R("five_hour", "allowed", 0.5, NOW + 60, NOW),))
     ledger.save(store, "codex", (R("five_hour", "allowed", 0.1, NOW + 60, NOW - 10),))
     assert ledger.readings(store, "codex") == (R("five_hour", "allowed", 0.5, NOW + 60, NOW),)
+
+
+def test_far_future_at_is_rejected_and_stale_or_future_rows_are_replaced(store, tmp_path):
+    with pytest.raises(ValueError):
+        ledger.save(store, "claude", (R("five_hour", "allowed", 0.2, NOW + 60, NOW + 301),), now=NOW)
+    ledger.save(store, "claude", (R("five_hour", "allowed", 0.2, NOW + 600, NOW + 300),), now=NOW)
+    assert ledger.readings(store, "claude") == (R("five_hour", "allowed", 0.2, NOW + 600, NOW + 300),)
+
+    # A stale stored row (past its reset at incoming `at`) is replaced even if its `at` is higher.
+    with store._tx(write=True) as db:
+        db.execute("INSERT OR REPLACE INTO quota_windows VALUES "
+                   "('codex', 'codex', 'default', 'five_hour', 'allowed', 0.9, ?, ?, 'output')",
+                   (NOW - 1, NOW + 100))
+    ledger.save(store, "codex", (R("five_hour", "allowed", 0.1, NOW + 3600, NOW),), now=NOW)
+    assert ledger.readings(store, "codex") == (R("five_hour", "allowed", 0.1, NOW + 3600, NOW),)
+
+    # A poisoned far-future undated row already in the DB cannot block real readings forever.
+    with store._tx(write=True) as db:
+        db.execute("INSERT OR REPLACE INTO quota_windows VALUES "
+                   "('grok', 'grok', 'default', 'five_hour', 'allowed', 0.1, NULL, ?, 'coho')",
+                   (NOW + 10_000_000,))
+    ledger.save(store, "grok", (R("five_hour", "allowed", 0.8, NOW + 3600, NOW),), now=NOW)
+    assert ledger.readings(store, "grok") == (R("five_hour", "allowed", 0.8, NOW + 3600, NOW),)
+
+    # Coho seed also rejects entries with `at` more than 5 minutes ahead of `now`.
+    f = tmp_path / "cli-windows.json"
+    _coho(f, {"gemini": {"five_hour": {"type": "five_hour", "status": "allowed", "used": 0.2,
+                                       "at": "2099-01-01T00:00:00Z"}}})
+    assert ledger.seed_from_coho(store, "gemini", f, now=SEEN) == 0
+    assert ledger.readings(store, "gemini") == ()
 
 
 def test_every_login_is_read_back_with_its_source_and_unknowns_kept_unknown(store):
