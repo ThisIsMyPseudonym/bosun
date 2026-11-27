@@ -150,6 +150,8 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
         model.auto = await model.call("set_autopilot", {"on": True})
         model.override = await model.call("set_quota_override", {"bucket": "claude", "on": True})
         model.ignore = await model.call("set_pref", {"key": JQ, "ignored": True})
+        model.triage = await model.call("triage", {"trace_id": "abcdef01", "deep": True})
+        model.triage_cfg = await model.call("set_triage_settings", {"auto": False, "daily_limit": 0})
         await model.say("Turn Autopilot on from the Today page.")
 
     panel.script(script)
@@ -157,14 +159,18 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
     events = panel.wait(cid)
     assert events[-1][1]["status"] == "ok" and not [k for k, _ in events if k == "approval"]
     model = panel.fakes[0].model
-    for result in (model.auto, model.override, model.ignore):
+    for result in (model.auto, model.override, model.ignore, model.triage, model.triage_cfg):
         assert not result["ok"] and "only be done by you" in result["error"]
     assert panel.store.setting("autopilot") in (None, "0") and panel.store.prefs() == {}
+    assert panel.store.setting("triage_auto") is None
     assert ai_routing.overrides(panel.store) == ()
     refused = panel.audit("set_autopilot")[0]  # the attempt is on record
     assert (refused["actor"], refused["outcome"], refused["approved_by"]) == ("assistant", "error", "")
     tools = [m for m in panel.conversation(cid)["messages"] if m["role"] == "tool"]
-    assert [(t["tool"], t["outcome"]) for t in tools] == [("set_autopilot", "refused"), ("set_quota_override", "refused"), ("set_pref", "refused")]
+    assert [(t["tool"], t["outcome"]) for t in tools] == [
+        ("set_autopilot", "refused"), ("set_quota_override", "refused"), ("set_pref", "refused"),
+        ("triage", "refused"), ("set_triage_settings", "refused"),
+    ]
 
 
 def test_an_unanswered_approval_expires_as_declined(panel):

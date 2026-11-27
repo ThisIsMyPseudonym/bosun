@@ -48,11 +48,11 @@ from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
                        NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TriageFeedbackIn, TriageIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+                       TraceIn, TriageFeedbackIn, TriageIn, TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
-from .triage import model as tmodel, store as tstore, worker as tworker
+from .triage import model as tmodel, settings as tsettings, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -1051,6 +1051,14 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if row is None:
             raise NotFound("No triage verdict recorded for this run")
         return tstore.set_feedback(store, row["failure"], body.feedback)
+
+    @actions.bind("triage_settings")
+    def triage_settings_get(ctx: ActionContext, body: Empty):
+        return tsettings.overview(store)
+
+    @actions.bind("set_triage_settings")
+    def triage_settings_set(ctx: ActionContext, body: TriageSettingsIn):
+        return tsettings.update(store, auto=body.auto, daily_limit=body.daily_limit)
 
     @actions.bind("get_runbook")
     def get_runbook(ctx: ActionContext, body: RunbookIn):
