@@ -159,24 +159,35 @@ def set_feedback(
         return _decode_row(db, updated)
 
 
+def _run_subject(db: sqlite3.Connection, rec: FailureRecord, failed: sqlite3.Row | None) -> str:
+    if failed is not None:
+        return str(failed["subject"] or "")
+    if rec.what == "fix" and rec.what_id.isdigit():
+        fix = db.execute("SELECT project FROM fixes WHERE id = ?", (int(rec.what_id),)).fetchone()
+        if fix is not None and fix["project"]:
+            return str(fix["project"])
+    return rec.subject
+
+
 def superseded(store: Store, rec: FailureRecord) -> bool:
     """True when a later run of the same kind and subject succeeded."""
     with store._tx() as db:
         failed = db.execute(
-            "SELECT rowid, started FROM runs WHERE trace_id = ?",
+            "SELECT rowid, started, subject FROM runs WHERE trace_id = ?",
             (rec.trace_id,),
         ).fetchone()
+        subject = _run_subject(db, rec, failed)
         if failed is not None:
             hit = db.execute(
                 "SELECT 1 FROM runs WHERE kind = ? AND subject = ? AND status = 'ok' "
                 "AND trace_id != ? AND (started > ? OR (started = ? AND rowid > ?)) LIMIT 1",
-                (rec.kind, rec.subject, rec.trace_id, failed["started"], failed["started"], failed["rowid"]),
+                (rec.kind, subject, rec.trace_id, failed["started"], failed["started"], failed["rowid"]),
             ).fetchone()
         else:
             hit = db.execute(
                 "SELECT 1 FROM runs WHERE kind = ? AND subject = ? AND status = 'ok' "
                 "AND trace_id != ? AND started > ? LIMIT 1",
-                (rec.kind, rec.subject, rec.trace_id, rec.ts),
+                (rec.kind, subject, rec.trace_id, rec.ts),
             ).fetchone()
         return hit is not None
 

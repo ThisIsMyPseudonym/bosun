@@ -58,6 +58,38 @@ def test_superseded_detects_a_later_ok_run_of_the_same_kind_and_subject(tmp_path
         trace.configure(None)
 
 
+def test_superseded_matches_failed_fix_when_later_fix_on_same_project_succeeds(tmp_path):
+    from bosun.triage import worker
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        fix_id = st.create_fix("repo:npm:lodash@proj", "proj")
+        fix = st.fix(fix_id)
+        assert fix is not None
+        with trace.run("fix", subject="proj", trace_id=fix["trace_id"]) as r_fail:
+            r_fail.fail("tests failed")
+        st.update_fix(fix_id, status="failed", result={"error": "tests failed"})
+
+        rec = tstore.load_failure(st, fix["trace_id"])
+        assert rec is not None and rec.subject == "repo:npm:lodash@proj"
+        assert not tstore.superseded(st, rec)
+
+        # A later ok fix on a different project must not supersede it
+        with trace.run("fix", subject="other-proj"):
+            pass
+        assert not tstore.superseded(st, rec)
+
+        # A later ok fix on the same project supersedes it and marks it fixed_since
+        with trace.run("fix", subject="proj"):
+            pass
+        assert tstore.superseded(st, rec)
+        row = worker.evaluate_fast(st, rec, now=200.0)
+        assert row is not None and row["status"] == "fixed_since"
+    finally:
+        trace.configure(None)
+
+
 def test_save_verdict_redacts_secrets_and_respects_read_only(tmp_path):
     st = Store(tmp_path / "bosun.db")
     secret = "ghp_1234567890abcdefghij1234567890abcd"
