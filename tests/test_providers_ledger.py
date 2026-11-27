@@ -37,8 +37,8 @@ def test_an_older_reading_never_replaces_a_newer_one(store):
 
 
 def test_far_future_at_is_rejected_and_stale_or_future_rows_are_replaced(store, tmp_path):
-    with pytest.raises(ValueError):
-        ledger.save(store, "claude", (R("five_hour", "allowed", 0.2, NOW + 60, NOW + 301),), now=NOW)
+    ledger.save(store, "claude", (R("five_hour", "allowed", 0.2, NOW + 60, NOW + 301),), now=NOW)
+    assert ledger.readings(store, "claude") == ()
     ledger.save(store, "claude", (R("five_hour", "allowed", 0.2, NOW + 600, NOW + 300),), now=NOW)
     assert ledger.readings(store, "claude") == (R("five_hour", "allowed", 0.2, NOW + 600, NOW + 300),)
 
@@ -99,25 +99,28 @@ def test_every_login_is_read_back_with_its_source_and_unknowns_kept_unknown(stor
                    "claude": (R("five_hour", "allowed_warning", None, None, NOW),)}
 
 
-def test_a_bad_bucket_or_a_row_bosun_cannot_read_is_refused_or_skipped(store):
+def test_a_bad_bucket_or_a_row_bosun_cannot_read_is_refused_or_skipped(store, caplog):
     with pytest.raises(ValueError):
         ledger.save(store, "nonesuch@x", (R("five_hour", "allowed", 0.1, None, NOW),))
     with pytest.raises(ValueError):
         ledger.save(store, "claude@../x", (R("five_hour", "allowed", 0.1, None, NOW),))
-    with pytest.raises(ValueError):
-        ledger.save(store, "claude", (R("../x", "allowed", 0.1, None, NOW),))
-    with pytest.raises(ValueError):
-        ledger.save(store, "claude", (R("five_hour", "allowed", -0.1, None, NOW),))
-    with pytest.raises(ValueError):
-        ledger.save(store, "claude", (R("five_hour", "allowed", 0.1, None, math.nan),))
-    with pytest.raises(ValueError):
-        ledger.save(store, "claude", (R("five_hour", "allowed", 0.1, math.inf, NOW),))
+    bad_batch = (
+        R("../x", "allowed", 0.1, None, NOW),
+        R("five_hour", "allowed", -0.1, None, NOW),
+        R("five_hour", "allowed", 0.1, None, math.nan),
+        R("five_hour", "allowed", 0.1, math.inf, NOW),
+        R("seven_day", "allowed", 0.4, NOW + 3600, NOW),
+    )
+    with caplog.at_level("WARNING", logger=ledger.__name__):
+        ledger.save(store, "claude", bad_batch, now=NOW)
+    assert ledger.readings(store, "claude") == (R("seven_day", "allowed", 0.4, NOW + 3600, NOW),)
+    assert len(caplog.records) == 4
     ledger.save(store, "codex", (R("five_hour", "allowed", 1.4, NOW + 60, NOW),))  # capped at 1.0 on save
     assert ledger.readings(store, "codex") == (R("five_hour", "allowed", 1.0, NOW + 60, NOW),)
     with store._tx(write=True) as db:  # rows written by something else, with a status or source Bosun doesn't know
-        db.execute("INSERT INTO quota_windows (bucket, provider, account, window, status, used, resets_at, at, "
+        db.execute("INSERT OR REPLACE INTO quota_windows (bucket, provider, account, window, status, used, resets_at, at, "
                    "source) VALUES ('claude', 'claude', 'default', 'five_hour', 'maybe', 0.1, NULL, 1, 'output')")
-        db.execute("INSERT INTO quota_windows (bucket, provider, account, window, status, used, resets_at, at, "
+        db.execute("INSERT OR REPLACE INTO quota_windows (bucket, provider, account, window, status, used, resets_at, at, "
                    "source) VALUES ('claude', 'claude', 'default', 'seven_day', 'allowed', 7, NULL, 1, 'x')")
     assert ledger.readings(store, "claude") == ()
 

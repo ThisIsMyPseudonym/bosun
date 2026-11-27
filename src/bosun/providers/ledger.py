@@ -54,7 +54,7 @@ def _time(value: object) -> float | None:
     return f if math.isfinite(f) else None
 
 
-def _clean(r: Reading, max_at: float) -> Reading:
+def _clean(bucket: str, r: Reading, max_at: float) -> Reading | None:
     at, status = _time(r.at), status_of(r.status)
     used = None if r.used is None else fraction(r.used)
     resets = None if r.resets_at is None else _time(r.resets_at)
@@ -62,7 +62,8 @@ def _clean(r: Reading, max_at: float) -> Reading:
            or at is None or at > max_at
            or (r.used is not None and used is None) or (r.resets_at is not None and resets is None))
     if bad or status is None or at is None:
-        raise ValueError(f"not a reading Bosun keeps: {r!r}")
+        log.warning("quota_windows: skipping invalid reading for %s: %r", bucket, r)
+        return None
     return Reading(r.window, status, used, resets, at, cast(Source, r.source))
 
 
@@ -100,7 +101,7 @@ def save(store: Store, bucket: str, readings: Iterable[Reading], now: float | No
         raise RuntimeError("Store is read-only")
     provider, account = split(bucket)
     max_at = (time.time() if now is None else now) + MAX_FUTURE_AT_S
-    cleaned = [_clean(r, max_at) for r in readings]
+    cleaned = [c for r in readings if (c := _clean(bucket, r, max_at)) is not None]
     if not cleaned:
         return
     with store._tx(write=True) as db:
