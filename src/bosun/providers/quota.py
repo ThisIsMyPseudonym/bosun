@@ -12,17 +12,22 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from bosun.providers.catalog import CATALOG
-from bosun.providers.windows import Reading, window_hours
+from bosun.providers.windows import Reading, reset_horizon, valid_reset, window_hours
 
 UNDATED_STALE_S = 7 * 86400  # an undated reading says nothing about now after a week
 WARNING_SHARE = 0.8  # a warning with no figure counts as at least this much used
 MIN_ELAPSED = 0.05  # the first 15 minutes of a 5-hour window: pace there is bounded, not share / almost nothing
 
 
+def _reset(r: Reading) -> float | None:
+    return valid_reset(r.window, r.resets_at, r.at)
+
+
 def stale(r: Reading, now: float) -> bool:
-    """Whether a reading says nothing about now: its reset has come, or (with no reset) it is a week old."""
-    if r.resets_at is not None:
-        return r.resets_at <= now
+    """Whether a reading says nothing about now: its reset has come, or (with no valid reset) it is a week old."""
+    resets = _reset(r)
+    if resets is not None:
+        return resets <= now
     return now - r.at > UNDATED_STALE_S
 
 
@@ -54,9 +59,10 @@ def pace(r: Reading, now: float) -> float | None:
         return None
     if hours is None:
         return used
-    if r.resets_at is None:
+    resets = _reset(r)
+    if resets is None:
         return None
-    elapsed = 1 - (r.resets_at - now) / (hours * 3600)
+    elapsed = 1 - (resets - now) / (hours * 3600)
     return used / min(1.0, max(MIN_ELAPSED, elapsed))
 
 
@@ -104,7 +110,7 @@ def line_hit(readings: Iterable[Reading], now: float, line: float = LINE) -> Hit
         if used is None or (used < line and r.status != "rejected"):
             continue
         if best is None or used > best.used:
-            best = Hit(r.window, used, r.resets_at)
+            best = Hit(r.window, used, _reset(r))
     return best
 
 
@@ -115,9 +121,9 @@ def stop_at(bucket: str, overrides: Iterable[Override], now: float) -> float:
 
 
 def override_until(hit: Hit, now: float) -> float:
-    """When an override set on this hit ends: the window's reset, or a day from now when it has none (or it passed)."""
+    """When an override set on this hit ends: the window's reset (bounded by its horizon), or a day when undated."""
     if hit.resets_at is not None and hit.resets_at > now:
-        return hit.resets_at
+        return min(hit.resets_at, now + reset_horizon(hit.window))
     return now + OVERRIDE_UNDATED_S
 
 

@@ -23,6 +23,8 @@ SOURCES: tuple[Source, ...] = ("output", "probe", "coho", "limit")
 NAME = re.compile(r"^[a-z0-9_]{1,40}$")
 MS_EPOCH = 1e12  # an epoch at or past this is in milliseconds
 MAX_JSON_CHARS = 1 << 17  # cap line/document length before json.loads so hostile input stays cheap
+RESET_SLACK_S = 3600.0  # clock skew / top-of-hour rounding beyond a window's nominal length
+MAX_RESET_S = 31 * 86400.0  # upper bound on resets for windows whose length is not in their name
 
 
 @dataclass(frozen=True)
@@ -119,7 +121,7 @@ def latest_per_window(readings: list[Reading]) -> tuple[Reading, ...]:
 
 
 def _unified(name: str, w: dict[str, Any], at: float) -> Reading | None:
-    used, resets = fraction(w.get("utilization")), epoch(w.get("resetsAt"))
+    used, resets = fraction(w.get("utilization")), valid_reset(name, epoch(w.get("resetsAt")), at)
     if used is None and resets is None:
         return None
     over = _number(w.get("surpassedThreshold"))
@@ -131,8 +133,8 @@ def _claude_event(info: dict[str, Any], at: float) -> list[Reading]:
     status = status_of(info.get("status"))
     if status is None:
         return []
-    top = Reading(name_of(info.get("rateLimitType")), status, fraction(info.get("utilization")),
-                  epoch(info.get("resetsAt")), at)
+    win = name_of(info.get("rateLimitType"))
+    top = Reading(win, status, fraction(info.get("utilization")), valid_reset(win, epoch(info.get("resetsAt")), at), at)
     out = {top.window: top}
     unified = info.get("unifiedWindows")
     for name, w in (unified.items() if isinstance(unified, dict) else ()):
@@ -179,6 +181,19 @@ def window_hours(window: str) -> float | None:
     return int(m[1]) / 60 if m and int(m[1]) > 0 else None
 
 
+def reset_horizon(window: str) -> float:
+    """Maximum plausible seconds between a reading and its window's reset."""
+    hours = window_hours(window)
+    return hours * 3600.0 + RESET_SLACK_S if hours is not None else MAX_RESET_S
+
+
+def valid_reset(window: str, resets_at: float | None, at: float) -> float | None:
+    """Keep `resets_at` only when it lies within the window's horizon from `at`; else drop it."""
+    if resets_at is None:
+        return None
+    return resets_at if resets_at <= at + reset_horizon(window) else None
+
+
 # --- Codex -------------------------------------------------------------------------------------------------------
 
 CODEX_WARNING = 0.9  # Codex sends no status: at or past 90% is a warning, at 100% a refusal
@@ -204,15 +219,17 @@ def _codex_slot(w: dict[str, Any], at: float, fallback: str = "window") -> Readi
     percent = _number(_pick(w, "usedPercent", "used_percent"))
     used = min(1.0, percent / 100) if percent is not None and percent >= 0 else None
     in_seconds = _number(_pick(w, "resets_in_seconds", "resetsInSeconds"))
+    minutes = _pick(w, "windowDurationMins", "window_duration_mins", "window_minutes", "windowMinutes")
+    win = window_for_minutes(minutes, fallback)
     resets = epoch(_pick(w, "resetsAt", "resets_at"))
     if resets is None and in_seconds is not None and in_seconds >= 0:
         resets = at + in_seconds
+    resets = valid_reset(win, resets, at)
     if used is None and resets is None:
         return None
     status: Status = ("rejected" if used is not None and used >= 1
                       else "allowed_warning" if used is not None and used >= CODEX_WARNING else "allowed")
-    minutes = _pick(w, "windowDurationMins", "window_duration_mins", "window_minutes", "windowMinutes")
-    return Reading(window_for_minutes(minutes, fallback), status, used, resets, at)
+    return Reading(win, status, used, resets, at)
 
 
 def _codex_snapshot(value: object) -> dict[str, Any] | None:
@@ -279,8 +296,9 @@ def _quota(name: object, remaining: object, reset: object, at: float) -> Reading
     if left is None:
         return None
     used = 1.0 - left
+    win = quota_window(name)
     status: Status = "rejected" if used >= 1 else "allowed_warning" if used >= CODEX_WARNING else "allowed"
-    return Reading(quota_window(name), status, used, epoch(reset), at, "probe")
+    return Reading(win, status, used, valid_reset(win, epoch(reset), at), at, "probe")
 
 
 def _agy_entries(parsed: object) -> list[object]:

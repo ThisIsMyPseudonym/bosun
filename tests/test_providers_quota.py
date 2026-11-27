@@ -62,7 +62,7 @@ def test_pace_is_unknown_without_a_reset_or_a_share_and_uses_share_without_lengt
 def test_pace_at_the_very_start_of_a_window_is_bounded():
     start = R("five_hour", "allowed", 0.02, NOW + 5 * 3600, NOW)
     assert quota.pace(start, NOW) == pytest.approx(0.02 / quota.MIN_ELAPSED)
-    longer = R("five_hour", "allowed", 0.5, NOW + 9 * 3600, NOW)  # a reset further off than the window is long
+    longer = R("five_hour", "allowed", 0.5, NOW + 5.5 * 3600, NOW)  # slightly past nominal length (within slack)
     assert quota.pace(longer, NOW) == pytest.approx(0.5 / quota.MIN_ELAPSED)
 
 
@@ -115,6 +115,17 @@ def test_an_override_ends_at_the_hit_windows_reset_or_in_a_day_when_undated():
     assert quota.override_until(quota.Hit("seven_day", 0.8, NOW + 9000), NOW) == NOW + 9000
     assert quota.override_until(quota.Hit("quota:flash", 0.8, None), NOW) == NOW + 86400
     assert quota.override_until(quota.Hit("five_hour", 0.8, NOW - 5), NOW) == NOW + 86400  # past: a day, not none
+
+
+def test_far_future_reset_goes_stale_and_override_is_bounded_to_window_horizon():
+    far = R("five_hour", "allowed", 0.9, NOW + 365 * 86400, NOW)
+    assert not quota.stale(far, NOW)
+    assert quota.stale(far, NOW + 8 * 86400)  # dropped far-future reset falls back to undated 7-day staleness
+    assert quota.pace(far, NOW) is None
+    assert quota.line_hit((far,), NOW) == quota.Hit("five_hour", 0.9, None)
+    assert quota.override_until(quota.Hit("five_hour", 0.8, NOW + 365 * 86400), NOW) == (
+        NOW + 5 * 3600 + windows.RESET_SLACK_S)
+    assert quota.override_until(quota.Hit("quota:flash", 0.8, NOW + 365 * 86400), NOW) == NOW + windows.MAX_RESET_S
 
 
 # --- a call's draw -----------------------------------------------------------------------------------------------
