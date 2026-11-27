@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from . import auth, launcher
 from .config import PROJECT_ROOT, Settings
-from .registry import AGENT_TIER_SETTINGS, SPECS, ActionSpec, Risk, TraceIn
+from .registry import AGENT_TIER_SETTINGS, SPECS, ActionError, ActionSpec, Risk, TraceIn
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ GUIDANCE = {
 MAX_RESULT_CHARS = 80_000  # a result past this is cut and says so: an agent's context is not a place for a whole refresh
 POLL_S = 1.0
 HTTP_TIMEOUT = httpx.Timeout(300.0, connect=5.0)  # an assessment or a project re-check can take minutes
+ASSISTANT_HTTP_TIMEOUT = httpx.Timeout(20 * 60.0, connect=5.0)  # approval wait (5 min) + action execution
 
 
 class WaitIn(TraceIn):
@@ -153,19 +155,28 @@ class Reply:
 
 
 class Dashboard:
-    """The running dashboard, reached over loopback as an agent (see auth.py and server._refuse_agent)."""
+    """The running dashboard, reached over loopback as an agent or as the Ask Bosun assistant."""
 
     def __init__(self, s: Settings, agent: str = auth.DEFAULT_AGENT, http: httpx.Client | None = None,
                  up: Callable[[], bool] | None = None, start: Callable[[], str] = launcher.start_dashboard,
-                 wait: float = launcher.START_WAIT_S, sleep: Callable[[float], None] = time.sleep):
+                 wait: float = launcher.START_WAIT_S, sleep: Callable[[float], None] = time.sleep,
+                 as_role: str = "agent", assistant_token: str | None = None):
         self.s = s
         self.url = f"http://{s.host}:{s.port}"
         self.agent = agent
-        self._http = http or httpx.Client(base_url=self.url, timeout=HTTP_TIMEOUT, follow_redirects=False,
+        self.as_role = as_role
+        self._assistant_token = assistant_token
+        timeout = ASSISTANT_HTTP_TIMEOUT if as_role == "assistant" else HTTP_TIMEOUT
+        self._http = http or httpx.Client(base_url=self.url, timeout=timeout, follow_redirects=False,
                                           trust_env=False)  # loopback only: never through a proxy from the environment
         self._up = up or (lambda: launcher.dashboard_up(self.url))
         self._start, self._wait, self._sleep = start, wait, sleep
-        self._checked = False
+        self._checked = as_role == "assistant"  # the running dashboard spawned us: never auto-start another
+
+    def _token(self) -> str:
+        if self._assistant_token is not None:
+            return self._assistant_token
+        return os.environ.get(auth.ASSISTANT_TOKEN_ENV, "")
 
     def ensure_up(self) -> None:
         """Bosun answering on its port, started first if it wasn't."""
@@ -188,6 +199,19 @@ class Dashboard:
         # without a restart. Each request is signed on its own (auth.agent_signature).
         return auth.AgentAuth(lambda: auth.load_key(self.s.data_dir), self.agent)
 
+    def _call_assistant(self, method: str, path: str, kwargs: dict[str, Any]) -> Reply:
+        tok = self._token()
+        r = self._http.request(method, path, headers={auth.ASSISTANT_TOKEN_HEADER: tok}, **kwargs)
+        if r.status_code != 401 and not auth.valid_assistant_reply(
+                tok, r.request.method, r.request.url.raw_path.decode("ascii"), r.headers.get(auth.REPLY_HEADER)):
+            raise DashboardDown(f"Something on port {self.s.port} answered, but couldn't show it is this machine's "
+                                "Bosun dashboard, so its answer was not used.")
+        try:
+            parsed = r.json()
+        except ValueError:
+            parsed = r.text[:2000]
+        return Reply(r.status_code, parsed, r.headers.get("x-bosun-trace"))
+
     def call(self, spec: ActionSpec, body: BaseModel) -> Reply:
         """One action, as the dashboard's own route for it."""
         data = body.model_dump(mode="json", exclude_none=True)
@@ -195,6 +219,8 @@ class Dashboard:
         for name in [seg[1:-1] for seg in spec.path.split("/") if seg.startswith("{")]:
             path = path.replace("{" + name + "}", quote(str(data.pop(name)), safe=""))
         kwargs: dict[str, Any] = {"params": data} if spec.method == "GET" else {"json": data}
+        if self.as_role == "assistant":
+            return self._call_assistant(spec.method, path, kwargs)
         if not self._checked:
             self.ensure_up()
         try:
@@ -313,12 +339,25 @@ def check(name: str, arguments: dict[str, Any] | None,
                                                      for e in exc.errors(include_url=False, include_input=False)]})
 
 
+def _active_helpers(as_role: str) -> dict[str, tuple[type[BaseModel], str]]:
+    if as_role == "assistant":
+        from . import assistant_prompt
+        return assistant_prompt.helpers()
+    return HELPERS
+
+
 def dispatch(dash: Dashboard, name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
     """Check the input against the action's own model, send it to the dashboard, frame what comes back."""
-    checked = check(name, arguments)
+    checked = check(name, arguments, _active_helpers(dash.as_role))
     if isinstance(checked, types.CallToolResult):
         return checked
     spec, body = checked
+    if spec is None and name == "read_guide":
+        from . import assistant_prompt
+        try:
+            return frame(name, True, assistant_prompt.read_guide(body.topic))  # type: ignore[attr-defined]
+        except ActionError as exc:
+            return frame(name, False, exc.message)
     try:
         reply = dash.call(spec, body) if spec else dash.wait_run(body)  # type: ignore[arg-type]
     except DashboardDown as exc:
@@ -387,6 +426,8 @@ def build(dash: Dashboard) -> Server[Any]:
         return types.ReadResourceResult(contents=[types.TextResourceContents(
             uri=str(params.uri), mime_type="text/markdown", text=found[2].read_text(encoding="utf-8"))])
 
+    if dash.as_role == "assistant":
+        return tool_server(call, helpers=_active_helpers("assistant"), tiers=TIER_PLAIN)
     return tool_server(call, instructions=INSTRUCTIONS, on_list_resources=list_resources,
                        on_read_resource=read_resource)
 
@@ -400,13 +441,13 @@ def _version() -> str:
         return "0"
 
 
-def serve(s: Settings) -> int:
-    server = build(Dashboard(s))
+def serve(s: Settings, *, as_role: str = "agent") -> int:
+    server = build(Dashboard(s, as_role=as_role))
 
     async def run() -> None:
         async with stdio_server() as (read, write):
             await server.run(read, write, server.create_initialization_options())
 
-    log.info("mcp: serving over stdio for the dashboard on port %s", s.port)
+    log.info("mcp: serving over stdio (%s) for the dashboard on port %s", as_role, s.port)
     anyio.run(run)
     return 0

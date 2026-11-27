@@ -199,4 +199,76 @@ def test_per_turn_token_never_reaches_argv_prompt_trace_log_db_or_sse(panel, cap
     assert tok not in leaked_places
 
 
+def test_mcp_as_assistant_serves_assistant_tools_and_enforces_token(panel):
+    import anyio
+    import json
+    from fastapi.testclient import TestClient
+    from mcp import Client
+
+    from assistant_panel import BASE
+    from bosun import assistant as assistant_module, auth, mcp_server
+
+    def _run_mcp(token_val: str | None, fn):
+        dash = mcp_server.Dashboard(
+            panel.settings,
+            http=TestClient(panel.app, base_url=BASE),
+            up=lambda: True,
+            sleep=lambda _s: None,
+            as_role="assistant",
+            assistant_token=token_val,
+        )
+
+        async def go():
+            async with Client(mcp_server.build(dash)) as client:
+                return await fn(client)
+
+        return anyio.run(go)
+
+    # No token, wrong token, or expired token -> refused
+    for bad_token in ("", "wrong", auth.ASSISTANT_TOKEN_PREFIX + "0" * 43):
+        res = _run_mcp(bad_token, lambda c: c.call_tool("status", {}))
+        body = json.loads(res.content[0].text)
+        assert res.is_error and not body["ok"] and "invalid or expired assistant token" in body["error"]
+
+    # Valid token -> assistant tool list (TIER_PLAIN + helpers including read_guide) and reads succeed
+    tok = panel.app.state.assistant_tokens.issue("a" * 32, 1)
+    listed = {t.name: t for t in _run_mcp(tok, lambda c: c.list_tools()).tools}
+    assert set(listed) == set(assistant_module.tool_names())
+    assert "read_guide" in listed and "wait_run" in listed
+    assert all("Refused for agents" not in t.description for t in listed.values())
+
+    res = _run_mcp(tok, lambda c: c.call_tool("status", {}))
+    body = json.loads(res.content[0].text)
+    assert not res.is_error and body["ok"] and body["result"]["by_lane"]
+
+    guide_res = _run_mcp(tok, lambda c: c.call_tool("read_guide", {"topic": "data-model"}))
+    guide_body = json.loads(guide_res.content[0].text)
+    assert not guide_res.is_error and guide_body["ok"] and "v_current_items" in guide_body["result"]
+
+    # Panel routes and browser-origin requests stay refused even with a valid assistant token
+    raw = TestClient(panel.app, base_url=BASE)
+    hdr = {auth.ASSISTANT_TOKEN_HEADER: tok}
+    assert raw.get("/api/assistant/conversations", headers=hdr).status_code == 403
+    assert raw.get("/api/state", headers=hdr).status_code == 403
+    assert raw.get("/api/status", headers={**hdr, "Origin": BASE}).status_code == 403
+
+    # Revoked token -> refused immediately
+    panel.app.state.assistant_tokens.revoke(tok)
+    res_after = _run_mcp(tok, lambda c: c.call_tool("status", {}))
+    assert res_after.is_error
+
+
+def test_cli_mcp_accepts_as_assistant_flag(monkeypatch, tmp_path):
+    from bosun import cli, mcp_server
+
+    called: list[tuple[str, int]] = []
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(mcp_server, "serve", lambda s, *, as_role="agent": called.append((as_role, s.port)) or 0)
+    assert cli.main(["mcp", "--as", "assistant", "--port", "9123"]) == 0
+    assert called == [("assistant", 9123)]
+    assert cli.main(["mcp"]) == 0
+    assert called[-1][0] == "agent"
+
+
+
 

@@ -591,11 +591,11 @@ def cmd_install_launcher(args, s) -> int:
 
 
 def cmd_mcp(args, s) -> int:
-    """Bosun for Claude Code: the MCP server itself (stdio), or adding it to and removing it from Claude Code."""
+    """Bosun as an MCP server (stdio) for agents or Ask Bosun, or adding/removing it in Claude Code."""
     if args.mcp_cmd is None:
         from . import mcp_server
 
-        return mcp_server.serve(s)  # stdout is the protocol from here on: nothing else may print to it
+        return mcp_server.serve(s, as_role=args.as_role)  # stdout is the protocol from here on
     from . import mcp_install
 
     ok, lines = mcp_install.install() if args.mcp_cmd == "install" else mcp_install.uninstall()
@@ -907,6 +907,9 @@ def main(argv: list[str] | None = None) -> int:
     mc = sub.add_parser("mcp", help="Bosun as an MCP server for Claude Code (stdio); `mcp install` adds it to Claude Code")
     mc.add_argument("mcp_cmd", nargs="?", choices=("install", "uninstall"),
                     help="install: add it to Claude Code for every project; uninstall: remove it")
+    mc.add_argument("--as", dest="as_role", choices=("agent", "assistant"), default="agent",
+                    help="who is calling: agent (default) or assistant (Ask Bosun per-turn token)")
+    mc.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     a = sub.add_parser("actions", help="everything Bosun can do, with its risk tier")
     a.add_argument("--json", action="store_true", help="with input schemas, as JSON")
     db = sub.add_parser("db", help="where the database is and which schema migrations it has (read-only unless --migrate)")
@@ -949,10 +952,17 @@ def main(argv: list[str] | None = None) -> int:
         s = dataclasses.replace(s, data_dir=Path(demo_folder.name), demo=True, self_update=False, osv_auto_update=False)
         if not os.environ.get("BOSUN_PORT"):  # never the real dashboard's port: that one may be running right now
             s = dataclasses.replace(s, port=_free_port(s.host))
+    if args.cmd == "mcp" and getattr(args, "port", None) is not None and 1 <= args.port <= 65535:
+        import dataclasses
+        s = dataclasses.replace(s, port=args.port)
     read_only = args.cmd in _READ_ONLY_CMDS or (args.cmd == "db" and not args.migrate)
+    assistant_mcp = args.cmd == "mcp" and args.mcp_cmd is None and getattr(args, "as_role", "agent") == "assistant"
     # Read-only commands must never create directories, write logs, or open/migrate the database.
+    # `mcp --as assistant` logs to stderr only so it never needs BOSUN_DATA_DIR forwarded.
     # `refresh` defers logging/DB setup until it knows the dashboard is not running (offline fallback).
-    if not read_only and args.cmd != "refresh":
+    if assistant_mcp:
+        logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    elif not read_only and args.cmd != "refresh":
         _setup_logging(s, "serve" if args.cmd == "serve" else "cli", open_db=args.cmd not in _NO_DB_LOG_CMDS)
     handler = {"status": cmd_status, "refresh": cmd_refresh, "update-scanner": cmd_update_scanner,
                "self-update": cmd_self_update, "serve": cmd_serve, "demo": cmd_demo, "doctor": cmd_doctor,
