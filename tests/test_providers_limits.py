@@ -97,6 +97,15 @@ def test_a_reset_bosun_cannot_read_means_an_hour():
         leap_past + HOUR, leap_past)
 
 
+def test_unbounded_or_overflowing_resets_fall_back_to_one_hour():
+    assert limits.limit_reading(f"Resets in {'9' * 400}h", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Resets in 999999h", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Usage limit reached, resets 2099-01-01T00:00:00Z", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Usage limit reached; reset_at=1999999999", NOW, tz=UTC) == _limit(NOW + HOUR)
+    assert limits.limit_reading("Usage limit reached. Resets in 31 days", NOW, tz=UTC) == _limit(NOW + 31 * 86400)
+    assert limits.limit_reading("Usage limit reached. Resets in 32 days", NOW, tz=UTC) == _limit(NOW + HOUR)
+
+
 # --- 429 cool-downs ----------------------------------------------------------------------------------------------
 
 

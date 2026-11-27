@@ -8,6 +8,7 @@ words it looks for can appear in an answer about rate limits.
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
@@ -20,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from bosun.providers.windows import Reading
 
 NO_RESET_S = 3600  # a limit that names no reset keeps the login out for an hour
+MAX_RESET_S = 31 * 86400.0  # resets further out than a month are unreadable (fall back to an hour)
 
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
 _UNIT = r"(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])"
@@ -54,13 +56,17 @@ _MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun",
 _SECONDS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
 
 
+def _in_horizon(t: float, now: float) -> bool:
+    return math.isfinite(t) and now < t <= now + MAX_RESET_S
+
+
 def _iso(text: str, now: float) -> float | None:
     for m in _ISO.finditer(text):
         try:
             parsed = datetime.fromisoformat(m[1].replace("Z", "+00:00"))
         except ValueError:
             continue
-        if parsed.tzinfo and parsed.timestamp() > now:
+        if parsed.tzinfo and _in_horizon(parsed.timestamp(), now):
             return parsed.timestamp()
     return None
 
@@ -68,7 +74,7 @@ def _iso(text: str, now: float) -> float | None:
 def _epoch(text: str, now: float) -> float | None:
     for m in _EPOCH.finditer(text):
         t = float(m[1])
-        if t > now:
+        if _in_horizon(t, now):
             return t
     return None
 
@@ -76,7 +82,7 @@ def _epoch(text: str, now: float) -> float | None:
 def _relative(text: str, now: float) -> float | None:
     for m in _RELATIVE.finditer(text):
         seconds = sum(float(n) * _SECONDS[unit[0].lower()] for n, unit in _PART.findall(m[1]))
-        if seconds > 0:
+        if math.isfinite(seconds) and 0 < seconds <= MAX_RESET_S:
             return now + seconds
     return None
 
