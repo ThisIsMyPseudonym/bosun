@@ -1,0 +1,161 @@
+"""How each CLI is called for a one-shot job: no tools, an empty folder, the prompt never in argv."""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from bosun.providers import argv
+from bosun.providers.catalog import CATALOG, spec
+
+
+def test_claude_json_call_has_no_tools_and_reports_windows(tmp_path):
+    inv = argv.build("claude", binary="claude", model="haiku", schema={"type": "object"}, system="S",
+                     prompt="P", workdir=tmp_path)
+    a = inv.argv
+    assert a[:2] == ("claude", "-p") and a[a.index("--tools") + 1] == ""
+    assert a[a.index("--output-format") + 1] == "stream-json" and "--verbose" in a
+    for flag in ("--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands"):
+        assert flag in a
+    assert a[a.index("--permission-mode") + 1] == "dontAsk"
+    assert a[a.index("--setting-sources") + 1] == "" and a[a.index("--model") + 1] == "haiku"
+    assert inv.stdin == "P" and inv.env == {"DISABLE_PROMPT_CACHING": "1"}
+    assert json.loads(a[a.index("--json-schema") + 1]) == {"type": "object"}
+    assert a[a.index("--disallowedTools") + 1] == "WebSearch,WebFetch,Bash" and inv.files == ()
+
+
+def test_a_provider_with_no_builder_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="no argv builder for 'nope'"):
+        argv.build("nope", binary="x", model="m", schema={}, system="S", prompt="P", workdir=tmp_path)
+
+
+@pytest.mark.parametrize("provider", list(CATALOG))
+def test_every_lockdown_flag_bosun_requires_is_passed_and_every_long_flag_is_checked(provider, tmp_path):
+    inv = argv.build(provider, binary=provider, model="m", schema={"type": "object"}, system="S",
+                     prompt="SECRET-PROMPT", workdir=tmp_path)
+    lockdown = set(spec(provider).lockdown_flags)
+    for flag in lockdown:
+        assert flag in inv.argv, flag
+    emitted_long = {a for a in inv.argv if a.startswith("--")}
+    assert emitted_long <= lockdown, f"{provider} emits unchecked long flags: {sorted(emitted_long - lockdown)}"
+    # Short flags too (Claude's and Gemini's `-p` is what makes the call headless). `-m` only picks a model: if
+    # it were renamed the call would fail, never run with its tools on.
+    emitted_short = {a for a in inv.argv if len(a) == 2 and a[0] == "-" and a[1].isalpha()} - {"-m"}
+    assert emitted_short <= lockdown, f"{provider} emits unchecked short flags: {sorted(emitted_short - lockdown)}"
+    assert not any("SECRET-PROMPT" in a for a in inv.argv)
+    assert inv.argv[0] == provider and "m" in inv.argv
+    assert all(f.parent == tmp_path and f.exists() for f in inv.files)
+
+
+def test_claude_fixer_only_flags_live_in_fixer_flags_not_one_shot_lockdown():
+    cl = spec("claude")
+    assert set(cl.fixer_flags) == {"--restricted", "--permission-prompts"}
+    assert not (set(cl.fixer_flags) & set(cl.lockdown_flags))
+
+
+def test_codex_reads_its_schema_from_a_file_and_the_prompt_from_stdin(tmp_path):
+    inv = argv.build("codex", binary="codex", model="gpt-x", schema={"type": "object"}, system="S", prompt="P",
+                     workdir=tmp_path)
+    schema_file = Path(inv.argv[inv.argv.index("--output-schema") + 1])
+    assert schema_file.parent == tmp_path and json.loads(schema_file.read_text()) == {"type": "object"}
+    assert inv.argv[-1] == "-" and inv.stdin.startswith("S") and inv.stdin.endswith("P")
+    assert inv.argv[inv.argv.index("--sandbox") + 1] == "read-only"
+    assert inv.argv[1] == "exec" and inv.argv[inv.argv.index("-m") + 1] == "gpt-x" and inv.files == (schema_file,)
+    disabled = {inv.argv[i + 1] for i, a in enumerate(inv.argv) if a == "--disable"}
+    # Everything that reaches outside the reply: shell, apps, browsers, computer use, plugins, subagents, local
+    # image reads, image generation, hooks, skills, tool suggestions and memories (off today, pinned off anyway).
+    assert disabled == {"shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins",
+                        "in_app_browser", "browser_use_external", "multi_agent", "view_image", "image_generation",
+                        "hooks", "skill_search", "remote_plugin", "tool_suggest", "memories"}
+    assert disabled == set(spec("codex").lockdown_features)
+    assert 'web_search="disabled"' in inv.argv and "--strict-config" in inv.argv
+
+
+def test_gemini_gets_a_copy_of_the_no_tools_policy_and_the_prompt_on_stdin(tmp_path):
+    import tomllib
+
+    inv = argv.build("gemini", binary="gemini", model="g", schema={"type": "object"}, system="S", prompt="P",
+                     workdir=tmp_path)
+    a = inv.argv
+    policy = Path(a[a.index("--policy") + 1])
+    assert policy.parent == tmp_path and inv.files == (policy,)  # no user name in the path a trace records
+    denied = {n for rule in tomllib.loads(policy.read_text())["rule"] if rule["decision"] == "deny"
+              for n in rule["toolName"]}
+    assert {"run_shell_command", "read_file", "write_file", "replace", "web_fetch", "google_web_search",
+            "save_memory", "read_mcp_resource"} <= denied
+    assert a[a.index("--approval-mode") + 1] == "plan" and a[a.index("--output-format") + 1] == "json"
+    assert a[a.index("-p") + 1] == " " and inv.stdin == "S\n\n---\n\nP"
+
+
+def test_gemini_loads_no_mcp_server_or_extension_and_its_policy_denies_every_tool(tmp_path):
+    import tomllib
+
+    inv = argv.build("gemini", binary="gemini", model="", schema={"type": "object"}, system="S", prompt="P",
+                     workdir=tmp_path)
+    a = inv.argv
+    # plan mode still allows read-only MCP tools, so no user server or extension may load at all
+    assert a[a.index("--allowed-mcp-server-names") + 1] == argv.GEMINI_NO_MCP_SERVER
+    assert "_" not in argv.GEMINI_NO_MCP_SERVER  # an underscore would split the policy's server name
+    assert a[a.index("--extensions") + 1] == "none"  # 0.71.1 docs: `gemini -e none` disables all extensions
+    rules = tomllib.loads(Path(a[a.index("--policy") + 1]).read_text())["rule"]
+    deny_all = [r for r in rules if r["decision"] == "deny" and r.get("toolName") in ("*", ["*"])]
+    assert any("mcpName" not in r for r in deny_all)  # every tool, built-in or MCP
+    assert any(r.get("mcpName") == "*" for r in deny_all)  # and every tool of any MCP server, by the docs' syntax
+    assert {"--allowed-mcp-server-names", "--extensions"} <= set(spec("gemini").lockdown_flags)
+
+
+def test_grok_takes_the_prompt_from_a_file_in_the_temp_folder(tmp_path):
+    inv = argv.build("grok", binary="grok", model="grok-x", schema={"type": "object"}, system="S", prompt="P",
+                     workdir=tmp_path)
+    a = inv.argv
+    prompt = Path(a[a.index("--prompt-file") + 1])
+    assert prompt.parent == tmp_path and prompt.read_text() == "P" and inv.files == (prompt,) and inv.stdin is None
+    assert a[a.index("--tools") + 1] == "todo_write"  # `--tools ""` would mean no restriction at all
+    denied = set(a[a.index("--disallowed-tools") + 1].split(","))
+    assert {"run_terminal_command", "read_file", "web_search", "web_fetch", "write", "spawn_subagent"} <= denied
+    assert a[a.index("--permission-mode") + 1] == "dontAsk" and a[a.index("--system-prompt-override") + 1] == "S"
+    assert json.loads(a[a.index("--json-schema") + 1]) == {"type": "object"}
+    assert a[a.index("--output-format") + 1] == "json" and a[a.index("-m") + 1] == "grok-x"
+
+
+def test_antigravity_gets_one_stream_json_message_with_the_text_only_line(tmp_path):
+    inv = argv.build("antigravity", binary="agy", model="flash", schema={"type": "object"}, system="S", prompt="P",
+                     workdir=tmp_path)
+    a = inv.argv
+    assert inv.stdin.endswith("\n") and inv.stdin.count("\n") == 1  # one NDJSON line
+    message = json.loads(inv.stdin)
+    assert message["event"] == "user" and message["message"]["role"] == "user"
+    assert message["message"]["content"] == argv.AGY_TEXT_ONLY + "S\n\n---\n\nP"
+    assert a[a.index("--input-format") + 1] == a[a.index("--output-format") + 1] == "stream-json"
+    assert a[a.index("--mode") + 1] == "plan" and "--sandbox" in a and a[a.index("--model") + 1] == "flash"
+    assert json.loads(a[a.index("--json-schema") + 1]) == {"type": "object"} and inv.files == ()
+
+
+def test_antigravity_runs_in_print_mode_with_nothing_after_the_valueless_flag(tmp_path):
+    # `--print` takes an optional prompt; the prompt is on stdin, so nothing may follow it to be read as one
+    # (agy 1.1.18 changelog: "a valueless prompt flag swallowing the next flag as its prompt")
+    a = argv.build("antigravity", binary="agy", model="flash", schema={"type": "object"}, system="S", prompt="P",
+                   workdir=tmp_path).argv
+    assert a[-1] == "--print" and a.count("--print") == 1 and "--print" in spec("antigravity").lockdown_flags
+
+
+def test_muse_takes_the_prompt_from_a_file_and_works_in_the_temp_folder(tmp_path):
+    inv = argv.build("muse", binary="muse", model="", schema={"type": "object"}, system="S", prompt="P",
+                     workdir=tmp_path)
+    a = inv.argv
+    prompt = Path(a[a.index("--prompt-file") + 1])
+    schema = Path(a[a.index("--output-schema") + 1])
+    assert prompt.read_text() == "S\n\n---\n\nP" and json.loads(schema.read_text()) == {"type": "object"}
+    assert inv.files == (prompt, schema) and inv.stdin is None and a[a.index("--workspace") + 1] == str(tmp_path)
+    assert a[:4] == ("muse", "exec", "--provider", "meta") and "--model" not in a  # "": Muse's own default
+
+
+def test_gemini_deny_rules_sit_at_the_top_of_their_tier():
+    # --policy loads at the user tier, beside ~/.gemini/policies; within a tier priorities run 0-999 and the
+    # highest wins (0.71.1 docs/reference/policy-engine.md), so a user's own allow rule must not outrank a deny.
+    import tomllib
+
+    from bosun.providers.argv import GEMINI_POLICY
+
+    rules = tomllib.loads(GEMINI_POLICY.read_text(encoding="utf-8"))["rule"]
+    assert rules and all(r["decision"] == "deny" and r["priority"] == 999 for r in rules)

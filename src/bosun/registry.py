@@ -190,6 +190,25 @@ class AgentPolicyIn(_In):
     external: bool | None = Field(None, description="Let agents push branches and open pull requests")
 
 
+# AI logins: which folder each CLI is pointed at. Ids are slugs (they become part of a quota bucket name).
+_AI_PROVIDER = r"^[a-z]{2,20}$"
+
+
+class AiLoginIn(_In):
+    provider: str = Field(pattern=_AI_PROVIDER, description="A CLI that can hold more than one login: claude, codex, "
+                          "gemini or grok")
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,19}$", description="A short name, unique for its CLI (e.g. work)")
+    label: str = Field(min_length=1, max_length=30, description="What you call it, shown beside its windows")
+    home: str = Field(min_length=1, max_length=500, description="The login's config folder, an absolute path the CLI "
+                      "was signed in with (CLAUDE_CONFIG_DIR, CODEX_HOME, GEMINI_CLI_HOME or GROK_HOME)")
+
+
+class AiLoginSetIn(_In):
+    provider: str = Field(pattern=_AI_PROVIDER)
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,19}$", description="The login's id; default for the CLI's own")
+    excluded: bool = Field(description="True: Bosun never routes a job to this login")
+
+
 class DiagnoseIn(TraceIn):
     facts: bool = Field(True, description="Include machine facts and tool versions (runs a few --version commands)")
 
@@ -329,6 +348,14 @@ SPECS: dict[str, ActionSpec] = _specs(
                user_only=True),  # off would silence "actively exploited" for you
     ActionSpec("set_llm_budget", "Cap what Bosun spends on Claude: per refresh, per 24 hours, and for the assistant",
                Risk.LOCAL, BudgetIn, "POST", "/api/usage/budget", user_only=True),
+    ActionSpec("ai_logins", "Each installed AI CLI's logins (its own folder plus added ones), with its version, "
+               "whether it passed its lockdown check, and whether you excluded it", Risk.READ, Empty, "GET",
+               "/api/ai/logins"),
+    # which company's CLI sees this machine's data, and whose plan pays: the owner's call alone
+    ActionSpec("add_ai_login", "Add another login of an AI CLI: a config folder it was signed in with",
+               Risk.LOCAL, AiLoginIn, "POST", "/api/ai/logins", user_only=True),
+    ActionSpec("set_ai_login", "Exclude an AI login from Bosun's jobs, or bring it back",
+               Risk.LOCAL, AiLoginSetIn, "POST", "/api/ai/logins/{provider}/{id}", user_only=True),
     ActionSpec("set_agent_policy", "Choose whether agents (Claude Code over MCP) may quit and reopen apps and open "
                "system updaters, and whether they may push branches and open pull requests",
                Risk.LOCAL, AgentPolicyIn, "POST", "/api/agents/policy", user_only=True),
@@ -424,7 +451,8 @@ ASSISTANT = "assistant"  # the built-in Ask Bosun assistant (assistant.py)
 # What `bosun demo` refuses, besides everything that installs, upgrades, pins, fixes, quits, opens or restores
 # (Risk.INSTALL and above): the small actions that would look at, or run something on, the real computer.
 DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "discard_fix", "watch_app", "check_app",
-                          "assistant_ask", "terminal_input", "terminal_stop"})
+                          "assistant_ask", "terminal_input", "terminal_stop",
+                          "ai_logins", "add_ai_login", "set_ai_login"})
 
 
 def is_agent(actor: Actor) -> bool:

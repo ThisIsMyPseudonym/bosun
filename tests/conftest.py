@@ -79,3 +79,21 @@ def _no_real_store_apps(monkeypatch, tmp_path):
     """The check for an App Store copy before a cask install looks in an empty folder, never this Mac's
     /Applications (tests/test_storeguard.py gives it its own)."""
     monkeypatch.setattr("bosun.storeguard.roots", lambda home=None: (tmp_path / "no-store-apps",))
+
+
+@pytest.fixture(autouse=True)
+def providers_ready(request, monkeypatch):
+    """Every AI CLI is installed and passes its contract check without a process being started or PATH being read:
+    tests never run a real CLI's --version or --help. A test of the check itself is marked `real_contract`
+    (tests/test_providers_contract.py)."""
+    if request.node.get_closest_marker("real_contract"):
+        return
+    from bosun.providers import accounts, contract
+    from bosun.providers.catalog import CATALOG
+
+    monkeypatch.setattr(contract, "check", lambda store, provider, binary, now=None:
+                        contract.ContractStatus(provider, "test", True, (), ""))
+    monkeypatch.setattr(contract, "due", lambda binary, now=None: False)
+    monkeypatch.setattr(contract, "cached", lambda store, provider, binary, now=None, stale_ok=False:
+                        contract.ContractStatus(provider, "test", True, (), ""))
+    monkeypatch.setattr(accounts, "installed", lambda: {p: f"/test/bin/{s.binary}" for p, s in CATALOG.items()})
