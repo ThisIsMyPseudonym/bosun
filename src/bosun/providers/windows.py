@@ -42,14 +42,6 @@ def _number(value: object) -> float | None:
     return f if math.isfinite(f) else None
 
 
-def share(value: object) -> float | None:
-    """A share used as 0-1, from a fraction or a percentage (above 1 means percent), capped at 1."""
-    f = _number(value)
-    if f is None or f < 0:
-        return None
-    return min(1.0, f / 100 if f > 1 else f)
-
-
 def fraction(value: object) -> float | None:
     """A fraction that runs past 1 when usage goes over a cap; capped at 1."""
     f = _number(value)
@@ -126,7 +118,7 @@ def _claude_event(info: dict[str, Any], at: float) -> list[Reading]:
     status = status_of(info.get("status"))
     if status is None:
         return []
-    top = Reading(name_of(info.get("rateLimitType")), status, share(info.get("utilization")),
+    top = Reading(name_of(info.get("rateLimitType")), status, fraction(info.get("utilization")),
                   epoch(info.get("resetsAt")), at)
     out = {top.window: top}
     unified = info.get("unifiedWindows")

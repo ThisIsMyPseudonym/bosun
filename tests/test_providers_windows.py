@@ -34,8 +34,13 @@ def test_unified_windows_each_become_a_reading_and_a_share_over_one_is_capped():
 
 
 def test_an_unknown_window_name_is_kept_under_its_own_name():
-    got = windows.parse_claude(_event(status="allowed", rateLimitType="seven_day_fable", utilization=41), at=1.0)
+    got = windows.parse_claude(_event(status="allowed", rateLimitType="seven_day_fable", utilization=0.41), at=1.0)
     assert got == (R("seven_day_fable", "allowed", 0.41, None, 1.0),)
+
+
+def test_claude_top_level_utilization_over_one_is_capped_at_one():
+    got = windows.parse_claude(_event(status="rejected", rateLimitType="five_hour", utilization=1.5), at=1.0)
+    assert got == (R("five_hour", "rejected", 1.0, None, 1.0),)
 
 
 def test_a_bad_window_name_or_status_is_dropped():
