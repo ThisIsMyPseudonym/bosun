@@ -110,6 +110,11 @@ def cache_key(s: ProviderSpec, version: str, *, include_fixer: bool = False) -> 
     return f"{s.id}|{version}|{hashlib.sha256(wanted.encode()).hexdigest()[:12]}"
 
 
+def cli_version_result(binary: str, timeout: float = 15.0) -> proc.Result:
+    """Run `<binary> --version` through `providers/` so callers outside `providers/` never start an AI CLI."""
+    return proc.run([binary, "--version"], timeout=timeout)
+
+
 def _version(binary: str, at: float) -> str | None:
     key = _binary_key(binary)
     known = _versions.get(key)

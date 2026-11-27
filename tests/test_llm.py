@@ -61,18 +61,26 @@ def test_usage_comes_from_model_usage_with_a_fallback():
 
 
 def test_a_call_is_recorded_in_its_trace(store, monkeypatch):
+    from pydantic import BaseModel
+    from bosun.providers import accounts, run as ai_run
+
+    class Payload(BaseModel):
+        headline: str
+
+    assert not hasattr(llm, "claude") and not hasattr(llm, "ONE_SHOT_ENV")
     monkeypatch.setattr(proc, "run", fake_run(envelope()))
     with trace.run("refresh") as r:
-        call = llm.claude(["claude", "-p", "--model", "sonnet"], purpose="summarize", stdin="x" * 500, item_key="brew:jq",
-                          parse=lambda out: json.loads(out)["structured_output"], notes_chars=480)
-    assert call.ok and call.parsed == GOOD
+        out = ai_run.run(store, "summarize", prompt="x" * 500, system="S", schema=Payload, tier="strong",
+                         item_key="brew:jq", models={"claude": "sonnet"},
+                         pin=accounts.default("claude", "claude"), notes_chars=480)
+    assert out.ok and out.payload == Payload(headline="h")
     row = calls(store)[0]
     assert row["trace_id"] == r.trace_id and row["purpose"] == "summarize" and row["item_key"] == "brew:jq"
     assert row["model"] == "sonnet" and row["outcome"] == "ok" and row["prompt_chars"] == 500 and row["turns"] == 1
     assert row["cost_usd"] == pytest.approx(0.0132) and row["cache_write_tokens"] == 2333
     assert json.loads(row["attrs"]) == {"notes_chars": 480}
-    span = next(s for s in store.trace(r.trace_id)["spans"] if s["kind"] == "llm")
-    assert span["attrs"]["cost_usd"] == pytest.approx(0.0132) and span["attrs"]["outcome"] == "ok"
+    span = next(s for s in store.trace(r.trace_id)["spans"] if s["kind"] == "llm_attempt")
+    assert span["attrs"]["outcome"] == "ok"
 
 
 @pytest.mark.parametrize("out,rc,err,outcome", [
@@ -83,9 +91,13 @@ def test_a_call_is_recorded_in_its_trace(store, monkeypatch):
     (json.dumps({"subtype": "error_max_budget_usd", "is_error": True, "total_cost_usd": 3.0}), 1, "", "budget"),
 ])
 def test_failures_are_classified_and_still_cost_what_they_cost(store, monkeypatch, out, rc, err, outcome):
+    from bosun.fixer import FixReport
+    from bosun.providers import accounts, run as ai_run
+
     monkeypatch.setattr(proc, "run", fake_run(out, rc, err))
-    call = llm.claude(["claude"], purpose="fix")
-    assert call.outcome == outcome and not call.ok
+    res = ai_run.run_claude_fix(store, accounts.default("claude", "claude"), ["claude"],
+                                model="sonnet", schema=FixReport, prompt="P", cwd=store.path.parent)
+    assert res.outcome == outcome and res.report is None
     row = calls(store)[-1]
     assert row["outcome"] == outcome
     if outcome == "budget":
@@ -93,9 +105,13 @@ def test_failures_are_classified_and_still_cost_what_they_cost(store, monkeypatc
 
 
 def test_a_reply_that_fails_its_schema_is_a_schema_error(store, monkeypatch):
+    from bosun.fixer import FixReport
+    from bosun.providers import accounts, run as ai_run
+
     monkeypatch.setattr(proc, "run", fake_run(envelope(structured={"nope": 1})))
-    call = llm.claude(["claude"], purpose="summarize", parse=lambda out: None)
-    assert call.outcome == "schema_error" and calls(store)[0]["cost_usd"] > 0
+    res = ai_run.run_claude_fix(store, accounts.default("claude", "claude"), ["claude"],
+                                model="sonnet", schema=FixReport, prompt="P", cwd=store.path.parent)
+    assert res.outcome == "schema_error" and calls(store)[0]["cost_usd"] > 0
 
 
 def test_summarizer_records_calls_and_stops_at_the_75_percent_line(store, monkeypatch):
@@ -149,9 +165,11 @@ def test_the_75_percent_line_skips_background_summaries_but_clicked_explanations
 
 
 def test_ok_reply_mentioning_not_logged_in_is_not_misclassified(store, monkeypatch):
-    monkeypatch.setattr(proc, "run", fake_run(envelope(result="Fixes the 'Not logged in' error in /login flow")))
-    call = llm.claude(["claude"], purpose="summarize")
-    assert call.ok and call.outcome == "ok"
+    from bosun.providers import replies
+
+    r = proc.Result(("claude",), 0, json.dumps(envelope(result="Fixes the 'Not logged in' error in /login flow")), "")
+    rep = replies.parse("claude", r, time.time())
+    assert rep.outcome == "ok"
 
 
 def test_large_attrs_stay_valid_json_in_llm_usage(store):
@@ -332,9 +350,13 @@ def test_nothing_to_read_means_no_call(store, monkeypatch):
 
 
 def test_fixes_keep_prompt_caching(store, monkeypatch):
+    from bosun.fixer import FixReport
+    from bosun.providers import accounts, run as ai_run
+
     run = recording_run(lambda model: envelope())
     monkeypatch.setattr(proc, "run", run)
-    llm.claude(["claude", "--model", "sonnet"], purpose="fix")
+    ai_run.run_claude_fix(store, accounts.default("claude", "claude"), ["claude", "--model", "sonnet"],
+                          model="sonnet", schema=FixReport, prompt="P", cwd=store.path.parent)
     assert run.seen[0]["env"] is None  # multi-turn: it re-reads its own context each turn
 
 

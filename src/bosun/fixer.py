@@ -25,10 +25,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from . import llm, machine, proc, trace
+from . import machine, proc, trace
 from .config import Settings
 from .models import Item, Source
-from .providers import accounts, catalog, jail, router, routing, run as ai_run
+from .providers import accounts, catalog, contract, jail, router, routing, run as ai_run
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ def parse_claude_version(text: str) -> tuple[int, int, int] | None:
 
 def claude_version_error(claude: str) -> str:
     """'' when the claude CLI is new enough for --restricted and --settings sandbox; otherwise why not."""
-    r = proc.run([claude, "--version"], timeout=15)
+    r = contract.cli_version_result(claude, timeout=15)
     if not r.ok:
         detail = (r.stderr or r.stdout).strip()[:120] or f"exit {r.returncode}"
         return f"Could not check Claude Code version ({detail})"
@@ -366,16 +366,14 @@ class Fixer:
         settings = sandbox_settings(wt, cache, group, self.settings.data_dir)
         item_key = group[0].key if len(group) == 1 else ""
         if login.provider == "claude":
-            acct_env, _ = accounts.login_env(login)
             model = catalog.models_for("claude", "strong", self.settings)
-            call = llm.claude(claude_fix_argv(login.binary, group, model, remaining, settings), purpose="fix",
-                              timeout=1800, cwd=str(cwd), stdin=fix_prompt(group, rel),
-                              env={**cache_env(cache), **acct_env}, sandboxed=True, item_key=item_key,
-                              project=first.project or "", fix=fix_id, items=[i.key for i in group], subdir=rel)
-            r = call.result
-            report, cost, den = self._parse(r)
-            err = None if report else f"[{rel or '.'}] {(r.stderr or r.stdout)[-800:]}"
-            return report, float(cost or 0.0), den, err
+            fix_argv = claude_fix_argv(login.binary, group, model, remaining, settings)
+            res = ai_run.run_claude_fix(
+                self.store, login, fix_argv, model=model, schema=FixReport, prompt=fix_prompt(group, rel), cwd=cwd,
+                env=cache_env(cache), timeout=1800, item_key=item_key, project=first.project or "",
+                sandboxed=True, fix=fix_id, items=[i.key for i in group], subdir=rel)
+            err = None if res.report else f"[{rel or '.'}] {(res.result.stderr or res.result.stdout)[-800:]}"
+            return res.report, float(res.cost_usd), list(res.denied), err
         model = catalog.models_for(login.provider, "strong", self.settings)
         res = ai_run.run_jailed_fix(
             self.store, login, model=model, schema=FixReport, prompt=fix_prompt(group, rel), cwd=cwd, cache=cache,

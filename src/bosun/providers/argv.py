@@ -18,8 +18,11 @@ from typing import Any
 
 from .. import auth
 from ..assistant_prompt import PREFIX, SERVER, TOOL_TIMEOUT_MS
-from ..llm import ONE_SHOT_ENV
 from .catalog import CODEX_DISABLED_FEATURES, CODEX_FIXER_DISABLED_FEATURES
+
+# One-shot calls never read Claude's prompt cache back (each prompt is unique), so switching cache writes off
+# avoids paying the write premium. Multi-turn calls (fixes, the assistant) re-read their context and keep it.
+ONE_SHOT_ENV = {"DISABLE_PROMPT_CACHING": "1"}
 
 
 @dataclass(frozen=True)

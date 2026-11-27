@@ -226,7 +226,7 @@ def test_fixer_commits_even_with_gpgsign_and_cleans_cache_and_guards_discard(tmp
     assert store.fix(fid)["status"] == "fixed" and store.fix(fid)["result"]["commit"]
     assert not (fixer_mod.worktrees_root(s.data_dir) / f".cache-{fid}").exists()
 
-    # cache cleanup also runs when llm.claude raises mid-run
+    # cache cleanup also runs when the fix call raises mid-run
     fid2 = store.create_fix("k2", "p")
     cache2 = fixer_mod.worktrees_root(s.data_dir) / f".cache-{fid2}"
 
@@ -235,7 +235,7 @@ def test_fixer_commits_even_with_gpgsign_and_cleans_cache_and_guards_discard(tmp
         (cache2 / "junk").write_text("x")
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("bosun.fixer.llm.claude", exploding_claude)
+    monkeypatch.setattr("bosun.fixer.ai_run.run_claude_fix", exploding_claude)
     with pytest.raises(RuntimeError, match="boom"):
         f.run(fid2, item_for(repo))
     assert not cache2.exists()

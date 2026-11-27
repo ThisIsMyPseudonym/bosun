@@ -11,9 +11,11 @@ Every summary and "Will this break?" call enters here:
 
 from __future__ import annotations
 
+import inspect
+import json
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -280,3 +282,36 @@ def run_jailed_fix(store: Store, login: accounts.Login, *, model: str, schema: t
         blocked = tuple(f"network: {h}" for h in px.blocked)
     return _finish_fix(store, login, model, schema, prompt, res, took_ms, before, cd, now(),
                        item_key=item_key, project=project, extra_denied=blocked, attrs=attrs)
+
+
+def _claude_denials(stdout: str) -> tuple[str, ...]:
+    try:
+        env = json.loads(stdout)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(env, dict):
+        return ()
+    return tuple(f"{d.get('tool_name')}: {json.dumps(d.get('tool_input'))[:200]}"
+                 for d in env.get("permission_denials") or () if isinstance(d, dict))
+
+
+def run_claude_fix(store: Store, login: accounts.Login, fix_argv: Sequence[str], *, model: str,
+                   schema: type[BaseModel], prompt: str, cwd: Path, env: Mapping[str, str] | None = None,
+                   timeout: float = 1800.0, item_key: str = "", project: str = "",
+                   cooldowns: limits.Cooldowns | None = None, now: Callable[[], float] = time.time,
+                   **attrs: Any) -> FixResult:
+    """Run one Claude fix pass with Claude's own fix argv, keeping prompt caching and recording usage/windows."""
+    cd = COOLDOWNS if cooldowns is None else cooldowns
+    if not store.read_only and not ledger.readings(store, login.bucket):
+        ledger.seed_from_coho(store, login.bucket, now=now())
+    before = {r.window: r for r in ledger.readings(store, login.bucket)}
+    acct_env, unset = accounts.login_env(login)
+    call_env = {**(dict(env) if env else {}), **acct_env} or None
+    kw: dict[str, Any] = {"timeout": timeout, "cwd": str(cwd), "stdin": prompt, "env": call_env}
+    if unset and "unset" in inspect.signature(proc.run).parameters:
+        kw["unset"] = unset
+    t0 = time.perf_counter()
+    res = proc.run(list(fix_argv), **kw)
+    took_ms = round((time.perf_counter() - t0) * 1000, 1)
+    return _finish_fix(store, login, model, schema, prompt, res, took_ms, before, cd, now(),
+                       item_key=item_key, project=project, extra_denied=_claude_denials(res.stdout), attrs=attrs)
