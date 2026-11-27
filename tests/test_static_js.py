@@ -95,6 +95,7 @@ def test_usage_page_never_uses_innerhtml_or_retired_budget_endpoint():
     assert "/api/ai/override" in src
     assert "/api/ai/routing" in src
     assert "/api/ai/notice/dismiss" in src
+    assert "/api/triage/settings" in src
 
 
 def test_usage_rendering_helpers_handle_windows_stale_overrides_and_escaping():
@@ -179,6 +180,19 @@ def test_usage_rendering_helpers_handle_windows_stale_overrides_and_escaping():
       [{{ bucket: "claude", installed: true, provider_label: "Claude Code", label: "Default" }}, {{ bucket: "codex", installed: true, provider_label: "Codex", label: "Default" }}, {{ bucket: "gone", installed: false, provider_label: "Gone CLI", label: "Default" }}], false);
     if (!rpanel.textContent.includes("Balance by pace") || !rpanel.textContent.includes("Branch + test")) throw new Error("routing panel missing controls");
     if (rpanel.textContent.includes("Gone CLI")) throw new Error("an uninstalled login must not be offered for routing");
+
+    // Triage panel renders owner-only switch, privacy explanation, and daily limit control
+    if (typeof H.triagePanel !== "function") throw new Error("MC.usageHelpers.triagePanel missing");
+    const tpanel = H.triagePanel({{ auto: true, daily_limit: 10, daily_used: 3, daily_remaining: 7 }}, false);
+    const ttext = tpanel.textContent;
+    if (!ttext.includes("Triage failures automatically") || !ttext.includes("redacted") || !ttext.includes("3 / 10")) {{
+      throw new Error("triage panel missing label, privacy text, or count: " + ttext);
+    }}
+    const tdemo = H.triagePanel({{ auto: true, daily_limit: 10, daily_used: 0, daily_remaining: 10 }}, true);
+    const demoInputs = allNodes(tdemo).filter((n) => n.tagName === "INPUT");
+    if (demoInputs.length < 2 || !demoInputs.every((n) => n.attrs.disabled !== undefined || n.disabled)) {{
+      throw new Error("triage panel inputs must be disabled in demo mode");
+    }}
 
     console.log("OK");
     """
