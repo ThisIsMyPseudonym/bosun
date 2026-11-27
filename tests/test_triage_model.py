@@ -195,3 +195,33 @@ def test_proc_run_kill_group_terminates_grandchild_on_exit(tmp_path):
             break
         time.sleep(0.05)
     assert not proc.pid_alive(child_pid2), f"grandchild {child_pid2} survived timeout kill_group"
+
+
+def test_kill_pg_uses_taskkill_tree_on_windows_and_skips_reaped_leader_on_posix(monkeypatch):
+    import inspect
+    import os
+    import subprocess
+    from types import SimpleNamespace
+
+    assert inspect.signature(proc.run).parameters["kill_group"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    # Windows: taskkill /T /F /PID <pid> runs on both running and normally-exited children
+    calls: list[list[str]] = []
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda argv, **_kw: calls.append(list(argv)) or subprocess.CompletedProcess(argv, 0),
+    )
+    for rc in (None, 0):
+        fake_p = SimpleNamespace(pid=4242, returncode=rc, poll=lambda _rc=rc: _rc, kill=lambda: None)
+        proc._kill_pg(fake_p)  # type: ignore[arg-type]
+    assert calls == [["taskkill", "/T", "/F", "/PID", "4242"], ["taskkill", "/T", "/F", "/PID", "4242"]]
+
+    # POSIX: once the leader is reaped (returncode is not None), os.killpg is skipped to prevent PID reuse
+    if hasattr(os, "killpg"):
+        pg_calls: list[tuple[int, int]] = []
+        monkeypatch.setattr(proc.os, "name", "posix")
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: pg_calls.append((pgid, sig)))
+        reaped = SimpleNamespace(pid=9999, returncode=0)
+        proc._kill_pg(reaped)  # type: ignore[arg-type]
+        assert pg_calls == []
