@@ -60,6 +60,27 @@ VIEWS: dict[str, tuple[str, dict[str, str], str]] = {
          "failed_output": "The tail of its stderr, or of its stdout when stderr was empty. Kept for 30 days."},
         "SELECT datetime(ts, 'unixepoch', 'localtime') AS at, what, kind, subject, error, failed_command "
         "FROM v_failures ORDER BY ts DESC LIMIT 20"),
+    "v_triage": (
+        "One triage verdict per failed job, fix or run, with the unpacked cause, confidence and suggested next step.",
+        {"failure": "job:<id>, fix:<id> or run:<trace_id>; unique.",
+         "trace_id": "The failed run's trace id.",
+         "signature": "SHA-256 over the normalized failure kind, source, command verb, exit code and error line.",
+         "status": "queued, running, waiting_quota, done, skipped, failed or fixed_since.",
+         "source": "rules, cache or model.",
+         "same_as": "For cache rows: the origin triage.id whose verdict this reuses.",
+         "triage_trace": "The model triage run's own trace id, if a model ran.",
+         "feedback": "helpful, wrong, disputed, or empty.",
+         "category": "One of the 16 verdict categories (permissions, busy_or_locked, network, ...).",
+         "cause": "One-sentence explanation of why the run failed.",
+         "confidence": "high, medium or low.",
+         "next_step_kind": "recipe, retry, rescan, runbook, agent_prompt or none.",
+         "next_step_recipe": "Terminal recipe name when next_step_kind is recipe.",
+         "next_step_runbook": "Runbook topic under docs/runbooks/ when next_step_kind is runbook.",
+         "next_step_why": "One sentence explaining the suggested next step.",
+         "needs_person": "1 = retrying unattended would fail the same way.",
+         "transient": "1 = likely to succeed on a later try with no change."},
+        "SELECT datetime(created, 'unixepoch', 'localtime') AS at, failure, source, category, cause, next_step_kind "
+        "FROM v_triage WHERE status = 'done' ORDER BY created DESC LIMIT 20"),
     "v_llm_spend": (
         "What Claude cost: calls, tokens and list-price cost per day, purpose, model and item.",
         {"day": "Local date.",
@@ -121,6 +142,8 @@ TABLES: dict[str, str] = {
                 "The words themselves are not readable here; the panel shows them. Deleted with the conversation.",
     "quota_windows": "The latest reading of each plan usage window (5-hour, weekly, per model) per AI login. A "
                      "reading past `resets_at`, or undated and a week old, says nothing about now.",
+    "triage": "One error-triage verdict per failed job, fix or run: cause, confidence, evidence and suggested next step. "
+              "Kept for a year.",
 }
 
 # for columns the schema has no comment on (tables from before comments were written)

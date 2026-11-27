@@ -279,7 +279,7 @@ def test_v11_retires_stored_budgets_and_keeps_the_old_rows(tmp_path):
     Store(path).close()
     after = sqlite3.connect(path)
     rows = dict(after.execute("SELECT key, value FROM settings").fetchall())
-    assert migrations.current_version(after) == 11
+    assert migrations.current_version(after) == migrations.latest_version()
     assert rows["llm_daily_budget_usd"] == "4"
     assert rows["llm_refresh_budget_usd"] == "1.5"
     assert rows["llm_assistant_budget_usd"] == "3"
@@ -327,3 +327,39 @@ def test_v11_records_only_real_caps(tmp_path):
     retired = json.loads(rows["ai_budgets_retired"])
     assert retired["assistant_usd"] == 2.5 and "daily_usd" not in retired and "refresh_usd" not in retired
     db.close()
+
+
+def test_v12_adds_triage_table_and_view_without_touching_older_rows(tmp_path):
+    import json
+
+    from bosun import query
+
+    path = tmp_path / "bosun.db"
+    db = sqlite3.connect(path)
+    migrate(db, path, migrations.MIGRATIONS[:11])  # a v11 database
+    db.execute("INSERT INTO settings (key, value) VALUES ('kept_v11', 'yes')")
+    db.commit()
+    db.close()
+
+    store = Store(path)
+    assert migrations.current_version(store._db) == 12
+    assert store.setting("kept_v11") == "yes"
+    verdict = {
+        "category": "permissions",
+        "cause": "Not writable.",
+        "confidence": "high",
+        "evidence": [],
+        "next_step": {"kind": "runbook", "recipe": None, "runbook": "homebrew-permissions", "why": "Fix."},
+        "needs_person": True,
+        "transient": False,
+    }
+    with store._tx(write=True) as tx:
+        tx.execute(
+            "INSERT INTO triage (failure, trace_id, signature, status, source, verdict, created, finished) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("job:1", "abcd1234", "sig1", "done", "rules", json.dumps(verdict), 1000.0, 1001.0),
+        )
+    got = query.run(store.path, "SELECT failure, category, confidence, next_step_kind, next_step_runbook FROM v_triage")
+    assert got["rows"] == [["job:1", "permissions", "high", "runbook", "homebrew-permissions"]]
+    store.close()
+

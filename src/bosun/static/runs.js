@@ -108,12 +108,198 @@ function timeline(nodes, total, t0, depth = 0) {
       el("span", { class: "tline", text: spanLine(sp) }), bar, el("span", { class: "ttook", text: took(sp.duration_ms) })];
     const hasDetail = sp.kind === "subprocess" || bad || Object.keys(sp.attrs || {}).length;
     const row = hasDetail
-      ? MC.details(`span:${sp.span_id}`, bad && sp.kind === "subprocess", { class: `trow${bad ? " bad" : ""}` },
+      ? MC.details(`span:${sp.span_id}`, bad && sp.kind === "subprocess", { id: `span-${sp.span_id}`, class: `trow${bad ? " bad" : ""}` },
           el("summary", {}, ...head), el("div", { class: "tdetail" }, ...spanDetail(sp)))
-      : el("div", { class: `trow flat${bad ? " bad" : ""}` }, ...head);
+      : el("div", { id: `span-${sp.span_id}`, class: `trow flat${bad ? " bad" : ""}` }, ...head);
     return [row, ...timeline(sp.children, total, t0, depth + 1)];
   });
 }
+
+// --- triage verdict card and DOM-only runbook viewer -----------------------------------------------------------
+const CONF_LABEL = { high: "High confidence", medium: "Medium confidence", low: "Low confidence" };
+const CONF_TONE = { high: "ok", medium: "warn", low: "bad" };
+
+function parseTable(lines, start) {
+  const splitRow = (ln) => ln.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+  const head = splitRow(lines[start]), body = [];
+  let i = start + 2;
+  while (i < lines.length && lines[i].trim().startsWith("|")) { body.push(splitRow(lines[i])); i += 1; }
+  const tbl = el("table", { class: "rb-table" },
+    el("thead", {}, el("tr", {}, ...head.map((c) => el("th", { text: c })))),
+    el("tbody", {}, ...body.map((r) => el("tr", {}, ...r.map((c) => el("td", { text: c }))))));
+  return [tbl, i];
+}
+
+function renderRunbookMarkdown(md) {
+  const box = el("div", { class: "rb-body" }), lines = (md || "").replace(/\r\n/g, "\n").split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const ln = lines[i], tr = ln.trim();
+    if (!tr) { i += 1; continue; }
+    if (tr.startsWith("```")) {
+      const code = []; i += 1;
+      while (i < lines.length && !lines[i].trim().startsWith("```")) { code.push(lines[i]); i += 1; }
+      i += 1; box.append(el("pre", { class: "out", text: code.join("\n") })); continue;
+    }
+    const hm = tr.match(/^(#{1,3})\s+(.*)$/);
+    if (hm) { box.append(el(`h${Math.min(hm[1].length + 1, 4)}`, { text: hm[2] })); i += 1; continue; }
+    if (tr.startsWith("|") && i + 1 < lines.length && /^\|[\s:|-]+\|?$/.test(lines[i + 1].trim())) {
+      const [tbl, next] = parseTable(lines, i); box.append(tbl); i = next; continue;
+    }
+    if (/^[-*]\s+/.test(tr)) {
+      const items = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) { items.push(lines[i].trim().replace(/^[-*]\s+/, "")); i += 1; }
+      box.append(el("ul", {}, ...items.map((x) => el("li", { text: x })))); continue;
+    }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !/^(#{1,3}\s|```|\||[-*]\s)/.test(lines[i].trim())) { para.push(lines[i].trim()); i += 1; }
+    box.append(el("p", { text: para.join(" ") }));
+  }
+  return box;
+}
+
+async function openRunbook(topic) {
+  try {
+    const data = await api(`/api/runbooks/${encodeURIComponent(topic)}`);
+    let dlg = document.getElementById("runbook-dialog");
+    if (!dlg) { dlg = el("dialog", { id: "runbook-dialog", class: "rb-dialog" }); document.body.append(dlg); }
+    dlg.replaceChildren(
+      el("div", { class: "rb-head" }, el("h3", { text: data.title || topic }),
+        el("button", { class: "quiet", text: "Close", onclick: () => dlg.close() })),
+      renderRunbookMarkdown(data.markdown));
+    dlg.showModal();
+  } catch (e) { if (MC.banner) MC.banner(`Could not open guide: ${e.message}`); }
+}
+
+async function sendFeedback(traceId, value) {
+  try {
+    const updated = await api(`/api/runs/${encodeURIComponent(traceId)}/triage/feedback`,
+      { method: "POST", body: JSON.stringify({ feedback: value }) });
+    if (R.trace && R.trace.run.trace_id === traceId) { R.trace.triage = updated; MC.render(); }
+  } catch (e) { if (MC.banner) MC.banner(`Could not save feedback: ${e.message}`); }
+}
+
+function triageProvenance(triage, S) {
+  if (triage.source === "rules") return el("span", { class: "triage-src", text: "Rules" });
+  if (triage.source === "cache") {
+    const o = triage.same_as_run;
+    if (o && o.trace_id) {
+      const label = `${subjectName(S, { kind: o.kind || "upgrade", subject: o.subject || "" })} ${KIND_LABEL[o.kind] || o.kind || "run"}`;
+      return el("span", { class: "triage-src" }, "Same as ",
+        el("a", { href: `#/runs/${o.trace_id}`, text: label }));
+    }
+    return el("span", { class: "triage-src", text: "Same as an earlier run" });
+  }
+  return el("span", { class: "triage-src", text: triage.source ? `Source: ${triage.source}` : "" });
+}
+
+function fixRetryKeys(trace, triage) {
+  const r = trace.run, fixes = trace.fixes || [];
+  const fx = fixes.find((f) => f.trace_id === r.trace_id) || fixes[0];
+  const valid = (arr) => (arr || []).filter((k) => typeof k === "string" && k.includes(":") && !k.startsWith("batch:"));
+  const fromResult = valid(fx && fx.result && fx.result.keys);
+  if (fromResult.length) return fromResult;
+  const fromItem = valid(fx && fx.item_key ? [fx.item_key] : []);
+  if (fromItem.length) return fromItem;
+  return valid(triage && triage.item_keys);
+}
+
+function retryAction(trace, triage, S) {
+  const r = trace.run;
+  if (r.kind === "fix" && MC.actions.fix) {
+    const keys = fixRetryKeys(trace, triage);
+    return keys.length ? () => MC.actions.fix(keys) : null;
+  }
+  if (["upgrade", "manual"].includes(r.kind) && MC.actions.upgrade) {
+    const jobKeys = (trace.jobs || []).map((j) => j.item_key).filter((k) => k && k.includes(":"));
+    const keys = jobKeys.length ? jobKeys : (r.subject && r.subject.includes(":") ? [r.subject] : []);
+    return keys.length ? () => MC.actions.upgrade(keys) : null;
+  }
+  if (r.kind === "recheck-project" && r.subject && MC.actions.recheckProject) {
+    return () => MC.actions.recheckProject(r.subject, subjectName(S, r));
+  }
+  if (["refresh", "recheck"].includes(r.kind)) {
+    return () => api("/api/refresh", { method: "POST" }).catch((e) => { if (MC.banner) MC.banner(e.message); });
+  }
+  return null;
+}
+
+function triageStepAction(step, trace, triage, S) {
+  if (!step) return null;
+  if (step.kind === "runbook" && step.runbook) {
+    return el("button", { class: "primary", text: "Open guide", onclick: () => openRunbook(step.runbook) });
+  }
+  if (step.kind === "recipe" && MC.recipeButtons) return MC.recipeButtons({ trace_id: trace.run.trace_id });
+  if (step.kind === "retry") {
+    const go = retryAction(trace, triage, S);
+    const out = [];
+    if (go) out.push(el("button", { class: "primary", text: "Try again", onclick: go }));
+    if (step.runbook) {
+      out.push(el("button", { class: go ? "quiet" : "primary", text: "Open guide", onclick: () => openRunbook(step.runbook) }));
+    }
+    return out.length ? out : null;
+  }
+  if (step.kind === "rescan") {
+    const r = trace.run;
+    const go = () => (r.kind === "recheck-project" && r.subject && MC.actions.recheckProject
+      ? MC.actions.recheckProject(r.subject, subjectName(S, r))
+      : api("/api/refresh", { method: "POST" }).catch((e) => { if (MC.banner) MC.banner(e.message); }));
+    return el("button", { class: "primary", text: "Re-scan", onclick: go });
+  }
+  if (step.kind === "agent_prompt") {
+    const btn = el("button", { class: "primary", text: "Continue in your coding agent",
+      onclick: () => navigator.clipboard.writeText(agentText(trace)).then(() => { btn.textContent = "Copied"; }, () => {}) });
+    return btn;
+  }
+  return el("span", { class: "triage-none", text: "Nothing to do" });
+}
+
+function jumpToSpan(ref) {
+  const target = document.getElementById(`span-${ref}`);
+  if (!target) return;
+  if (target.tagName === "DETAILS") target.open = true;
+  if (target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function verdictCard(triage, trace, S) {
+  if (!triage || !["done", "disputed", "fixed_since"].includes(triage.status)) return null;
+  if (triage.status === "fixed_since") {
+    return el("div", { class: "panel triage-card triage-fixed" },
+      el("div", { class: "triage-head" }, el("span", { class: "runstatus ok", text: "Fixed since" }),
+        el("span", { class: "hint", text: "A later run of the same kind succeeded." })));
+  }
+  const v = triage.verdict;
+  if (!v) return null;
+  const heading = v.category === "unknown" ? "Not sure" : "Likely cause";
+  const spanIds = new Set((trace.spans || []).map((sp) => sp.span_id));
+  const evList = (v.evidence || []).length
+    ? el("ul", { class: "triage-ev" }, ...v.evidence.map((ev) => {
+        const ref = ev.ref && spanIds.has(ev.ref)
+          ? el("a", { href: `#span-${ev.ref}`, class: "triage-evref", text: ev.source,
+              onclick: (e) => { e.preventDefault(); jumpToSpan(ev.ref); } })
+          : el("span", { class: "triage-evref", text: ev.source });
+        return el("li", {}, ref, " ", el("code", { text: ev.line }));
+      })) : null;
+  const tid = trace.run.trace_id;
+  const fbBtn = (label, val) => el("button", {
+    class: `quiet${triage.feedback === val ? " on" : ""}`, "aria-pressed": String(triage.feedback === val),
+    text: label, onclick: () => sendFeedback(tid, val),
+  });
+  return el("div", { class: "panel triage-card" },
+    el("div", { class: "triage-head" },
+      el("strong", { text: heading }),
+      el("span", { class: `triage-conf ${CONF_TONE[v.confidence] || ""}`, text: CONF_LABEL[v.confidence] || v.confidence }),
+      (triage.status === "disputed" || triage.feedback === "disputed" || triage.feedback === "wrong")
+        ? el("span", { class: "triage-conf warn", text: "Disputed" }) : null),
+    el("p", { class: "triage-cause", text: v.cause }),
+    evList,
+    el("div", { class: "triage-step" }, triageStepAction(v.next_step, trace, triage, S),
+      v.next_step && v.next_step.why ? el("span", { class: "hint", text: v.next_step.why }) : null),
+    el("div", { class: "triage-foot" }, triageProvenance(triage, S),
+      el("div", { class: "triage-fb" }, fbBtn("Helpful", "helpful"), fbBtn("Wrong", "wrong"))));
+}
+
+MC.triageHelpers = { verdictCard, renderRunbookMarkdown, triageProvenance, openRunbook };
 
 function agentText(t) {
   const r = t.run, fails = t.failures || [];
@@ -159,6 +345,7 @@ MC.views.trace = function traceView(S, id) {
     el("div", { class: "pagehead" },
       el("h1", {}, el("span", { text: `${KIND_LABEL[r.kind] || r.kind}: ${subjectName(S, r) || "—"} ` }), statusChip(r.status)),
       el("p", { class: "hint", text: `${new Date(r.started * 1000).toLocaleString()} · ${r.status === "running" ? "running…" : took(r.duration_ms)} · by ${r.actor} · trace ${r.trace_id.slice(0, 8)}` })),
+    t.triage ? verdictCard(t.triage, t, S) : null,
     r.error ? el("div", { class: `callout${r.status === "partial" ? "" : " crit"}`, text: r.error }) : r.summary ? el("p", { text: r.summary }) : null,
     el("div", { class: "actions" },
       ["failed", "partial", "interrupted"].includes(r.status) ? el("button", { class: "primary", text: "Why did this fail?",
