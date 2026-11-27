@@ -65,6 +65,30 @@ def test_demo_still_lets_you_read_and_put_an_item_away(client):
     assert r.status_code == 200
 
 
+def test_demo_ai_usage_shows_windows_and_pace(client, monkeypatch):
+    from bosun.providers import accounts
+
+    monkeypatch.setattr(accounts, "installed", lambda: (_ for _ in ()).throw(AssertionError("touched real CLIs")))
+    r = client.get("/api/usage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["demo"] is True
+    by_bucket = {lg["bucket"]: lg for lg in body["logins"]}
+    assert set(by_bucket) == {"claude", "codex"}
+    claude_wins = {w["window"]: w for w in by_bucket["claude"]["windows"]}
+    assert claude_wins["five_hour"]["share"] == pytest.approx(0.41)
+    assert claude_wins["seven_day"]["share"] == pytest.approx(0.63)
+    assert claude_wins["five_hour"]["pace"] is not None and claude_wins["five_hour"]["reset"]
+    assert claude_wins["seven_day"]["pace"] is not None and claude_wins["seven_day"]["reset"]
+    assert claude_wins["five_hour"]["bosun_share"] > 0
+    codex_wins = {w["window"]: w for w in by_bucket["codex"]["windows"]}
+    assert codex_wins["five_hour"]["share"] == pytest.approx(0.12)
+    assert codex_wins["five_hour"]["pace"] is not None and codex_wins["five_hour"]["reset"]
+    assert body["top_jobs"] and body["top_jobs"][0]["window_draw"] > 0
+    assert body["routing"]["mode"] == "default" and body["routing"]["pins"] == {"fix": "claude"}
+    assert body["detail"]["totals"]["calls"] > 0 and body["budgets_retired"] is None
+
+
 def test_the_demo_never_starts_on_a_port_something_else_holds(tmp_path, monkeypatch, capsys):
     """The real dashboard may be running on the usual port: the demo picks a free one, and when it is told a
     port that is taken it says so and prints no link (a link to that port would open whatever holds it)."""

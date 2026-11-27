@@ -15,6 +15,7 @@ from collections import Counter
 from . import lanes
 from .models import Item, Source, Summary, Vuln
 from .projects import Project
+from .providers import ledger, windows
 from .serialize import item_to_dict, project_to_dict
 from .store import Store
 
@@ -129,13 +130,42 @@ def items() -> list[Item]:
     ]
 
 
+def _seed_ai_usage(store: Store, now: float) -> None:
+    """Seed made-up plan usage windows and AI calls so the usage page shows a full view in demo mode."""
+    ledger.save(store, "claude", (
+        windows.Reading("five_hour", "allowed", 0.41, now + 2.5 * 3600, now - 300, "output"),
+        windows.Reading("seven_day", "allowed", 0.63, now + 3 * DAY, now - 300, "output"),
+    ), now=now)
+    ledger.save(store, "codex", (
+        windows.Reading("five_hour", "allowed", 0.12, now + 3.5 * 3600, now - 600, "output"),
+    ), now=now)
+    rows = [
+        # (offset_s, provider, account, job, item_key, model, in_tok, out_tok, cache_r, cost_usd, draw, est, outcome)
+        (1200, "claude", "default", "summarize", "brew-cask:firefox", "haiku", 1400, 260, 0, 0.008, 0.02, 0, "ok"),
+        (1800, "claude", "default", "summarize", "brew:python@3.12", "sonnet", 2100, 390, 0, 0.024, 0.03, 0, "ok"),
+        (2400, "claude", "default", "explain", f"repo:npm:url-sanitize-lite@{ORCHARD}", "sonnet", 3200, 620, 0, 0.042, 0.04, 0, "ok"),
+        (3000, "claude", "default", "assistant", "", "sonnet", 480, 410, 4200, 0.031, 0.02, 0, "ok"),
+        (3600, "codex", "default", "summarize", f"repo:npm:router-lite@{TIDEPOOL}", "gpt-5.6-luna", 1800, 310, 0, 0.011, 0.02, 1, "ok"),
+        (DAY + 900, "claude", "default", "summarize", "brew:jq", "haiku", 0, 0, 0, 0.0, None, 0, "cached"),
+        (DAY + 1200, "claude", "default", "summarize", "brew:ripgrep", "haiku", 0, 0, 0, 0.0, None, 0, "cached"),
+        (2 * DAY, "claude", "default", "fix", f"repo:npm:tiny-parse@{ORCHARD}", "sonnet", 4500, 1200, 14000, 0.18, 0.06, 0, "ok"),
+    ]
+    with store._tx(write=True) as db:
+        db.executemany(
+            "INSERT INTO llm_calls (ts, purpose, item_key, model, input_tokens, output_tokens, cache_read_tokens, "
+            "cost_usd, outcome, provider, account, job, window_draw, estimated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(now - off, job, key, model, inp, out, cr, cost, outcome, prov, acct, job, draw, est)
+             for off, prov, acct, job, key, model, inp, out, cr, cost, draw, est, outcome in rows],
+        )
+
+
 def seed(store: Store, now: float | None = None) -> int:
     """Write one snapshot of the made-up computer, with a coverage line and a name. Returns the snapshot id."""
     now = time.time() if now is None else now
     classified = lanes.classify(items(), PROJECTS)
     rows = sorted((item_to_dict(i) for i in classified), key=lambda d: (-d["risk"], d["name"].lower()))
     # When each update was first on offer. Only one is new: Autopilot holds that one for three days.
-    with store._tx() as db:
+    with store._tx(write=True) as db:
         for d in rows:
             if d.get("available") and d["key"] != WAITING:
                 db.execute("INSERT OR REPLACE INTO offers (item_key, version, first_seen) VALUES (?,?,?)",
@@ -143,5 +173,6 @@ def seed(store: Store, now: float | None = None) -> int:
     store.set_setting("machine_name", MACHINE_NAME)
     store.set_setting("coverage_mac_apps", json.dumps({
         "apps": 52, "unchecked": ["Demo Calculator Pro", "Pocket Ledger", "Small Tools Suite", "Tidy Desk"]}))
+    _seed_ai_usage(store, now)
     return store.save_snapshot(rows, [], meta={"projects": [project_to_dict(p) for p in PROJECTS.values()],
                                                "lanes": dict(Counter(d["lane"] for d in rows))})
