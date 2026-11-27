@@ -129,7 +129,7 @@ def test_explainer_facts_and_cache(tmp_path, monkeypatch):
               "preconditions": ["you run pnpm install on a hostile repo"], "worst_case": "w", "urgency": "this_week",
               "break_risk": [{"where": "web", "risk": "medium", "why": "lockfile v9 -> v10"}], "before_upgrading": ["x"]}
 
-    def fake(argv, timeout=300, cwd=None, stdin=None, env=None):
+    def fake(argv, timeout=300, cwd=None, stdin=None, env=None, unset=()):
         calls.append(argv)
         assert argv[argv.index("--tools") + 1] == "" and "--strict-mcp-config" in argv
         return proc.Result(tuple(argv), 0, json.dumps({"subtype": "success", "structured_output": answer}), "")

@@ -1,23 +1,22 @@
 """On-demand impact assessment: "Can someone hack my computer through this?" and
-"Will upgrading break my projects?", answered by Claude Code from the facts we hold.
+"Will upgrading break my projects?", answered through Bosun's provider layer from the facts we hold.
 
-Sandboxed like the summarizer (no tools, no MCP, no settings, empty cwd). Cached per
+Sandboxed like the summarizer (no tools, no MCP, no settings, fresh empty temporary directory). Cached per
 (item, installed -> available, vuln set) so reopening the drawer is instant.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import shutil
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from .. import llm, proc  # noqa: F401  (proc: tests patch proc.run through here)
 from ..models import Item, Source
+from ..providers import accounts, run as ai_run
 from ..store import Store
 from .exposure import REACH_LABEL, impact, profile, reach
 
@@ -49,12 +48,6 @@ class Assessment(BaseModel):
     urgency: Literal["today", "this_week", "next_maintenance", "optional"]
     break_risk: list[BreakRisk] = Field(description="Per project/usage: could upgrading break it? Empty if not applicable")
     before_upgrading: list[str] = Field(description="Concrete checks or steps to do before/after upgrading")
-
-
-def _schema() -> str:
-    s = Assessment.model_json_schema()
-    s["additionalProperties"] = False
-    return json.dumps(s, separators=(",", ":"))
 
 
 def facts(item: Item) -> str:
@@ -101,7 +94,15 @@ def cache_key(item: Item) -> str:
 class Explainer:
     def __init__(self, store: Store, model: str, sandbox: Path, claude: str | None = None):
         self.store, self.model, self.sandbox = store, model, sandbox
-        self.claude = claude if claude is not None else shutil.which("claude")
+        # `claude=""` disables AI calls; a non-empty path pins Claude-only (existing tests); None uses the router.
+        self.claude = claude
+
+    def _logins(self) -> tuple[accounts.Login, ...] | None:
+        if self.claude == "":
+            return ()
+        if self.claude:
+            return (accounts.default("claude", self.claude),)
+        return None
 
     def cached(self, item: Item) -> dict | None:
         return self.store.cache_get("explain", cache_key(item))
@@ -110,35 +111,20 @@ class Explainer:
         hit = self.cached(item)
         if hit:
             return hit
-        if not self.claude:
-            raise RuntimeError("Claude Code CLI ('claude') not found on PATH")
+        if self.claude == "":
+            raise RuntimeError("No AI CLI available")
         reason = llm.over_budget(self.store, "explain")
         if reason:
             llm.record("explain", outcome="budget", item_key=item.key, error=reason)
             raise RuntimeError(f"not asked: {reason} (Settings on the AI usage page)")
-        self.sandbox.mkdir(parents=True, exist_ok=True)
-        argv = [self.claude, "-p", "--output-format", "json", "--json-schema", _schema(), "--tools", "",
-                "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence",
-                "--model", self.model, "--system-prompt", SYSTEM]
-        problems: list[str] = []
-
-        def parse(stdout: str) -> dict | None:
-            try:
-                env = json.loads(stdout)
-                payload = env.get("structured_output") or json.loads(env.get("result") or "{}")
-                return Assessment.model_validate(payload).model_dump()
-            except (json.JSONDecodeError, ValidationError, AttributeError) as exc:
-                problems.append(str(exc)[:300])
-                return None
-
-        stdin = facts(item)
-        call = llm.claude(argv, purpose="explain", timeout=240, cwd=str(self.sandbox), stdin=stdin, item_key=item.key,
-                          parse=parse, one_shot=True, source=item.source.value, project=item.project or "")
-        if call.outcome == "schema_error":
-            raise RuntimeError(f"unexpected assessment output: {problems[0] if problems else call.error}")
-        if not call.ok:
-            raise RuntimeError(f"claude CLI failed (rc={call.result.returncode}): {call.error}")
-        result = call.parsed
-        result["model"] = f"claude-code:{self.model}"
+        out = ai_run.run(
+            self.store, "explain", prompt=facts(item), system=SYSTEM, schema=Assessment,
+            tier="strong", item_key=item.key, project=item.project or "", clicked=True,
+            models={"claude": self.model}, logins=self._logins(), source=item.source.value,
+        )
+        if not out.ok or out.login is None:
+            raise RuntimeError(out.reason)
+        result = out.payload.model_dump()
+        result["model"] = ai_run.model_tag(out.login.provider, out.model)
         self.store.cache_put("explain", cache_key(item), result)
         return result
