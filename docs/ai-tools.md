@@ -78,6 +78,13 @@ Bosun can use any supported AI CLI you have installed and signed in to: **Claude
     or Bosun's own files. This is what contains a dependency's install script or a misled agent.
   - Removing a package reported as malware never runs its code: installs skip scripts, and no
     tests or builds run.
+  - **Codex (experimental, macOS only, off by default).** Set `BOSUN_EXPERIMENTAL_JAILED_FIX=codex` and pin
+    `fix` to Codex on the AI usage page. Codex then runs inside one Seatbelt jail around the whole process: writes
+    only to the worktree, a throwaway cache and its own login folder; no reads of credentials or Bosun's data; network
+    only through a local proxy that allows the registries and Codex's own API hosts; and none of Bosun's environment
+    beyond PATH, HOME and the locale. Not yet checked against a real Codex run. Known limits: Codex can write its
+    own login folder, so a misled run could leave settings for your next Codex session; it has no cost cap beyond
+    the 30-minute timeout; and data can still reach the model provider's API. Linux has no jail yet.
   - `--permission-mode dontAsk` with `--permission-prompts none`: anything else is denied,
     never asked.
   - `--max-budget-usd`: a fixed per-run runaway guard ($3) for Claude Code.

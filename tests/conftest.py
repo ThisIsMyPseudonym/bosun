@@ -92,7 +92,7 @@ def providers_ready(request, monkeypatch):
     from bosun.providers import accounts, contract, limits, run
     from bosun.providers.catalog import CATALOG
 
-    monkeypatch.setattr(contract, "check", lambda store, provider, binary, now=None:
+    monkeypatch.setattr(contract, "check", lambda store, provider, binary, now=None, include_fixer=False:
                         contract.ContractStatus(provider, "test", True, (), ""))
     monkeypatch.setattr(contract, "due", lambda binary, now=None: False)
     monkeypatch.setattr(contract, "cached", lambda store, provider, binary, now=None, stale_ok=False:

@@ -566,7 +566,7 @@ def _install_windows(args, s) -> int:
 def cmd_doctor(args, s) -> int:
     from . import doctor
 
-    text, rc = doctor.report(doctor.check(s))
+    text, rc = doctor.report(doctor.check(s, providers=bool(getattr(args, "providers", False))))
     print(text)
     return rc
 
@@ -896,7 +896,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("serve", help="run the dashboard on 127.0.0.1")
     sub.add_parser("demo", help="the dashboard on made-up data, with every action that changes anything refused "
                    "(for a first look and for screenshots)")
-    sub.add_parser("doctor", help="what this machine has and lacks for Bosun to work (changes nothing)")
+    doc = sub.add_parser("doctor", help="what this machine has and lacks for Bosun to work (changes nothing)")
+    doc.add_argument("--providers", action="store_true",
+                     help="opt-in live check: send one tiny prompt to each installed AI login and record its windows")
     op = sub.add_parser("open", help="open the dashboard in its own window, starting it first if it isn't running")
     op.add_argument("--print-url", action="store_true", help=argparse.SUPPRESS)  # for Bosun's own window on macOS
     sub.add_parser("install-launcher", help="a Bosun app icon: Start menu, ~/Applications, or your Linux app list "
@@ -955,7 +957,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "mcp" and getattr(args, "port", None) is not None and 1 <= args.port <= 65535:
         import dataclasses
         s = dataclasses.replace(s, port=args.port)
-    read_only = args.cmd in _READ_ONLY_CMDS or (args.cmd == "db" and not args.migrate)
+    read_only = (
+        (args.cmd in _READ_ONLY_CMDS and not (args.cmd == "doctor" and getattr(args, "providers", False)))
+        or (args.cmd == "db" and not args.migrate)
+    )
     assistant_mcp = args.cmd == "mcp" and args.mcp_cmd is None and getattr(args, "as_role", "agent") == "assistant"
     # Read-only commands must never create directories, write logs, or open/migrate the database.
     # `mcp --as assistant` logs to stderr only so it never needs BOSUN_DATA_DIR forwarded.

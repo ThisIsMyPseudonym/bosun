@@ -124,6 +124,7 @@ class Context:
     now: float
     settings: RoutingSettings
     background_calls: Mapping[str, tuple[int, int]] = MappingProxyType({})  # bucket -> (this refresh, last 24 h)
+    jail_available: bool | None = None  # None: query jail.available() dynamically
 
 
 @dataclass(frozen=True)
@@ -151,9 +152,9 @@ class Route:
     fell_back_from: str | None = None
 
 
-def _capability_detail(job: catalog.Job, provider: str) -> str:
+def _capability_detail(job: catalog.Job, provider: str, *, jail_ok: bool | None = None) -> str:
     spec = catalog.CATALOG[provider]
-    missing = sorted(job.needs - spec.capabilities)
+    missing = sorted(job.needs - catalog.effective_capabilities(spec, jail_ok=jail_ok))
     if missing:
         return f"{spec.label} lacks {', '.join(missing)}"
     return f"{spec.label} is not locked down for untrusted input"
@@ -206,7 +207,7 @@ def _line_skip(bucket: str, curr: tuple[windows.Reading, ...], ctx: Context) -> 
 def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Login, ctx: Context,
                  *, clicked: bool) -> Skip | None:
     if login.provider not in capable:
-        return Skip(login.bucket, "capability", _capability_detail(job, login.provider))
+        return Skip(login.bucket, "capability", _capability_detail(job, login.provider, jail_ok=ctx.jail_available))
     spec = catalog.CATALOG[login.provider]
     if not login.binary:
         return Skip(login.bucket, "not_installed", f"{spec.label} is not installed")
@@ -234,13 +235,13 @@ def _cap_skip(bucket: str, curr: tuple[windows.Reading, ...], ctx: Context) -> S
 _CATALOG_INDEX: Mapping[str, int] = MappingProxyType({p: i for i, p in enumerate(catalog.CATALOG)})
 
 
-def _check_missing(job: catalog.Job, capable: frozenset[str], bucket: str) -> Skip:
+def _check_missing(job: catalog.Job, capable: frozenset[str], bucket: str, *, jail_ok: bool | None = None) -> Skip:
     try:
         provider, _ = ledger.split(bucket)
     except ValueError:
         return Skip(bucket, "not_installed", f"{bucket} is not a valid login")
     if provider not in capable:
-        return Skip(bucket, "capability", _capability_detail(job, provider))
+        return Skip(bucket, "capability", _capability_detail(job, provider, jail_ok=jail_ok))
     return Skip(bucket, "not_installed", f"{catalog.CATALOG[provider].label} is not installed")
 
 
@@ -285,7 +286,7 @@ def _evaluate(job: catalog.Job, capable: frozenset[str], entries: list[tuple[str
     skipped: list[Skip] = []
     for bucket, login in entries:
         if login is None:
-            skipped.append(_check_missing(job, capable, bucket))
+            skipped.append(_check_missing(job, capable, bucket, jail_ok=ctx.jail_available))
             continue
         skip = _check_login(job, capable, login, ctx, clicked=clicked)
         if skip is not None:
@@ -328,7 +329,7 @@ def _job_mode(job: str, rs: RoutingSettings) -> str:
 
 def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
     """Filter and order candidates for `job` from pure `ctx` (no store, no clock)."""
-    capable = frozenset(catalog.capable(job))
+    capable = frozenset(catalog.capable(job, jail_ok=ctx.jail_available))
     job_spec = catalog.JOBS[job]
     if (pinned := _pinned_bucket(job, ctx.settings)) is not None:
         by_bucket = {lg.bucket: lg for lg in ctx.logins if lg.provider in catalog.CATALOG}

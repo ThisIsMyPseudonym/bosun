@@ -11,6 +11,7 @@ Nothing leaves the machine until you click "Create PR".
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -24,9 +25,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from . import llm, machine, proc, trace
+from . import machine, proc, trace
 from .config import Settings
 from .models import Item, Source
+from .providers import accounts, catalog, contract, jail, router, routing, run as ai_run
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -104,7 +106,7 @@ def parse_claude_version(text: str) -> tuple[int, int, int] | None:
 
 def claude_version_error(claude: str) -> str:
     """'' when the claude CLI is new enough for --restricted and --settings sandbox; otherwise why not."""
-    r = proc.run([claude, "--version"], timeout=15)
+    r = contract.cli_version_result(claude, timeout=15)
     if not r.ok:
         detail = (r.stderr or r.stdout).strip()[:120] or f"exit {r.returncode}"
         return f"Could not check Claude Code version ({detail})"
@@ -315,11 +317,71 @@ def merge_reports(reports: list[FixReport]) -> FixReport:
 class Fixer:
     def __init__(self, store: Store, settings: Settings, claude: str | None = None, budget_usd: float = 3.0):
         self.store, self.settings = store, settings
+        self._claude_override = claude
         self.claude = claude if claude is not None else shutil.which("claude")
         self.budget = budget_usd
         self._q: queue.Queue[tuple[int, list[Item]]] = queue.Queue()
         self._worker: threading.Thread | None = None
         self._lock = threading.Lock()
+
+    def _logins(self) -> tuple[accounts.Login, ...] | None:
+        if self._claude_override is None:
+            return None
+        found = accounts.logins(self.store)
+        if not self._claude_override:
+            return tuple(lg for lg in found if lg.provider != "claude")
+        patched = [
+            dataclasses.replace(lg, binary=self._claude_override) if lg.provider == "claude" else lg
+            for lg in found
+        ]
+        if not any(lg.provider == "claude" for lg in patched):
+            patched.insert(0, accounts.default("claude", self._claude_override))
+        return tuple(patched)
+
+    def _choose_login(self) -> tuple[accounts.Login | None, str]:
+        ctx = routing.context(self.store, include_fixer=True, logins=self._logins())
+        route = router.plan("fix", ctx, clicked=True)
+        if not route.candidates:
+            if route.skipped and all(s.bucket == "claude" and s.reason == "not_installed" for s in route.skipped):
+                return None, "Claude Code CLI ('claude') not found on PATH"
+            if route.skipped:
+                return None, "; ".join(f"{s.bucket}: {s.detail}" for s in route.skipped)
+            return None, "Claude Code CLI ('claude') not found on PATH"
+        login = route.candidates[0].login
+        if login.provider == "claude":
+            if not sandbox_available():
+                return None, "Branch + test requires an OS sandbox (macOS Seatbelt, or bwrap and socat on Linux)"
+            ver_err = claude_version_error(login.binary)
+            if ver_err:
+                return None, ver_err
+            return login, ""
+        if not jail.enabled(login.provider):
+            label = catalog.CATALOG[login.provider].label
+            return None, (f"Branch + test on {label} is experimental: it needs macOS and {jail.OPT_IN_ENV}="
+                          f"{login.provider}")
+        return login, ""
+
+    def _run_pass(self, login: accounts.Login, fix_id: int, first: Item, rel: str, group: list[Item],
+                  wt: Path, cache: Path, remaining: float) -> tuple[FixReport | None, float, list[str], str | None]:
+        cwd = wt / rel if rel else wt
+        settings = sandbox_settings(wt, cache, group, self.settings.data_dir)
+        item_key = group[0].key if len(group) == 1 else ""
+        if login.provider == "claude":
+            model = catalog.models_for("claude", "strong", self.settings)
+            fix_argv = claude_fix_argv(login.binary, group, model, remaining, settings)
+            res = ai_run.run_claude_fix(
+                self.store, login, fix_argv, model=model, schema=FixReport, prompt=fix_prompt(group, rel), cwd=cwd,
+                env=cache_env(cache), timeout=1800, item_key=item_key, project=first.project or "",
+                sandboxed=True, fix=fix_id, items=[i.key for i in group], subdir=rel)
+            err = None if res.report else f"[{rel or '.'}] {(res.result.stderr or res.result.stdout)[-800:]}"
+            return res.report, float(res.cost_usd), list(res.denied), err
+        model = catalog.models_for(login.provider, "strong", self.settings)
+        res = ai_run.run_jailed_fix(
+            self.store, login, model=model, schema=FixReport, prompt=fix_prompt(group, rel), cwd=cwd, cache=cache,
+            sandbox_settings=settings, env=cache_env(cache), timeout=1800, item_key=item_key,
+            project=first.project or "", fix=fix_id, items=[i.key for i in group], subdir=rel)
+        err = None if res.report else f"[{rel or '.'}] {(res.error or res.result.stderr or res.result.stdout)[-800:]}"
+        return res.report, float(res.cost_usd), list(res.denied), err
 
     def start(self, items: Item | list[Item]) -> int:
         """Queue one fix run. Several items must belong to the same project: one branch, one commit."""
@@ -333,13 +395,9 @@ class Fixer:
         items = [i for i in items if i.available or i.malicious]
         if not items:
             raise ValueError("No fixed version is published yet")
-        if not self.claude:
-            raise ValueError("Claude Code CLI ('claude') not found on PATH")
-        if not sandbox_available():
-            raise ValueError("Branch + test requires an OS sandbox (macOS Seatbelt, or bwrap and socat on Linux)")
-        ver_err = claude_version_error(self.claude)
-        if ver_err:
-            raise ValueError(ver_err)
+        _, err = self._choose_login()
+        if err:
+            raise ValueError(err)
         with self._lock:
             busy = [i.name for i in items if self.store.active_fix_for(i.key)]
             if busy:
@@ -379,16 +437,9 @@ class Fixer:
 
     def run(self, fix_id: int, items: Item | list[Item]) -> None:
         items = [items] if isinstance(items, Item) else list(items)
-        if not self.claude:
-            self.store.update_fix(fix_id, status="failed", result={"error": "Claude Code CLI ('claude') not found on PATH"})
-            return
-        if not sandbox_available():
-            self.store.update_fix(fix_id, status="failed", result={
-                "error": "Branch + test requires an OS sandbox (macOS Seatbelt, or bwrap and socat on Linux)"})
-            return
-        ver_err = claude_version_error(self.claude)
-        if ver_err:
-            self.store.update_fix(fix_id, status="failed", result={"error": ver_err})
+        login, err = self._choose_login()
+        if err or login is None:
+            self.store.update_fix(fix_id, status="failed", result={"error": err or "No AI CLI available"})
             return
         first = items[0]
         base = primary_checkout(first)
@@ -406,7 +457,7 @@ class Fixer:
         if not gitdir:
             self.store.update_fix(fix_id, status="failed", result={"error": "could not read the new worktree's git folder"})
             return
-        self.store.update_fix(fix_id, status="running", result={"gitdir": gitdir})
+        self.store.update_fix(fix_id, status="running", result={"gitdir": gitdir, "provider": login.provider, "account": login.id})
         if not wt_git(wt, gitdir, "rev-parse", "--verify", "HEAD").ok:  # also: this git predates --attr-source
             self.store.update_fix(fix_id, status="failed", result={"error": "git could not read the new worktree; "
                                                                              "making fixes needs git 2.40 or later"})
@@ -420,26 +471,17 @@ class Fixer:
         remaining = self.budget
         try:
             for rel, group in by_dir.items():
-                if remaining <= 0:
+                if login.provider == "claude" and remaining <= 0:
                     errors.append(f"[{rel or '.'}] per-fix budget (${self.budget:.2f}) is used up")
                     break
-                cwd = wt / rel if rel else wt
-                settings = sandbox_settings(wt, cache, group, self.settings.data_dir)
-                call = llm.claude(claude_fix_argv(self.claude, group, self.settings.model, remaining, settings), purpose="fix",
-                                  timeout=1800, cwd=str(cwd), stdin=fix_prompt(group, rel), env=cache_env(cache),
-                                  sandboxed=True,
-                                  item_key=group[0].key if len(group) == 1 else "", project=first.project or "",
-                                  fix=fix_id, items=[i.key for i in group], subdir=rel)
-                r = call.result
-                report, cost, den = self._parse(r)
-                spent = float(cost or 0.0)
+                report, spent, den, pass_err = self._run_pass(login, fix_id, first, rel, group, wt, cache, remaining)
                 costs.append(spent)
                 remaining = round(remaining - spent, 6)
                 denied += den
                 if report:
                     reports.append(report)
-                else:
-                    errors.append(f"[{rel or '.'}] {(r.stderr or r.stdout)[-800:]}")
+                elif pass_err:
+                    errors.append(pass_err)
         finally:
             shutil.rmtree(cache, ignore_errors=True)
         report = merge_reports(reports) if reports else None
@@ -447,18 +489,20 @@ class Fixer:
         if nested:  # before any git call: one that looked inside would use that repository's config
             self.store.update_fix(fix_id, status="failed", result={
                 "report": report.model_dump() if report else None, "cost_usd": round(sum(costs), 4), "denied": denied,
-                "sandboxed": True, "error": "the run left a git repository inside the worktree, so nothing was "
-                                            f"committed: {', '.join(nested[:5])}"})
+                "sandboxed": True, "provider": login.provider, "account": login.id,
+                "error": "the run left a git repository inside the worktree, so nothing was "
+                         f"committed: {', '.join(nested[:5])}"})
             return
         changed = wt_git(wt, gitdir, "status", "--porcelain", "--ignore-submodules=all").stdout.strip()
         commit = ""
+        label = catalog.CATALOG[login.provider].label
         if changed:
             wt_git(wt, gitdir, "add", "-A")
             staged = wt_git(wt, gitdir, "diff", "--cached", "--raw", "--no-abbrev", "--ignore-submodules=none").stdout.splitlines()
             if any(line.split()[1:2] == ["160000"] for line in staged):  # a submodule added or re-pointed
                 self.store.update_fix(fix_id, status="failed", result={
                     "report": report.model_dump() if report else None, "cost_usd": round(sum(costs), 4),
-                    "denied": denied, "sandboxed": True,
+                    "denied": denied, "sandboxed": True, "provider": login.provider, "account": login.id,
                     "error": "the run added or changed a submodule, so nothing was committed"})
                 return
             title = (f"fix(deps): remove malicious {first.package_id}" if len(items) == 1 and first.malicious
@@ -466,7 +510,7 @@ class Fixer:
                      else f"fix(deps): upgrade {len(items)} vulnerable dependencies")
             body = "\n".join(f"- {i.package_id}: {i.installed} -> {i.available or 'removed'}" for i in items)
             c = wt_git(wt, gitdir, "-c", "user.name=Bosun", "-c", "user.email=bosun@localhost", "-c", "commit.gpgsign=false",
-                    "commit", "-q", "-m", title, "-m", f"{body}\n\nVia Bosun + Claude Code.")
+                    "commit", "-q", "-m", title, "-m", f"{body}\n\nVia Bosun + {label}.")
             commit = wt_git(wt, gitdir, "rev-parse", "--short", "HEAD").stdout.strip() if c.ok else ""
         diffstat = wt_git(wt, gitdir, "diff", "--stat", "HEAD~1", "HEAD").stdout.strip() if commit else ""
         if report is None:
@@ -477,7 +521,8 @@ class Fixer:
             status = "partial" if errors and report.status == "fixed" else report.status
         self.store.update_fix(fix_id, status=status, result={
             "report": report.model_dump() if report else None, "commit": commit, "diffstat": diffstat,
-            "cost_usd": round(sum(costs), 4), "denied": denied, "sandboxed": True, "error": "\n".join(errors) or None})
+            "cost_usd": round(sum(costs), 4), "denied": denied, "sandboxed": True,
+            "provider": login.provider, "account": login.id, "error": "\n".join(errors) or None})
 
     @staticmethod
     def _parse(r: proc.Result) -> tuple[FixReport | None, float | None, list[str]]:
@@ -531,10 +576,13 @@ class Fixer:
         push = wt_git(wt, gitdir, "push", "-u", "origin", branch, timeout=300)
         if not push.ok:
             raise RuntimeError(f"git push failed: {push.stderr[:300]}")
-        report = (fix.get("result") or {}).get("report") or {}
+        result = fix.get("result") or {}
+        report = result.get("report") or {}
+        provider = result.get("provider") or "claude"
+        label = catalog.CATALOG.get(provider, catalog.CATALOG["claude"]).label
         body = (f"{report.get('summary', '')}\n\nTests: {report.get('tests', 'n/a')}\n\n"
                 + "".join(f"- [ ] {f}\n" for f in report.get("follow_ups", []))
-                + "\nOpened from Bosun; changes made by Claude Code in a sandboxed worktree.")
+                + f"\nOpened from Bosun; changes made by {label} in a sandboxed worktree.")
         url = wt_git(wt, gitdir, "config", "--get", "remote.origin.url").stdout.strip()
         title = wt_git(wt, gitdir, "log", "-1", "--format=%s", branch).stdout.strip() or branch
         repo = github_repo(url)

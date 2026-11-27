@@ -222,3 +222,42 @@ def test_doctor_notes_retired_budget_env_vars_as_ignored(s, monkeypatch):
     assert len(notes) == 2
     assert all(ln.mark == OPTIONAL and "ignored: AI use is now measured by your plans' windows" in ln.fact and ln.fix for ln in notes)
     assert doctor.report(found)[1] == 0  # optional notice, never fails doctor
+
+
+def test_doctor_providers_is_opt_in_and_never_calls_models_by_default(s, monkeypatch):
+    called = []
+    monkeypatch.setattr("bosun.providers.run.run", lambda *a, **kw: called.append((a, kw)))
+    lines(s)
+    assert called == []
+
+
+def test_doctor_providers_makes_one_tiny_call_per_login_and_records_readings(tmp_path, monkeypatch, capsys):
+    from bosun.providers import accounts, ledger
+    from bosun.store import Store
+    from fake_cli import FakeCli
+
+    data = tmp_path / "data"
+    monkeypatch.setenv("BOSUN_DATA_DIR", str(data))
+    monkeypatch.setenv("BOSUN_PORT", "8795")
+    monkeypatch.setattr(doctor.diagnose, "tool_versions", lambda: {"uv": "uv 0.9", "git": "git 2.50"})
+    monkeypatch.setattr(doctor.Probe, "pip", lambda self, argv: None)
+    monkeypatch.setattr(doctor.Probe, "port_in_use", lambda self, host, port: False)
+    monkeypatch.setattr(doctor.Probe, "service", lambda self: (False, False))
+    monkeypatch.setattr(doctor.Probe, "signing", lambda self, root: ["a test"])
+    monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/test/bin/claude", "codex": "/test/bin/codex"})
+
+    fake = FakeCli(monkeypatch)
+    fake.reply("claude", fake.claude_ok({"ok": True}, windows=[("five_hour", 0.25)]))
+    fake.reply("codex", fake.codex_ok({"ok": True}, windows=[("five_hour", 0.15)]))
+
+    rc = cli.main(["doctor", "--providers"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert [c.provider for c in fake.calls] == ["claude", "codex"]
+    assert all(c.stdin and '{"ok": true}' in c.stdin for c in fake.calls)
+    assert "live Claude Code (Default): ok" in out and "25%" in out
+    assert "live Codex (Default): ok" in out and "15%" in out
+    with Store(data / "bosun.db", read_only=True) as store:
+        assert ledger.readings(store, "claude")[0].used == pytest.approx(0.25)
+        assert ledger.readings(store, "codex")[0].used == pytest.approx(0.15)
+

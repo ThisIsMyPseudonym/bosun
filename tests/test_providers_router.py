@@ -93,9 +93,13 @@ def test_fix_can_be_explicitly_unpinned_or_repinned(store):
 
 def test_only_capable_installed_logins_that_passed_their_contract_are_candidates():
     unpinned = dataclasses.replace(router.RoutingSettings.default(), pins={})
-    route = router.plan("fix", ctx(contracts={**ALL_OK, "claude": FAILED}, settings=unpinned), clicked=True)
+    route = router.plan("fix", ctx(contracts={**ALL_OK, "claude": FAILED}, settings=unpinned, jail_available=False),
+                        clicked=True)
     assert route.candidates == ()
     assert route.skipped[0] == router.Skip("claude", "contract", "Claude Code 2.1 dropped `--tools`")
+    with_jail = router.plan("fix", ctx(contracts={**ALL_OK, "claude": FAILED}, settings=unpinned, jail_available=True),
+                            clicked=True)
+    assert [c.bucket for c in with_jail.candidates] == ["codex"]
     summ = router.plan("summarize", ctx())
     assert [c.bucket for c in summ.candidates] == ["claude", "claude@work", "codex", "gemini"]
     assert {s.bucket: s.reason for s in summ.skipped} == {
@@ -219,8 +223,10 @@ def test_a_per_job_mode_wins_over_a_pin():
     route = router.plan("fix", ctx(settings=rs), clicked=True)
     assert [c.bucket for c in route.candidates] == ["claude@work"] and route.mode == "pinned"
     rs_bal = dataclasses.replace(router.RoutingSettings.default(), job_modes={"fix": "balance"})
-    bal = router.plan("fix", ctx(settings=rs_bal), clicked=True)
+    bal = router.plan("fix", ctx(settings=rs_bal, jail_available=False), clicked=True)
     assert bal.mode == "balance" and [c.bucket for c in bal.candidates] == ["claude", "claude@work"]
+    bal_jail = router.plan("fix", ctx(settings=rs_bal, jail_available=True), clicked=True)
+    assert bal_jail.mode == "balance" and [c.bucket for c in bal_jail.candidates] == ["claude", "claude@work", "codex"]
 
 
 # --- Task 3.5: default mode ordering and fallback ----------------------------------------------------------------
@@ -341,9 +347,12 @@ def test_a_pinned_job_runs_only_there_and_says_why_when_it_cannot():
     jm_line = router.plan("summarize", ctx(readings=codex_line, settings=rs_jm))
     assert jm_line.candidates == () and jm_line.skipped[0].reason == "line"
 
-    # Pin to an uninstalled or incapable login
-    rs_incap = dataclasses.replace(router.RoutingSettings.default(), pins={"fix": "codex"})
-    assert router.plan("fix", ctx(settings=rs_incap), clicked=True).skipped[0].reason == "capability"
+    # Pin to an uninstalled or incapable login (Codex needs a jail for fix; Gemini never has SANDBOXED_AGENT)
+    rs_codex = dataclasses.replace(router.RoutingSettings.default(), pins={"fix": "codex"})
+    assert router.plan("fix", ctx(settings=rs_codex, jail_available=False), clicked=True).skipped[0].reason == "capability"
+    assert [c.bucket for c in router.plan("fix", ctx(settings=rs_codex, jail_available=True), clicked=True).candidates] == ["codex"]
+    rs_incap = dataclasses.replace(router.RoutingSettings.default(), pins={"fix": "gemini"})
+    assert router.plan("fix", ctx(settings=rs_incap, jail_available=True), clicked=True).skipped[0].reason == "capability"
     rs_missing = dataclasses.replace(router.RoutingSettings.default(), pins={"summarize": "codex"})
     assert router.plan("summarize", ctx(logins=(_login("claude"),), settings=rs_missing)).skipped[0].reason == "not_installed"
 

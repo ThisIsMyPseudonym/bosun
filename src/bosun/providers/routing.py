@@ -192,14 +192,17 @@ def overview(store: Store, now: float | None = None) -> dict[str, Any]:
 
 
 def context(store: Store, *, cooldowns: limits.Cooldowns | None = None, now: float | None = None,
-            logins: tuple[accounts.Login, ...] | None = None) -> router.Context:
+            logins: tuple[accounts.Login, ...] | None = None, include_fixer: bool = False) -> router.Context:
     """Build a pure `router.Context` from the store, installed CLIs, contract verdicts, ledger and cool-downs."""
     when = time.time() if now is None else now
     found = accounts.logins(store) if logins is None else logins
     contracts: dict[str, contract.ContractStatus] = {}
     for lg in found:
         if lg.binary and lg.provider not in contracts:
-            contracts[lg.provider] = contract.check(store, lg.provider, lg.binary, now=lambda: when)
+            contracts[lg.provider] = (
+                contract.check(store, lg.provider, lg.binary, now=lambda: when, include_fixer=True)
+                if include_fixer else contract.check(store, lg.provider, lg.binary, now=lambda: when)
+            )
     all_r = ledger.all_readings(store)
     if not store.read_only:
         for lg in found:
@@ -211,7 +214,7 @@ def context(store: Store, *, cooldowns: limits.Cooldowns | None = None, now: flo
             if (until := cooldowns.until(lg.bucket)) is not None:
                 cool_map[lg.bucket] = until
     return router.Context(found, contracts, all_r, cool_map, overrides(store, now=when), when, router.settings(store),
-                          background_calls(store, when))
+                          background_calls(store, when))  # jail: per CLI, see catalog.effective_capabilities
 
 
 def background_calls(store: Store, now: float) -> dict[str, tuple[int, int]]:
