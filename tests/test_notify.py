@@ -305,3 +305,111 @@ def test_failed_update_notification_includes_ready_verdict_and_dedups_by_signatu
         ),
     )
     assert n.tick() is None and len(sent) == 2
+
+
+def _finish_job_at(store: Store, item_key: str, status: str, ts: float, output: str = "boom") -> dict:
+    jid = store.create_job(item_key, ["winget", "upgrade", item_key], status="running")
+    store.finish_job(jid, status, output)
+    with store._tx(write=True) as db:
+        db.execute("UPDATE jobs SET finished = ? WHERE id = ?", (ts, jid))
+    row = store.job(jid)
+    assert row is not None
+    return row
+
+
+def _ready_verdict(cause: str = "Homebrew cannot write to its folder."):
+    from bosun.triage.schema import NextStep, Verdict
+
+    return Verdict(
+        category="permissions", cause=cause, confidence="high", evidence=[],
+        next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Fix ownership."),
+        needs_person=True, transient=False,
+    )
+
+
+def test_failed_notification_dedup_is_per_item_and_expires_after_7_days_or_success(tmp_path):
+    from bosun.triage import store as tstore
+
+    other = item("winget:Other.Pkg", "Other")
+    store, n, sent, clock = setup(tmp_path, [GIT, other])
+    n.tick()  # initial silent cursor
+
+    # 1. Git fails with sig-perm -> notified
+    clock.t += notify.GAP_S + 10
+    j1 = _finish_job_at(store, "winget:Git.Git", "failed", clock.t - 1)
+    tstore.save_verdict(store, f"job:{j1['id']}", j1["trace_id"], "sig-perm", "rules", _ready_verdict())
+    assert n.tick() is not None and len(sent) == 1
+
+    # 2. Different item with the SAME signature -> STILL notifies (per-item scope)
+    clock.t += notify.GAP_S + 10
+    j2 = _finish_job_at(store, "winget:Other.Pkg", "failed", clock.t - 1)
+    tstore.save_verdict(store, f"job:{j2['id']}", j2["trace_id"], "sig-perm", "cache", _ready_verdict())
+    note2 = n.tick()
+    assert note2 is not None and note2.title == "Other didn't update" and len(sent) == 2
+
+    # 3. Same item + same signature after 7 days -> notifies again (expiry)
+    clock.t += 7 * 86400 + 10
+    j3 = _finish_job_at(store, "winget:Git.Git", "failed", clock.t - 1)
+    tstore.save_verdict(store, f"job:{j3['id']}", j3["trace_id"], "sig-perm", "rules", _ready_verdict())
+    note3 = n.tick()
+    assert note3 is not None and note3.title == "Git didn't update" and len(sent) == 3
+
+    # 4. Success in between clears suppression -> next failure with same sig notifies again
+    clock.t += notify.GAP_S + 10
+    _finish_job_at(store, "winget:Git.Git", "succeeded", clock.t - 5, output="ok")
+    assert n.tick() is None  # success alone does not notify
+    clock.t += notify.GAP_S + 10
+    j4 = _finish_job_at(store, "winget:Git.Git", "failed", clock.t - 1)
+    tstore.save_verdict(store, f"job:{j4['id']}", j4["trace_id"], "sig-perm", "rules", _ready_verdict())
+    note4 = n.tick()
+    assert note4 is not None and note4.title == "Git didn't update" and len(sent) == 4
+
+
+def test_failed_notification_only_marks_on_delivery_and_never_burns_unready_verdict(tmp_path):
+    from bosun.triage import store as tstore
+
+    store, n, sent, clock = setup(tmp_path, [GIT])
+    n.tick()  # initial silent cursor
+
+    # 1. Quiet while notifications are off: does NOT store the signature mark
+    notify.set_on(store, False)
+    clock.t += notify.GAP_S + 10
+    j1 = _finish_job_at(store, "winget:Git.Git", "failed", clock.t - 1)
+    tstore.save_verdict(store, f"job:{j1['id']}", j1["trace_id"], "sig-q", "rules", _ready_verdict("Disk full."))
+    assert n.tick() is None and len(sent) == 0
+
+    # 2. Quiet while user is viewing the page: does NOT store the signature mark
+    notify.set_on(store, True)
+    clock.t += notify.GAP_S + 10
+    n.viewed()
+    clock.t += 5
+    j2 = _finish_job_at(store, "winget:Git.Git", "failed", clock.t - 1)
+    tstore.save_verdict(store, f"job:{j2['id']}", j2["trace_id"], "sig-q", "rules", _ready_verdict("Disk full."))
+    assert n.tick() is None and len(sent) == 0
+
+    # 3. Once user is no longer viewing, a failure with sig-q STILL notifies because earlier ticks didn't deliver
+    clock.t += notify.GAP_S + 10
+    j3 = _finish_job_at(store, "winget:Git.Git", "failed", clock.t - 1)
+    tstore.save_verdict(store, f"job:{j3['id']}", j3["trace_id"], "sig-q", "rules", _ready_verdict("Disk full."))
+    note3 = n.tick()
+    assert note3 is not None and "Disk full." in note3.body and len(sent) == 1
+
+    # 4. Unready verdict (running): still notifies, and does NOT burn the signature
+    clock.t += notify.GAP_S + 10
+    j4 = _finish_job_at(store, "winget:Git.Git", "failed", clock.t - 1)
+    tstore.save_status(store, f"job:{j4['id']}", j4["trace_id"], "sig-late", "running")
+    note4 = n.tick()
+    assert note4 is not None and "Open Bosun to see why and retry." in note4.body and len(sent) == 2
+
+    # 5. Later failure with a ready verdict for sig-late notifies WITH its cause
+    clock.t += notify.GAP_S + 10
+    j5 = _finish_job_at(store, "winget:Git.Git", "failed", clock.t - 1)
+    tstore.save_verdict(store, f"job:{j5['id']}", j5["trace_id"], "sig-late", "model", _ready_verdict("Mirror returned 503."))
+    note5 = n.tick()
+    assert note5 is not None and "Mirror returned 503." in note5.body and len(sent) == 3
+
+    # 6. Now that sig-late WAS delivered with a ready verdict, an immediate repeat for the same item is suppressed
+    clock.t += notify.GAP_S + 10
+    j6 = _finish_job_at(store, "winget:Git.Git", "failed", clock.t - 1)
+    tstore.save_verdict(store, f"job:{j6['id']}", j6["trace_id"], "sig-late", "cache", _ready_verdict("Mirror returned 503."))
+    assert n.tick() is None and len(sent) == 3

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import time
 from collections.abc import Callable
@@ -24,9 +25,10 @@ log = logging.getLogger(__name__)
 
 SETTING = "notify"  # "off" silences everything; on unless turned off
 SEEN = "notify_seen"  # what has already been said (or seen on screen), as a JSON list of marks
-SEEN_SIGS = "notify_triage_sigs"  # failure signatures already notified; never repeated
+SEEN_SIGS = "notify_triage_sigs"  # (signature, item_key) -> delivered timestamp; expires after SIG_TTL_S or a success
 CURSOR = "notify_cursor"  # jobs that finished after this time haven't been reported yet
 MAX_SEEN_SIGS = 500
+SIG_TTL_S = 7 * 86400.0
 TICK_S = 120.0
 WATCHING_S = 45.0  # the open page polls every 15 s; a visible poll this recent means you're looking
 GAP_S = 600.0  # at most one notification per 10 minutes; anything newer waits and joins the next
@@ -168,34 +170,54 @@ class Notifier:
             row = tstore.get(self.store, f"job:{job['id']}")
         return row
 
-    def _collect_failed(self, finished: list[dict], seen_sigs: set[str]) -> tuple[list[str], list[str], list[str]]:
-        """Filter failed jobs by already-notified failure signatures and gather any ready verdict causes."""
+    def _collect_failed(
+        self, finished: list[dict], seen_sigs: dict[str, float],
+    ) -> tuple[list[str], list[str], list[str], dict[str, float]]:
+        """Filter failed jobs by per-item delivered signatures, clearing marks on success and keeping unready verdicts."""
+        succeeded = {j["item_key"] for j in finished if j["status"] == "succeeded"}
+        cleared = {k: v for k, v in seen_sigs.items() if k.split("|", 1)[-1] not in succeeded}
+        in_tick: set[str] = set()
         keys: list[str] = []
         causes: list[str] = []
         new_sigs: list[str] = []
         for job in finished:
             if job["status"] != "failed":
                 continue
+            item_key = job["item_key"]
             row = self._triage_for_job(job)
-            sig = str(row.get("signature") or "") if row else ""
-            if sig and sig in seen_sigs:
-                continue
-            keys.append(job["item_key"])
-            if sig:
-                new_sigs.append(sig)
-            if row and row.get("status") == "done" and row.get("verdict") and row["verdict"].get("cause"):
-                causes.append(str(row["verdict"]["cause"]))
-        return keys, causes, new_sigs
+            verdict = row.get("verdict") if isinstance(row, dict) else None
+            cause = str(verdict.get("cause") or "") if isinstance(verdict, dict) else ""
+            ready = bool(row and row.get("status") == "done" and cause)
+            sig = str(row.get("signature") or "") if isinstance(row, dict) else ""
+            if ready and sig:
+                mark = f"{sig}|{item_key}"
+                if mark in cleared or mark in in_tick:
+                    continue
+                keys.append(item_key)
+                causes.append(cause)
+                new_sigs.append(mark)
+                in_tick.add(mark)
+            else:
+                keys.append(item_key)
+        return keys, causes, new_sigs, cleared
 
-    def _seen_sigs(self) -> list[str]:
+    def _seen_sigs(self, now: float) -> dict[str, float]:
         raw = self.store.setting(SEEN_SIGS)
         if not raw:
-            return []
+            return {}
         try:
             parsed = json.loads(raw)
         except ValueError:
-            return []
-        return [s for s in parsed if isinstance(s, str)] if isinstance(parsed, list) else []
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        out: dict[str, float] = {}
+        for k, v in parsed.items():
+            if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool):
+                ts = float(v)
+                if math.isfinite(ts) and now - ts < SIG_TTL_S:
+                    out[k] = ts
+        return out
 
     def tick(self) -> Note | None:
         """Say what's new, if anything; remember it either way. Returns what was sent."""
@@ -216,9 +238,9 @@ class Notifier:
             self._remember(marks, now)
             return None
         seen, cursor = set(json.loads(raw_seen)), float(raw_cursor)
-        seen_sigs = self._seen_sigs()
+        seen_sigs = self._seen_sigs(now)
         finished = [j for j in jobs if (j.get("finished") or 0) > cursor and not j["item_key"].startswith("relaunch:")]
-        failed, failed_causes, new_sigs = self._collect_failed(finished, set(seen_sigs))
+        failed, failed_causes, new_sigs, cleared_sigs = self._collect_failed(finished, seen_sigs)
         updated = sum(j["status"] == "succeeded" for j in finished)
         new = {m: v for m, v in current.items() if m not in seen and m.split("#")[0] not in failed}  # failed says it
 
@@ -233,20 +255,27 @@ class Notifier:
             updated=updated,
             held=[n for m, n in held.items() if m not in seen],
             failed_causes=failed_causes)
+        delivered = False
         if note:
             if not self.say(note):
                 return None  # try again next tick rather than lose it
             self.last_sent = now
-        self._remember(marks, now, seen_sigs + new_sigs if new_sigs else None)
+            delivered = True
+        next_sigs: dict[str, float] | None = None
+        if delivered and new_sigs:
+            next_sigs = {**cleared_sigs, **{k: now for k in new_sigs}}
+        elif cleared_sigs != seen_sigs:
+            next_sigs = cleared_sigs
+        self._remember(marks, now, next_sigs)
         return note
 
-    def _remember(self, marks: set[str], now: float, sigs: list[str] | None = None) -> None:
+    def _remember(self, marks: set[str], now: float, sigs: dict[str, float] | None = None) -> None:
         # only what's still true: something that goes away and comes back is news again
         self.store.set_setting(SEEN, json.dumps(sorted(marks)))
         self.store.set_setting(CURSOR, repr(now))
         if sigs is not None:
-            deduped = list(dict.fromkeys(sigs))[-MAX_SEEN_SIGS:]
-            self.store.set_setting(SEEN_SIGS, json.dumps(deduped))
+            kept = dict(sorted(sigs.items(), key=lambda kv: kv[1])[-MAX_SEEN_SIGS:])
+            self.store.set_setting(SEEN_SIGS, json.dumps(kept, separators=(",", ":")))
 
     def run(self, interval: float = TICK_S) -> None:
         while True:
