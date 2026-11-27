@@ -451,6 +451,23 @@ CREATE TABLE IF NOT EXISTS offers (
 """
 
 
+# The latest reading of each plan usage window per AI login (providers/ledger.py): what the router and the usage page
+# judge a login by. One row per login and window; a newer reading replaces it.
+QUOTA_WINDOWS = """
+CREATE TABLE IF NOT EXISTS quota_windows (
+    bucket TEXT NOT NULL,                -- a login: claude, or claude@work for an added one
+    provider TEXT NOT NULL,              -- claude, codex, gemini, grok, antigravity, muse
+    account TEXT NOT NULL DEFAULT 'default',  -- the login's id within its CLI (default, or the added login's name)
+    window TEXT NOT NULL,                -- five_hour, seven_day, quota:gemini-3.8-flash (one per model), or limit (a refusal it named)
+    status TEXT NOT NULL,                -- allowed, allowed_warning, rejected
+    used REAL,                           -- share used, 0 to 1; NULL = the CLI gave no figure (unknown, not 0%)
+    resets_at REAL,                      -- when it resets (epoch seconds); NULL = not said
+    at REAL NOT NULL,                    -- when it was read
+    source TEXT NOT NULL DEFAULT 'output',  -- output (a call's own output), probe, coho, limit
+    PRIMARY KEY (bucket, window)
+);
+"""
+
 def _withhold_http_addresses(db: sqlite3.Connection) -> None:
     """Snapshots saved before v8 kept a plain-http MCP server's address as the URL's netloc, which carries any
     user:password in it (and, when a password has an unencoded / ? or #, part of one with no "@" to see). Every
@@ -563,6 +580,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(6, "item_states", fn=_item_states),
     Migration(7, "offers", sql=OFFERS),
     Migration(8, "withhold_http_addresses", fn=_withhold_http_addresses, after=_vacuum),
+    Migration(9, "quota_windows", sql=QUOTA_WINDOWS),
 )
 
 

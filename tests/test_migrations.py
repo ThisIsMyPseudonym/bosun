@@ -202,3 +202,20 @@ def test_a_refused_command_says_so_once_and_exits(tmp_path, monkeypatch, capsys)
     assert cli.main(["db", "--migrate"]) == 2
     err = capsys.readouterr().err
     assert err.count("Not migrating") == 1 and "BOSUN_DATA_DIR=$(mktemp -d)" in err
+
+
+def test_v9_adds_quota_windows_and_an_older_database_keeps_its_rows(tmp_path):
+    path = tmp_path / "bosun.db"
+    old = sqlite3.connect(path)
+    migrate(old, path, migrations.MIGRATIONS[:8])  # a v8 database
+    old.execute("INSERT INTO settings (key, value) VALUES ('kept', 'yes')")
+    old.commit()
+    old.close()
+    Store(path)
+    db = sqlite3.connect(path)
+    cols = {r[1] for r in db.execute("PRAGMA table_info(quota_windows)")}
+    assert cols == {"bucket", "provider", "account", "window", "status", "used", "resets_at", "at", "source"}
+    assert migrations.current_version(db) == 9 and list(tmp_path.glob("bosun.db.bak-v8"))
+    assert db.execute("SELECT value FROM settings WHERE key='kept'").fetchone() == ("yes",)
+    keys = [r[5] for r in db.execute("PRAGMA table_info(quota_windows)") if r[5]]
+    assert keys == [1, 2]  # one row per login and window
