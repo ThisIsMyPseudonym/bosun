@@ -146,3 +146,36 @@ def test_mapping_cooldowns_respect_expiry():
     assert "codex" in [c.bucket for c in route.candidates]
     skip = next(s for s in route.skipped if s.bucket == "claude")
     assert skip.reason == "cooldown" and "45" in skip.detail
+
+
+# --- Task 3.4: the 75% line --------------------------------------------------------------------------------------
+
+
+def test_background_work_skips_a_login_at_75_percent_and_a_click_does_not():
+    readings = {
+        "claude": (R("five_hour", "allowed", 0.80, NOW + 600, NOW),),
+        "claude@work": (R("seven_day", "allowed", 0.75, NOW + 3600, NOW),),  # boundary: skipped
+        "codex": (R("five_hour", "allowed", 0.74, NOW + 600, NOW),),
+    }
+    bg = router.plan("summarize", ctx(readings=readings))
+    assert [c.bucket for c in bg.candidates] == ["codex", "gemini"]
+    assert bg.skipped[0].bucket == "claude" and bg.skipped[0].reason == "line"
+    assert bg.skipped[0].hit == quota.Hit("five_hour", 0.80, NOW + 600)
+    assert bg.skipped[1].bucket == "claude@work" and bg.skipped[1].reason == "line"
+    assert router.plan("explain", ctx(readings=readings), clicked=True).candidates[0].bucket == "claude"
+    assert router.plan("explain", ctx(readings=readings)).candidates[0].bucket == "claude"
+    assert router.plan("summarize", ctx(readings=readings), clicked=True).candidates[0].bucket == "claude"
+
+
+def test_the_owners_override_lets_background_work_past_the_line_until_the_reset():
+    readings = {"claude": (R("five_hour", "allowed", 0.80, NOW + 600, NOW),)}
+    override = (quota.Override("claude", NOW + 600),)
+    lifted = router.plan("summarize", ctx(readings=readings, overrides=override, now=NOW))
+    assert lifted.candidates[0].bucket == "claude"
+    expired = router.plan("summarize", ctx(readings=readings, overrides=override, now=NOW + 599))
+    assert expired.candidates[0].bucket == "claude"
+    gone = router.plan("summarize", ctx(readings={"claude": (R("five_hour", "allowed", 0.80, NOW + 1200, NOW),)},
+                                        overrides=override, now=NOW + 600))
+    assert "claude" not in [c.bucket for c in gone.candidates]
+    forged = router.plan("summarize", ctx(readings=readings, overrides=(quota.Override("claude", NOW + 1e9),), now=NOW))
+    assert "claude" not in [c.bucket for c in forged.candidates]

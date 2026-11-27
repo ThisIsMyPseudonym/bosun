@@ -197,7 +197,18 @@ def _cooldown_skip(bucket: str, cooldowns: AbstractSet[str] | Mapping[str, float
     return None
 
 
-def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Login, ctx: Context) -> Skip | None:
+def _line_skip(bucket: str, curr: tuple[windows.Reading, ...], ctx: Context) -> Skip | None:
+    stop = quota.stop_at(bucket, ctx.overrides, ctx.now)
+    hit = quota.line_hit(curr, ctx.now, stop)
+    if hit is None:
+        return None
+    label, pct = _window_label(hit.window), f"{round(hit.used * 100)}%"
+    detail = f"{label} at {pct}, resets {_format_reset(hit.resets_at)}" if hit.resets_at is not None else f"{label} at {pct}"
+    return Skip(bucket, "line", detail, hit=hit)
+
+
+def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Login, ctx: Context,
+                 *, clicked: bool) -> Skip | None:
     if login.provider not in capable:
         return Skip(login.bucket, "capability", _capability_detail(job, login.provider))
     spec = catalog.CATALOG[login.provider]
@@ -212,7 +223,11 @@ def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Logi
     curr = quota.current(ctx.readings.get(login.bucket, ()), ctx.now)
     if (limit := _limit_skip(login.bucket, curr)) is not None:
         return limit
-    return _cooldown_skip(login.bucket, ctx.cooldowns, ctx.now)
+    if (cool := _cooldown_skip(login.bucket, ctx.cooldowns, ctx.now)) is not None:
+        return cool
+    if job.background and not clicked:
+        return _line_skip(login.bucket, curr, ctx)
+    return None
 
 
 def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
@@ -224,7 +239,7 @@ def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
     for login in ctx.logins:
         if login.provider not in catalog.CATALOG:
             continue
-        skip = _check_login(job_spec, capable, login, ctx)
+        skip = _check_login(job_spec, capable, login, ctx, clicked=clicked)
         if skip is not None:
             skipped.append(skip)
         else:
