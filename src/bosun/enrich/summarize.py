@@ -185,11 +185,6 @@ class Summarizer:
             self.problem = f"{out.reason}, so summaries used built-in rules"
 
     def _summarize_ai(self, item: Item, notes: str) -> Summary | None:
-        reason = llm.over_budget(self.store, "summarize")
-        if reason:  # stop asking for the rest of this refresh; built-in rules cover the remaining items
-            self.problem = f"{reason}, so the remaining summaries used built-in rules"
-            llm.record("summarize", outcome="budget", item_key=item.key, error=reason, source=item.source.value)
-            return None
         model = self.model_for(item)
         strong = self.decides(item)
         out = self._ask(item, notes, model, "strong" if strong else "light")
@@ -198,7 +193,7 @@ class Summarizer:
         last_outcome = out.attempts[-1].outcome if out.attempts else ""
         doubt = ("schema_error" if not out.ok and last_outcome == "schema_error"
                  else "says migration needed" if out.ok and out.payload.migration_effort == "high" else "")
-        if not strong and doubt and out.login is not None and not llm.over_budget(self.store, "summarize"):
+        if not strong and doubt and out.login is not None:
             confirmed = self._ask(item, notes, self.model, "strong", pin=out.login, escalated_because=doubt)
             out = confirmed if confirmed.ok or not out.ok else out  # a failed confirmation keeps a valid answer
         if not out.ok or out.login is None:

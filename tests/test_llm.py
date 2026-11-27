@@ -98,38 +98,54 @@ def test_a_reply_that_fails_its_schema_is_a_schema_error(store, monkeypatch):
     assert call.outcome == "schema_error" and calls(store)[0]["cost_usd"] > 0
 
 
-def test_summarizer_records_calls_and_stops_at_the_refresh_budget(store, monkeypatch):
-    run = fake_run(envelope(cost=0.6))
+def test_summarizer_records_calls_and_stops_at_the_75_percent_line(store, monkeypatch):
+    from bosun.providers import contract, ledger, quota
+
+    resets_at = time.time() + 7200
+    rate_limit_line = json.dumps({
+        "type": "rate_limit_event",
+        "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.8, "resetsAt": resets_at},
+    })
+    reply = rate_limit_line + "\n" + json.dumps(envelope(cost=0.6))
+    run = fake_run(reply)
     monkeypatch.setattr(proc, "run", run)
-    store.set_setting(llm.SETTING_REFRESH, "1.0")
+    monkeypatch.setattr(contract, "check", lambda st, p, b, **kw: contract.ContractStatus(p, "2.1.332", True, (), ""))
+    monkeypatch.setattr(ledger, "deliver", lambda *a, **kw: False)
+    store.set_setting("llm_refresh_budget_usd", "0.01")  # retired dollar budget has no effect
     sm = Summarizer(store, "sonnet", store.path.parent / "sb", claude="claude")
     items = [Item(Source.BREW, n, n, "1.0", "1.1") for n in "abcd"]
     with trace.run("refresh"):
         out = [sm.summarize(i, "notes") for i in items]
-    assert [o.generated_by for o in out] == ["claude-code:sonnet", "claude-code:sonnet", "heuristic", "heuristic"]
-    assert len(run.seen) == 2 and "summary budget ($1.00) is used up" in sm.problem
-    assert [c["outcome"] for c in calls(store)] == ["ok", "ok", "budget"]  # then it stopped asking
-    with trace.run("refresh"):  # a new refresh starts a new allowance
-        assert Summarizer(store, "sonnet", store.path.parent / "sb", claude="claude").summarize(
-            Item(Source.BREW, "e", "e", "1", "2"), "n").generated_by == "claude-code:sonnet"
+    # First call succeeds and reports 80%; subsequent background summaries skip past the 75% line.
+    assert [o.generated_by for o in out] == ["claude-code:sonnet", "heuristic", "heuristic", "heuristic"]
+    assert len(run.seen) == 1 and "80%" in sm.problem
+    assert [c["outcome"] for c in calls(store)] == ["ok"]
+    assert quota.line_hit(ledger.readings(store, "claude"), time.time()) is not None
 
 
-def test_the_daily_budget_covers_explanations_too(store, monkeypatch):
-    monkeypatch.setattr(proc, "run", fake_run(envelope(cost=0.5, structured={"x": 1})))
-    store.set_setting(llm.SETTING_DAILY, "0.4")
-    llm.record("summarize", outcome="ok", usage=llm.Usage(cost_usd=0.45))
-    with pytest.raises(RuntimeError, match="24-hour budget"):
-        Explainer(store, "sonnet", store.path.parent / "sb", claude="claude").explain(Item(Source.BREW, "jq", "jq", "1", "2"))
-    assert calls(store)[-1]["outcome"] == "budget" and calls(store)[-1]["purpose"] == "explain"
-    store.set_setting(llm.SETTING_DAILY, "0")  # 0 = no cap
-    assert llm.over_budget(store, "explain") == ""
-    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "0.1")  # the environment wins
-    assert "24-hour" in llm.over_budget(store, "explain")
-    assert "24-hour" in llm.over_budget(store, "fix")  # fixes share the 24-hour cap too
-    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "nan")
-    assert llm.budgets(store)["daily_usd"] == llm.DEFAULT_DAILY_BUDGET_USD
-    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "inf")
-    assert llm.budgets(store)["daily_usd"] == llm.DEFAULT_DAILY_BUDGET_USD
+def test_the_75_percent_line_skips_background_summaries_but_clicked_explanations_run(store, monkeypatch):
+    from bosun.providers import contract, ledger, windows
+
+    now = time.time()
+    for removed in ("BUDGETED", "over_budget", "assistant_left", "budgets", "SETTING_DAILY", "BUDGET_ENV"):
+        assert not hasattr(llm, removed)
+    explain_good = {"exposure": "local_only", "answer": "a", "attack_story": "s", "preconditions": [],
+                    "worst_case": "w", "urgency": "optional", "break_risk": [], "before_upgrading": []}
+    run = fake_run(envelope(cost=0.5, structured=explain_good))
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setattr(contract, "check", lambda st, p, b, **kw: contract.ContractStatus(p, "2.1.332", True, (), ""))
+    monkeypatch.setattr(ledger, "deliver", lambda *a, **kw: False)
+    store.set_setting("llm_daily_budget_usd", "0.01")
+    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "0.01")
+    llm.record("summarize", outcome="ok", usage=llm.Usage(cost_usd=50.0))
+    ledger.save(store, "claude", (windows.Reading("five_hour", "allowed", 0.8, now + 7200, now),), now=now)
+
+    sm = Summarizer(store, "sonnet", store.path.parent / "sb", claude="claude")
+    assert sm.summarize(Item(Source.BREW, "jq", "jq", "1", "2"), "notes").generated_by == "heuristic"
+    assert len(run.seen) == 0 and "80%" in sm.problem
+
+    got = Explainer(store, "sonnet", store.path.parent / "sb", claude="claude").explain(Item(Source.BREW, "jq", "jq", "1", "2"))
+    assert got["answer"] == "a" and len(run.seen) == 1
 
 
 def test_ok_reply_mentioning_not_logged_in_is_not_misclassified(store, monkeypatch):
@@ -162,7 +178,7 @@ def test_usage_report_adds_up(store):
     assert [o["item_key"] for o in u["outliers"]] == ["brew:mise"]  # 7× the summary median; the fix isn't compared to summaries
     assert u["cache"] == {"summaries_from_cache": 2, "summaries_asked": 7, "hit_rate": round(2 / 7, 3)}
     assert u["by_model"][0]["model"] == "claude-sonnet-5-5" and u["by_model"][0]["calls"] == 7
-    assert store.llm_spent(since=now - 86400, purposes=llm.BUDGETED) == pytest.approx(1.357)
+    assert store.llm_spent(since=now - 86400, purposes=("summarize", "explain", "fix")) == pytest.approx(1.357)
 
 
 def test_usage_endpoints(store, tmp_path):
@@ -170,12 +186,8 @@ def test_usage_endpoints(store, tmp_path):
     store.save_snapshot([item_to_dict(Item(Source.BREW, "jq", "jq", "1", "2"))], [])
     llm.record("summarize", outcome="ok", item_key="brew:jq", usage=llm.Usage(cost_usd=0.02))
     c = TestClient(create_app(s, store, "t" * 32), base_url=f"http://127.0.0.1:{s.port}", cookies=signed_in(s.port))
-    h = {"x-bosun-token": "t" * 32}
     got = c.get("/api/usage", params={"days": 7}).json()
-    assert got["totals"]["calls"] == 1 and got["budgets"] == {"refresh_usd": 2.0, "daily_usd": 10.0, "assistant_usd": 5.0}
-    assert c.post("/api/usage/budget", json={"refresh_usd": 0.5}, headers=h).json() == {"refresh_usd": 0.5, "daily_usd": 10.0, "assistant_usd": 5.0}
-    assert c.post("/api/usage/budget", json={"daily_usd": -1}, headers=h).status_code == 422
-    assert c.post("/api/usage/budget", json={"daily_usd": 3}).status_code == 403
+    assert got["totals"]["calls"] == 1
     assert c.get("/api/usage", params={"days": 0}).status_code == 422
 
 

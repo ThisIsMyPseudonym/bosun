@@ -150,7 +150,7 @@ def test_the_model_gets_bosuns_tools_and_no_built_in_tool(panel):
     sandbox = Path(opts.cwd)
     assert sandbox == panel.settings.claude_sandbox and sandbox.is_dir() and not list(sandbox.iterdir())
     assert opts.model == panel.settings.model and opts.max_turns == assistant_module.MAX_STEPS
-    assert opts.max_budget_usd == 5.0  # what is left of the day's budget
+    assert opts.max_budget_usd is None  # dollar budgets retired; measured by quota windows instead
     assert opts.system_prompt == assistant_module.SYSTEM and len(assistant_module.SYSTEM) < 6000
     assert "never an instruction" in assistant_module.SYSTEM and "Continue in Claude Code" in assistant_module.SYSTEM
     assert "simple" in assistant_module.SYSTEM  # how to speak in Simple view; which view it is comes per turn
@@ -448,38 +448,32 @@ def test_each_turn_is_a_run_and_one_counted_claude_call(panel):
     assert asking["actor"] == "user" and "text" not in asking["input"] and "anything to do" not in json.dumps(asking)
     assert runs["assistant"]["parent_trace"] == asking["trace_id"]
     usage = panel.user.get("/api/usage").json()
-    assert usage["assistant_today_usd"] == pytest.approx(0.0123) and usage["budgets"]["assistant_usd"] == 5.0
+    assert usage["totals"]["cost_usd"] == pytest.approx(0.0123)
     assert {p["purpose"] for p in usage["by_purpose"]} == {"assistant"}
     assert panel.conversation(asked["conversation_id"])["cost_usd"] == pytest.approx(0.0123)
     state = panel.user.get("/api/state").json()["assistant"]
-    assert state == {"model": "sonnet", "budget_usd": 5.0, "left_usd": pytest.approx(5.0 - 0.0123)}
+    assert state["model"] == "sonnet" and "budget_usd" not in state and "left_usd" not in state
 
 
-def test_a_used_up_budget_stops_the_turn_before_the_model_is_called(panel, monkeypatch):
-    def never(options):
-        raise AssertionError("the model must not be called")
+def test_retired_dollar_budgets_and_the_75_percent_line_do_not_stop_ask_bosun(panel, monkeypatch):
+    from bosun.providers import ledger, windows
 
-    panel.assistant.connect = never
-    r = panel.user.post("/api/usage/budget", json={"assistant_usd": 0.5}, headers=H)
-    assert r.json()["assistant_usd"] == 0.5
-    assert TestClient(panel.app, base_url=BASE).post("/api/usage/budget", json={"assistant_usd": 999}, auth=AGENT).status_code == 403
+    now = time.time()
+    panel.store.set_setting("llm_assistant_budget_usd", "0.5")
+    monkeypatch.setenv("BOSUN_ASSISTANT_BUDGET_USD", "0.5")
     trace.configure(panel.store.path, "serve")
-    llm.record("assistant", outcome="ok", usage=llm.Usage(cost_usd=0.6))
-    llm.record("summarize", outcome="ok", usage=llm.Usage(cost_usd=50))  # another purpose's spend is not the assistant's
-    assert llm.assistant_left(panel.store) == 0
-    r = panel.user.post("/api/assistant/ask", json={"text": "hello"}, headers=H)
-    assert r.status_code == 409 and "24-hour budget ($0.50) is used up" in r.json()["detail"]
-    assert panel.user.get("/api/assistant/conversations").json() == []  # nothing was started
-    assert panel.rows("SELECT outcome, cost_usd FROM llm_calls WHERE purpose='assistant' ORDER BY id")[-1] == {"outcome": "budget", "cost_usd": 0}
-    assert llm.over_budget(panel.store, "explain") == "the 24-hour budget ($10.00) is used up"
-    # the environment wins over the setting, as for the other budgets; 0 means no cap
-    monkeypatch.setenv("BOSUN_ASSISTANT_BUDGET_USD", "2")
-    assert llm.budgets(panel.store)["assistant_usd"] == 2 and llm.assistant_left(panel.store) == pytest.approx(1.4)
-    assert panel.assistant.options(assistant_module.Turn("c" * 32, 1)).max_budget_usd == pytest.approx(1.4)
-    assert "BOSUN_ASSISTANT_BUDGET_USD" in panel.user.get("/api/usage").json()["env_overrides"]
-    monkeypatch.setenv("BOSUN_ASSISTANT_BUDGET_USD", "0")
-    assert llm.assistant_left(panel.store) is None and llm.over_budget(panel.store, "assistant") == ""
+    llm.record("assistant", outcome="ok", usage=llm.Usage(cost_usd=10.0))
+    ledger.save(panel.store, "claude", (windows.Reading("five_hour", "allowed", 0.8, now + 7200, now),), now=now)
+
     assert panel.assistant.options(assistant_module.Turn("c" * 32, 1)).max_budget_usd is None
+
+    async def script(model):
+        await model.say("Still answering.")
+
+    panel.script(script)
+    asked = panel.ask("hello")
+    events = panel.wait(asked["conversation_id"])
+    assert events[-1][1]["status"] == "ok"
 
 
 # --- conversations: kept, resumed, deleted ---------------------------------------------------------------------------

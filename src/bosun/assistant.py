@@ -203,10 +203,6 @@ class Assistant:
     # --- what the panel calls (through the registry's assistant_* actions) -----------------------------------------
     def ask(self, body: AskIn) -> dict[str, Any]:
         """Accept a question and start answering it. Returns at once; the events stream carries the answer."""
-        reason = llm.over_budget(self.store, "assistant")
-        if reason:
-            llm.record("assistant", outcome="budget", model=self.model, error=reason)
-            raise Conflict(f"Ask Bosun is paused: {reason}. Raise it under AI usage, Budgets, or ask again later")
         with self._lock:
             cid = body.conversation_id
             if cid:
@@ -306,7 +302,6 @@ class Assistant:
             return await self._call_tool(turn, name, arguments)
 
         self.settings.claude_sandbox.mkdir(parents=True, exist_ok=True)
-        left = llm.assistant_left(self.store)
         server = mcp_server.tool_server(call, helpers(), tiers=mcp_server.TIER_PLAIN)
         return ClaudeAgentOptions(
             tools=[],  # no built-in tool at all: no Bash, Read, Write, WebFetch, Agent
@@ -320,7 +315,7 @@ class Assistant:
             cli_path=shutil.which("claude"),  # the CLI Bosun already uses; the SDK's bundled copy if there is none
             model=self.model,
             max_turns=MAX_STEPS,
-            max_budget_usd=None if left is None else max(0.05, round(left, 2)),  # a turn can't run past the day's cap
+            max_budget_usd=None,
             include_partial_messages=True,  # text as it is written
             verbatim_prompts=True,  # the prompt is sent as written: no @file expansion, no slash commands
             extra_args={"no-session-persistence": None,  # nothing in Claude Code's session history

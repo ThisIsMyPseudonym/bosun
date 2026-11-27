@@ -829,26 +829,22 @@ def cmd_diagnose(args, s) -> int:
 
 
 def cmd_usage(args, s) -> int:
-    """Where Claude tokens went, and what Bosun's cache and budgets saved."""
-    from . import llm
-
+    """Where AI calls and tokens went, and what Bosun's cache saved."""
     try:
         with Store(s.db_path, read_only=True) as store:
             u = store.llm_usage(days=args.days)
-            b = llm.budgets(store)
     except FileNotFoundError:
         if args.json:
-            print(json.dumps({"days": args.days, "totals": {"calls": 0, "cost_usd": 0},
-                              "budgets": llm.budgets(None)}, indent=2))
+            print(json.dumps({"days": args.days, "totals": {"calls": 0, "cost_usd": 0}}, indent=2))
         else:
-            print(f"No Claude calls recorded in the last {args.days:g} days.")
+            print(f"No AI calls recorded in the last {args.days:g} days.")
         return 0
     if args.json:
-        print(json.dumps({**u, "budgets": b}, indent=2, default=str))
+        print(json.dumps(u, indent=2, default=str))
         return 0
     t = u["totals"]
     if not t["calls"]:
-        print(f"No Claude calls recorded in the last {args.days:g} days.")
+        print(f"No AI calls recorded in the last {args.days:g} days.")
         return 0
     k = lambda n: f"{(n or 0) / 1000:,.1f}k"  # noqa: E731
     print(f"Last {args.days:g} days: {t['calls']} calls, ${t['cost_usd'] or 0:.2f} at list price · "
@@ -856,8 +852,7 @@ def cmd_usage(args, s) -> int:
           f"{k(t['cache_write_tokens'])} · output {k(t['output_tokens'])}")
     c = u["cache"]
     if c["summaries_asked"]:
-        print(f"Summaries from Bosun's cache: {c['summaries_from_cache']} of {c['summaries_asked']} ({c['hit_rate']:.0%})")
-    print(f"Budgets: ${b['refresh_usd']:.2f} per refresh for summaries, ${b['daily_usd']:.2f} per 24 h (0 = none)\n")
+        print(f"Summaries from Bosun's cache: {c['summaries_from_cache']} of {c['summaries_asked']} ({c['hit_rate']:.0%})\n")
     print("By purpose")
     for p in u["by_purpose"]:
         print(f"  {p['purpose']:<10} {p['calls']:>5} calls  ${p['cost_usd'] or 0:>8.3f}  avg ${p['avg_cost_usd'] or 0:.4f}"
