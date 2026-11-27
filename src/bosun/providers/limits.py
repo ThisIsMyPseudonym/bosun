@@ -49,7 +49,8 @@ _CLOCK = re.compile(
     rf"(?:(?P<mon>{_MONTH})[a-z]*\.?\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?,?\s+"
     r"(?:(?P<year>20\d\d),?\s+)?(?:at\s+)?)?"
     r"(?P<hour>\d{1,2})(?::(?P<min>\d\d)\s*(?P<ampm1>am|pm)?|\s*(?P<ampm2>am|pm))\b"
-    r"(?:\s*\(?\s*(?P<zone>UTC|GMT|[A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+)\b\s*\)?)?",
+    r"(?:\s*\(\s*(?P<pzone>[A-Za-z][A-Za-z0-9_/+-]{0,40})\s*\)"
+    r"|\s+(?P<zone>UTC|GMT|[A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+|(?-i:[A-Z]{2,5}))\b)?",
     re.I)
 _MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
                                        "dec"), start=1)}
@@ -87,16 +88,16 @@ def _relative(text: str, now: float) -> float | None:
     return None
 
 
-def _zone(name: str | None, fallback: tzinfo | None) -> tzinfo | None:
-    """The zone a reply names ("(America/Chicago)", "UTC"), else the fallback (None: the machine's own)."""
+def _zone(name: str | None, fallback: tzinfo | None) -> tuple[bool, tzinfo | None]:
+    """(ok, zone): the zone a reply names ("(America/Chicago)", "UTC"), `fallback` when unnamed, else (False, None)."""
     if name is None:
-        return fallback
+        return True, fallback
     if name.upper() in ("UTC", "GMT"):
-        return UTC
+        return True, UTC
     try:
-        return ZoneInfo(name)
+        return True, ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
-        return fallback
+        return False, None
 
 
 def _hour(m: re.Match[str]) -> tuple[int, int] | None:
@@ -112,8 +113,9 @@ def _hour(m: re.Match[str]) -> tuple[int, int] | None:
 
 
 def _clock_match(m: re.Match[str], now: float, tz: tzinfo | None) -> float | None:
-    hm, zone = _hour(m), _zone(m["zone"], tz)
-    if hm is None:
+    hm = _hour(m)
+    ok, zone = _zone(m["pzone"] or m["zone"], tz)
+    if hm is None or not ok:
         return None
     today = datetime.fromtimestamp(now, zone)
     try:

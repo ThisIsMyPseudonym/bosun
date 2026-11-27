@@ -68,11 +68,14 @@ def test_a_named_date_is_read_as_that_date():
         expect_next_year, next_day)
 
 
-def test_a_clock_time_is_read_in_the_machines_zone_by_default_and_a_bad_zone_falls_back():
+def test_a_clock_time_is_read_in_the_machines_zone_by_default_and_unknown_zones_are_unreadable():
     chicago = ZoneInfo("America/Chicago")
     expect = datetime(2027, 1, 15, 15, 10, tzinfo=chicago).timestamp()
     assert limits.limit_reading("5-hour limit · resets 3:10pm", NOW, tz=chicago) == _limit(expect)
-    assert limits.limit_reading("5-hour limit · resets 3:10pm (Mars/Olympus)", NOW, tz=chicago) == _limit(expect)
+    assert limits.limit_reading("5-hour limit · resets 3:10pm (Mars/Olympus)", NOW, tz=chicago) == _limit(NOW + HOUR)
+    assert limits.limit_reading("5-hour limit · resets 9pm (Foo/Bar)", NOW, tz=chicago) == _limit(NOW + HOUR)
+    assert limits.limit_reading("5-hour limit · resets 9pm (PT)", NOW, tz=chicago) == _limit(NOW + HOUR)
+    assert limits.limit_reading("5-hour limit · resets 9pm PT", NOW, tz=chicago) == _limit(NOW + HOUR)
     local = datetime.fromtimestamp(NOW).replace(hour=15, minute=10, second=0, microsecond=0)
     local_reset = local.timestamp() if local.timestamp() > NOW else local.timestamp() + 24 * HOUR
     assert limits.limit_reading("5-hour limit · resets 3:10pm", NOW) == _limit(local_reset)
