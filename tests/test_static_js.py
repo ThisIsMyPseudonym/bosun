@@ -483,3 +483,95 @@ def test_triage_retry_uses_fix_item_keys_and_omits_button_for_non_retryable_kind
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
 
+
+def test_triage_send_feedback_posts_to_run_feedback_route():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    runs_js = str(STATIC / "runs.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      body: mkNode("body"),
+      querySelector: () => ({{ content: "tok" }}),
+      getElementById: () => null,
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{
+      calls.push({{ path, opts }});
+      return {{ status: "disputed", feedback: JSON.parse(opts.body).feedback }};
+    }};
+    MC.route = {{ parse: () => ({{ page: "trace" }}) }};
+    MC.render = () => {{}};
+    MC.nameOf = (_S, k) => k;
+    MC.ago = () => "1m ago";
+    MC.jobLabel = (j) => j.status;
+    MC.ask = () => {{}};
+    MC.banner = () => {{}};
+    MC.actions = {{ upgrade: () => {{}}, fix: () => {{}}, recheckProject: () => {{}}, copyPrompt: () => {{}} }};
+    eval(fs.readFileSync({json.dumps(runs_js)}, "utf8"));
+
+    const allNodes = (n) => [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)];
+    const trace = {{
+      run: {{ trace_id: "deadbeef1234", kind: "upgrade", subject: "brew:jq", status: "failed", started: 1700000000 }},
+      spans: [], failures: [], jobs: [], fixes: [],
+    }};
+    const triage = {{
+      status: "done", source: "rules", feedback: "",
+      verdict: {{
+        category: "permissions", cause: "Folder not writable.", confidence: "high", evidence: [],
+        next_step: {{ kind: "runbook", recipe: null, runbook: "homebrew-permissions", why: "Fix ownership." }},
+        needs_person: true, transient: false,
+      }},
+    }};
+    const card = MC.triageHelpers.verdictCard(triage, trace, {{}});
+    const btns = allNodes(card).filter((n) => n.tagName === "BUTTON");
+    const helpful = btns.find((b) => b.textContent === "Helpful");
+    const wrong = btns.find((b) => b.textContent === "Wrong");
+    if (!helpful || !wrong) throw new Error("missing feedback buttons");
+
+    (async () => {{
+      for (const fn of helpful.listeners.click || []) await fn();
+      for (const fn of wrong.listeners.click || []) await fn();
+      if (calls.length !== 2) throw new Error("expected 2 api calls, got " + calls.length);
+      if (calls[0].path !== "/api/runs/deadbeef1234/triage/feedback" || calls[0].opts.method !== "POST") {{
+        throw new Error("wrong helpful request: " + JSON.stringify(calls[0]));
+      }}
+      if (JSON.stringify(JSON.parse(calls[0].opts.body)) !== JSON.stringify({{ feedback: "helpful" }})) {{
+        throw new Error("wrong helpful body: " + calls[0].opts.body);
+      }}
+      if (calls[1].path !== "/api/runs/deadbeef1234/triage/feedback" || calls[1].opts.method !== "POST") {{
+        throw new Error("wrong feedback request: " + JSON.stringify(calls[1]));
+      }}
+      if (JSON.stringify(JSON.parse(calls[1].opts.body)) !== JSON.stringify({{ feedback: "wrong" }})) {{
+        throw new Error("wrong feedback body: " + calls[1].opts.body);
+      }}
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
