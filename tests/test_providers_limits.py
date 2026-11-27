@@ -1,4 +1,4 @@
-"""Usage-limit replies take a login out until the reset they name."""
+"""Usage-limit replies take a login out until the reset they name; a 429 cools it down."""
 
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -85,6 +85,7 @@ def test_an_answer_that_mentions_limits_is_still_an_answer():
 
 
 def test_a_reset_bosun_cannot_read_means_an_hour():
+    assert limits.limit_reading("usage limit reached, resets 2027-99-99T00:00:00Z", NOW, tz=UTC) == _limit(NOW + HOUR)
     assert limits.limit_reading("usage limit reached, resets 25:99pm", NOW, tz=UTC) == _limit(NOW + HOUR)
     assert limits.limit_reading("usage limit reached, resets 13pm", NOW, tz=UTC) == _limit(NOW + HOUR)
     assert limits.limit_reading("usage limit reached, resets 0am", NOW, tz=UTC) == _limit(NOW + HOUR)
@@ -94,3 +95,37 @@ def test_a_reset_bosun_cannot_read_means_an_hour():
     leap_past = datetime(2028, 3, 1, 12, 0, tzinfo=UTC).timestamp()
     assert limits.limit_reading("usage limit reached, resets Feb 29, 1pm", leap_past, tz=UTC) == _limit(
         leap_past + HOUR, leap_past)
+
+
+# --- 429 cool-downs ----------------------------------------------------------------------------------------------
+
+
+class Clock:
+    def __init__(self, t: float) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def test_a_rate_limit_cools_the_login_down_30s_doubling():
+    clock = Clock(NOW)
+    cool = limits.Cooldowns(clock=clock)
+    assert cool.until("codex") is None and cool.active() == frozenset()
+    assert cool.hit("codex") == NOW + 30 and cool.until("codex") == NOW + 30
+    assert cool.active() == frozenset({"codex"})
+    assert cool.hit("codex") == NOW + 60
+    assert cool.until("claude") is None  # per login
+    clock.t = NOW + 61
+    assert cool.until("codex") is None and cool.active() == frozenset()  # over by itself
+    assert cool.hit("codex") == NOW + 61 + 120  # still doubling: no success came in between
+    cool.clear("codex")  # a success resets the step
+    assert cool.until("codex") is None and cool.hit("codex") == NOW + 61 + 30
+
+
+def test_a_cool_down_is_capped_at_15_minutes():
+    cool = limits.Cooldowns(clock=Clock(NOW))
+    for _ in range(10):
+        last = cool.hit("grok@work")
+    assert last == NOW + limits.COOLDOWN_MAX_S == NOW + 900
+    cool.clear("nobody")  # clearing a login that never cooled is fine

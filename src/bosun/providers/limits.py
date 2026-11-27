@@ -1,4 +1,4 @@
-"""When a provider refuses a login: usage-limit replies (a port of Coho's `llmProviders.ts`).
+"""When a provider refuses a login: usage-limit replies and 429 cool-downs (a port of Coho's `llmProviders.ts`).
 
 A usage-limit reply is not an answer, even with exit code 0 (Claude Code prints "API Error: Rate limit reached" and
 exits 0). It becomes a `limit` reading, `rejected`, that resets when the reply says, or in an hour when it names no
@@ -9,7 +9,12 @@ words it looks for can appear in an answer about rate limits.
 from __future__ import annotations
 
 import re
+import threading
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
+from types import MappingProxyType
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bosun.providers.windows import Reading
@@ -148,3 +153,51 @@ def limit_reading(text: str, now: float, tz: tzinfo | None = None) -> Reading | 
         return None
     resets = reset_time(text, now, tz)
     return Reading("limit", "rejected", None, resets if resets is not None else now + NO_RESET_S, now, "limit")
+
+
+# --- 429 cool-downs ----------------------------------------------------------------------------------------------
+
+COOLDOWN_START_S = 30.0  # the first 429 keeps the login out this long; each one after doubles it
+COOLDOWN_MAX_S = 15 * 60.0
+
+
+@dataclass(frozen=True)
+class Cooldown:
+    until: float
+    step: float  # the length of the last cool-down: the next one is twice it
+
+
+class Cooldowns:
+    """Which logins a 429 has cooled down, in memory for this process (the dashboard runs every refresh since
+    single-writer refresh routing, so one process sees them all). A success clears a login's step."""
+
+    def __init__(self, clock: Callable[[], float] = time.time) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._state: Mapping[str, Cooldown] = MappingProxyType({})
+
+    def hit(self, bucket: str) -> float:
+        """A rate limit on this login: out for 30 s, doubling with each one before a success. Returns until when."""
+        with self._lock:
+            prev = self._state.get(bucket)
+            step = COOLDOWN_START_S if prev is None else min(prev.step * 2, COOLDOWN_MAX_S)
+            entry = Cooldown(self._clock() + step, step)
+            self._state = MappingProxyType({**self._state, bucket: entry})
+        return entry.until
+
+    def clear(self, bucket: str) -> None:
+        """A success on this login: the next rate limit starts at 30 s again."""
+        with self._lock:
+            self._state = MappingProxyType({k: v for k, v in self._state.items() if k != bucket})
+
+    def until(self, bucket: str) -> float | None:
+        """When this login's cool-down ends, or None when it is not cooling down."""
+        with self._lock:
+            entry = self._state.get(bucket)
+        return entry.until if entry is not None and entry.until > self._clock() else None
+
+    def active(self) -> frozenset[str]:
+        """Every login currently cooling down."""
+        now = self._clock()
+        with self._lock:
+            return frozenset(b for b, e in self._state.items() if e.until > now)
