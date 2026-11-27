@@ -8,7 +8,7 @@ and a window with no figure has no share. Nothing here may make a login look lik
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from bosun.providers.windows import Reading, window_hours
@@ -113,3 +113,22 @@ def override_until(hit: Hit, now: float) -> float:
     if hit.resets_at is not None and hit.resets_at > now:
         return hit.resets_at
     return now + OVERRIDE_UNDATED_S
+
+
+# --- a call's draw -----------------------------------------------------------------------------------------------
+
+SAME_RESET_S = 60  # resets this close apart are the same window; further apart, it reset in between
+
+
+def draw(before: Mapping[str, Reading], after: Iterable[Reading]) -> float | None:
+    """The share of a window one call used: the largest rise in any window that kept its reset time (Coho's
+    `windowDraw`). None when no window can say. The rise includes other apps' use of the login in between."""
+    rises: list[float] = []
+    for r in after:
+        prev = before.get(r.window)
+        if prev is None or prev.used is None or r.used is None:
+            continue
+        if prev.resets_at is not None and r.resets_at is not None and abs(prev.resets_at - r.resets_at) > SAME_RESET_S:
+            continue
+        rises.append(max(0.0, r.used - prev.used))
+    return max(rises) if rises else None

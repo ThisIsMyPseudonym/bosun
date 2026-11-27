@@ -111,3 +111,18 @@ def test_an_override_ends_at_the_hit_windows_reset_or_in_a_day_when_undated():
     assert quota.override_until(quota.Hit("seven_day", 0.8, NOW + 9000), NOW) == NOW + 9000
     assert quota.override_until(quota.Hit("quota:flash", 0.8, None), NOW) == NOW + 86400
     assert quota.override_until(quota.Hit("five_hour", 0.8, NOW - 5), NOW) == NOW + 86400  # past: a day, not none
+
+
+# --- a call's draw -----------------------------------------------------------------------------------------------
+
+
+def test_draw_is_the_largest_rise_in_a_window_that_kept_its_reset():
+    r = NOW + 3600
+    before = {"five_hour": R("five_hour", "allowed", 0.30, r, NOW), "seven_day": R("seven_day", "allowed", 0.5, None, NOW)}
+    assert quota.draw(before, (R("five_hour", "allowed", 0.34, r + 30, NOW + 9),)) == pytest.approx(0.04)
+    both = (R("five_hour", "allowed", 0.34, r, NOW + 9), R("seven_day", "allowed", 0.51, None, NOW + 9))
+    assert quota.draw(before, both) == pytest.approx(0.04)
+    assert quota.draw(before, (R("five_hour", "allowed", 0.05, r + 18000, NOW + 9),)) is None  # it reset
+    assert quota.draw({}, (R("five_hour", "allowed", 0.34, r, NOW + 9),)) is None
+    assert quota.draw(before, (R("five_hour", "allowed", 0.20, r, NOW + 9),)) == 0.0  # a fall is no draw
+    assert quota.draw(before, (R("five_hour", "rejected", None, r, NOW + 9),)) is None  # no figure to compare
