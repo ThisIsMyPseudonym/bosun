@@ -237,6 +237,30 @@ class Assistant:
                 break
         return status, error, cost
 
+    async def _drive_engine(self, turn: Turn, engine: AssistantEngine, prompt: str) -> TurnReport:
+        async def call_tool(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
+            return await self._tools.call_sdk_tool(turn, name, arguments)
+
+        result: TurnReport | None = None
+        try:
+            if turn.stopped:
+                raise asyncio.CancelledError
+            await engine.start_turn(turn, prompt, call_tool)
+            async for ev in engine.stream():
+                if ev.kind == "text":
+                    turn.emit("text", delta=redact.text(ev.text))
+                elif ev.kind == "message" and ev.text.strip():
+                    row = self.store.add_message(turn.conversation_id, turn.number, "assistant", text=ev.text)
+                    turn.emit("message", id=row, text=redact.text(ev.text))
+                elif ev.kind == "result" and ev.report is not None:
+                    result = ev.report
+        except asyncio.CancelledError:
+            return TurnReport(outcome="cancelled", error="stopped")
+        except Exception as exc:
+            log.warning("assistant turn %s: %s: %s", turn.trace_id[:8], exc.__class__.__name__, exc)
+            return TurnReport(outcome="error", error=f"{exc.__class__.__name__}: {exc}"[:300])
+        return result or TurnReport(outcome="error", error="engine ended without a result")
+
     async def _run_candidate(self, turn: Turn, cand: router.Candidate, model: str,
                              prompt: str) -> tuple[str, str, str, float]:
         t0 = time.perf_counter()
@@ -244,36 +268,14 @@ class Assistant:
             ledger.seed_from_coho(self.store, cand.bucket, now=time.time())
         before = {r.window: r for r in ledger.readings(self.store, cand.bucket)}
         turn_token = self.tokens.issue(turn.conversation_id, turn.number)
-        result: TurnReport | None = None
-
-        async def call_tool(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
-            return await self._tools.call_sdk_tool(turn, name, arguments)
-
         with trace.span("llm", "assistant", model=model, provider=cand.provider, account=cand.login.id,
                         prompt_chars=len(prompt)) as sp:
             try:
-                engine = self._build_engine(cand, model, turn_token)
-                turn.engine = engine
-                if turn.stopped:
-                    raise asyncio.CancelledError
-                await engine.start_turn(turn, prompt, call_tool)
-                async for ev in engine.stream():
-                    if ev.kind == "text":
-                        turn.emit("text", delta=redact.text(ev.text))
-                    elif ev.kind == "message" and ev.text.strip():
-                        row = self.store.add_message(turn.conversation_id, turn.number, "assistant", text=ev.text)
-                        turn.emit("message", id=row, text=redact.text(ev.text))
-                    elif ev.kind == "result" and ev.report is not None:
-                        result = ev.report
-            except asyncio.CancelledError:
-                result = TurnReport(outcome="cancelled", error="stopped")
-            except Exception as exc:
-                log.warning("assistant turn %s: %s: %s", turn.trace_id[:8], exc.__class__.__name__, exc)
-                result = TurnReport(outcome="error", error=f"{exc.__class__.__name__}: {exc}"[:300])
+                turn.engine = self._build_engine(cand, model, turn_token)
+                rep = await self._drive_engine(turn, turn.engine, prompt)
             finally:
                 turn.engine = None
                 self.tokens.revoke(turn_token)
-            rep = result or TurnReport(outcome="error", error="engine ended without a result")
             outcome, error = ("cancelled", "stopped") if turn.stopped else (rep.outcome, rep.error)
             usage = self._record_turn(turn, cand, model, before, rep, outcome, error,
                                       (time.perf_counter() - t0) * 1000, len(prompt))

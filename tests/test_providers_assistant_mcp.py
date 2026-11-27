@@ -22,7 +22,7 @@ import httpx
 import pytest
 import uvicorn
 
-from assistant_panel import H, JQ, TOKEN, items
+from assistant_panel import H, JQ, TOKEN, items, panel  # noqa: F401
 from conftest import SESSION_KEY, signed_in
 
 from bosun import auth, trace
@@ -255,3 +255,113 @@ def test_non_claude_codex_turn_needs_spent_approval_and_never_leaks_token(tmp_pa
     surface = "\n".join([stored, caplog.text, "\n".join(all_sse), conv_text])
     for secret in (*tokens_issued, SESSION_KEY, auth.cookie_value(SESSION_KEY), TOKEN):
         assert secret not in surface
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX executable script shebang on PATH")
+def test_mcp_engine_turns_write_llm_calls_rows_readings_and_window_draw(tmp_path, monkeypatch):
+    from bosun.providers import ledger, usage as ai_usage
+
+    _, _ = _install_fake_codex(tmp_path, monkeypatch)
+    port = _free_port()
+    store = Store(tmp_path / "db.sqlite")
+    store.save_snapshot(items(), [])
+    monkeypatch.setattr("bosun.actions.Upgrader.start", lambda *a, **kw: 7)
+    monkeypatch.setattr("bosun.machine.open_updates_argv", lambda: None)
+    trace.configure(store.path, "serve")
+    settings = dataclasses.replace(load_settings(), data_dir=tmp_path, port=port)
+    app = create_app(settings, store, TOKEN)
+    routing.update(store, pins={"assistant": "codex"})
+
+    # Seed an initial Codex 5-hour reading at 20% so Turn 1 computes a non-zero window_draw
+    now = time.time()
+    from bosun.providers.windows import Reading
+    ledger.save(store, "codex", (Reading("five_hour", "allowed", 0.20, now + 3600, now - 10),), now=now)
+
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+
+        monkeypatch.setenv("FAKE_CODEX_USED_PCT", "25.5")
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", cookies=signed_in(port), timeout=20) as browser:
+            r = browser.post("/api/assistant/ask", json={"text": "upgrade jq"}, headers=H)
+            assert r.status_code == 202
+            cid = r.json()["conversation_id"]
+            with browser.stream("GET", f"/api/assistant/conversations/{cid}/events") as stream:
+                kind = ""
+                for line in stream.iter_lines():
+                    if line.startswith("event: "):
+                        kind = line[7:]
+                    elif line.startswith("data: ") and kind == "approval":
+                        card = json.loads(line[6:])
+                        browser.post(f"/api/assistant/approvals/{card['id']}", json={"approve": False}, headers=H)
+    finally:
+        server.should_exit = True
+        thread.join(10)
+        trace.configure(None)
+
+    rows = [dict(r) for r in store._db.execute("SELECT * FROM llm_calls WHERE job='assistant'").fetchall()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["job"], row["purpose"], row["provider"], row["account"], row["outcome"]) == (
+        "assistant", "assistant", "codex", "default", "ok"
+    )
+    assert (row["input_tokens"], row["cache_read_tokens"], row["output_tokens"]) == (310, 40, 55)
+    assert row["window_draw"] == pytest.approx(0.055, abs=1e-4)
+    saved = {r.window: r for r in ledger.readings(store, "codex")}
+    assert saved["five_hour"].used == pytest.approx(0.255, abs=1e-4)
+
+    rep = ai_usage.report(store)
+    assert any(j["job"] == "assistant" and j["window_draw"] == pytest.approx(0.055, abs=1e-4) for j in rep["top_jobs"])
+
+
+def test_claude_sdk_rate_limit_event_records_readings_and_draw(panel):
+    from claude_agent_sdk import RateLimitEvent, RateLimitInfo
+    from bosun.providers import engines, ledger, windows
+
+    now = time.time()
+    ev = RateLimitEvent(
+        rate_limit_info=RateLimitInfo(
+            status="allowed",
+            resets_at=int(now) + 7200,
+            rate_limit_type="five_hour",
+            utilization=0.42,
+            raw={"status": "allowed", "rateLimitType": "five_hour", "resetsAt": int(now) + 7200, "utilization": 0.42,
+                 "unifiedWindows": {"seven_day": {"utilization": 0.15, "resetsAt": int(now) + 86400, "status": "allowed"}}},
+        ),
+        uuid="u1",
+        session_id="s1",
+    )
+    parsed = {r.window: r for r in engines._rate_limit_readings(ev, now)}
+    assert parsed["five_hour"].used == pytest.approx(0.42) and parsed["seven_day"].used == pytest.approx(0.15)
+
+    # Also verify snake_case fallback when .raw is empty
+    ev_plain = RateLimitEvent(
+        rate_limit_info=RateLimitInfo(status="allowed", resets_at=int(now) + 7200, rate_limit_type="five_hour", utilization=0.5),
+        uuid="u2",
+        session_id="s1",
+    )
+    parsed2 = {r.window: r for r in engines._rate_limit_readings(ev_plain, now)}
+    assert parsed2["five_hour"].used == pytest.approx(0.5)
+
+    # Drive an engine returning those readings and verify window_draw is written to llm_calls
+    ledger.save(panel.store, "claude", (windows.Reading("five_hour", "allowed", 0.30, now + 7200, now - 10),), now=now)
+    from test_providers_engines import InMemoryEngine
+
+    class ReadingEngine(InMemoryEngine):
+        async def stream(self):
+            yield engines.Event("message", text="Done.")
+            yield engines.Event("result", report=engines.TurnReport(
+                outcome="ok", model="sonnet", readings=tuple(parsed.values()), turns=1,
+            ))
+
+    panel.assistant.engine_factory = lambda _c, _m: ReadingEngine()
+    cid = panel.ask("check usage")["conversation_id"]
+    assert panel.wait(cid)[-1][1]["status"] == "ok"
+    row = panel.rows("SELECT provider, account, job, window_draw FROM llm_calls WHERE job='assistant'")[0]
+    assert row == {"provider": "claude", "account": "default", "job": "assistant", "window_draw": pytest.approx(0.12, abs=1e-4)}
+

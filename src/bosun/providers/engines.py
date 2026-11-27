@@ -73,11 +73,17 @@ class AssistantEngine(Protocol):
 
 def _rate_limit_readings(message: RateLimitEvent, at: float) -> list[Reading]:
     info = getattr(message, "rate_limit_info", None)
+    if isinstance(info, dict):
+        return windows._claude_event(info, at)
+    raw = getattr(info, "raw", None)
+    if isinstance(raw, dict) and raw:
+        return windows._claude_event(raw, at)
     if dataclasses.is_dataclass(info) and not isinstance(info, type):
-        info = dataclasses.asdict(info)
-    if not isinstance(info, dict):
-        return []
-    return windows._claude_event(info, at)
+        d = dataclasses.asdict(info)
+        mapped = {"status": d.get("status"), "rateLimitType": d.get("rate_limit_type"),
+                  "resetsAt": d.get("resets_at"), "utilization": d.get("utilization")}
+        return windows._claude_event(mapped, at)
+    return []
 
 
 def _sdk_result(message: ResultMessage, prior_error: str) -> tuple[dict[str, Any], str, str]:

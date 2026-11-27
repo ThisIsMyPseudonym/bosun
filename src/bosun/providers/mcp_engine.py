@@ -104,6 +104,37 @@ class CliMcpEngine:
         self._turn = turn
         self._prompt = prompt
 
+    async def _read_child(self, child: asyncio.subprocess.Process, provider: str, stdin_text: str | None,
+                          stdout_lines: list[str], stderr_lines: list[str]) -> AsyncIterator[Event]:
+        self._proc = child
+        stderr_task = asyncio.create_task(_drain_stderr(child.stderr, stderr_lines))
+        try:
+            if child.stdin is not None:
+                if stdin_text:
+                    child.stdin.write(stdin_text.encode("utf-8"))
+                    await child.stdin.drain()
+                child.stdin.close()
+            if self._stopped or self._turn.stopped:
+                await self.stop()
+            assert child.stdout is not None
+            while True:
+                raw = await child.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                stdout_lines.append(line)
+                if (obj := jsontext.loads_dict(line, jsontext.MAX_LINE_CHARS)) is not None:
+                    for ev in _stream_events(provider, obj):
+                        yield ev
+            await child.wait()
+            await stderr_task
+        except asyncio.CancelledError:
+            await self.stop()
+            stderr_task.cancel()
+            raise
+        finally:
+            self._proc = None
+
     async def stream(self) -> AsyncIterator[Event]:
         assert self._turn is not None
         provider = self.login.provider
@@ -132,34 +163,9 @@ class CliMcpEngine:
                         outcome="not_found", error=f"{call_argv[0]} isn't installed on this computer",
                         model=self.model))
                     return
-                self._proc = child
-                stderr_task = asyncio.create_task(_drain_stderr(child.stderr, stderr_lines))
-                try:
-                    if child.stdin is not None:
-                        if inv.stdin:
-                            child.stdin.write(inv.stdin.encode("utf-8"))
-                            await child.stdin.drain()
-                        child.stdin.close()
-                    if self._stopped or self._turn.stopped:
-                        await self.stop()
-                    assert child.stdout is not None
-                    while True:
-                        raw = await child.stdout.readline()
-                        if not raw:
-                            break
-                        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                        stdout_lines.append(line)
-                        if (obj := jsontext.loads_dict(line, jsontext.MAX_LINE_CHARS)) is not None:
-                            for ev in _stream_events(provider, obj):
-                                yield ev
-                    rc = await child.wait()
-                    await stderr_task
-                except asyncio.CancelledError:
-                    await self.stop()
-                    stderr_task.cancel()
-                    raise
-                finally:
-                    self._proc = None
+                async for ev in self._read_child(child, provider, inv.stdin, stdout_lines, stderr_lines):
+                    yield ev
+                rc = child.returncode if child.returncode is not None else 1
                 sp.set(returncode=rc, stdout_chars=sum(len(s) for s in stdout_lines),
                        stderr_chars=sum(len(s) for s in stderr_lines))
                 if rc != 0 and not (self._stopped or self._turn.stopped):
