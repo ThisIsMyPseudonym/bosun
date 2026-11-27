@@ -671,6 +671,17 @@ FROM triage;
 """
 
 
+TRIAGE_RULE_DISPUTES = """
+CREATE TABLE IF NOT EXISTS triage_disputed_rules (
+    signature TEXT PRIMARY KEY,
+    disputed_at REAL NOT NULL
+);
+INSERT OR IGNORE INTO triage_disputed_rules (signature, disputed_at)
+SELECT signature, COALESCE(feedback_ts, created) FROM triage
+WHERE source = 'rules' AND signature != '' AND (status = 'disputed' OR feedback IN ('wrong', 'disputed'));
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline", fn=_baseline),
     Migration(2, "tracing", fn=_tracing),
@@ -684,6 +695,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(10, "llm_calls_providers", fn=_llm_calls_providers),
     Migration(11, "retire_budgets", fn=_retire_budgets),
     Migration(12, "triage", sql=TRIAGE),
+    Migration(13, "triage_rule_disputes", sql=TRIAGE_RULE_DISPUTES),
 )
 
 

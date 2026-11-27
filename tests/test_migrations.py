@@ -342,7 +342,7 @@ def test_v12_adds_triage_table_and_view_without_touching_older_rows(tmp_path):
     db.close()
 
     store = Store(path)
-    assert migrations.current_version(store._db) == 12
+    assert migrations.current_version(store._db) == migrations.latest_version()
     assert store.setting("kept_v11") == "yes"
     verdict = {
         "category": "permissions",
@@ -361,5 +361,23 @@ def test_v12_adds_triage_table_and_view_without_touching_older_rows(tmp_path):
         )
     got = query.run(store.path, "SELECT failure, category, confidence, next_step_kind, next_step_runbook FROM v_triage")
     assert got["rows"] == [["job:1", "permissions", "high", "runbook", "homebrew-permissions"]]
+    store.close()
+
+
+def test_v13_adds_triage_disputed_rules_and_backfills_existing_disputes(tmp_path):
+    path = tmp_path / "bosun.db"
+    db = sqlite3.connect(path)
+    migrate(db, path, migrations.MIGRATIONS[:12])
+    db.execute(
+        "INSERT INTO triage (failure, trace_id, signature, status, source, verdict, feedback, feedback_ts, created, finished) "
+        "VALUES ('job:1', 'abcd1234', 'sig-disputed', 'disputed', 'rules', '{}', 'wrong', 1200.0, 1000.0, 1001.0)"
+    )
+    db.commit()
+    db.close()
+
+    store = Store(path)
+    assert migrations.current_version(store._db) == migrations.latest_version()
+    rows = store._db.execute("SELECT signature, disputed_at FROM triage_disputed_rules").fetchall()
+    assert [(r[0], r[1]) for r in rows] == [("sig-disputed", 1200.0)]
     store.close()
 

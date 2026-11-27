@@ -358,3 +358,108 @@ def test_triage_action_runs_model_on_click_refuses_demo_and_refuses_triage_actor
             t.join(5)
     finally:
         trace.configure(None)
+
+
+def test_rules_dispute_survives_failed_model_click_and_wrong_click_during_running_job_survives(tmp_path, monkeypatch):
+    import threading
+    from fake_cli import FakeCli
+    from bosun.providers import accounts
+    from bosun.triage import worker
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        err1 = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq"
+        j1 = st.create_job("brew:jq", ["brew", "upgrade", "--formula", "jq"])
+        job1 = st.job(j1)
+        assert job1 is not None
+        with trace.run("upgrade", subject="brew:jq", trace_id=job1["trace_id"]) as r1:
+            with trace.span("subprocess", "brew", argv=["brew", "upgrade", "--formula", "jq"]) as sp:
+                sp.set(returncode=1, stderr_tail=err1)
+                sp.fail("exit 1")
+            r1.fail(err1)
+        st.finish_job(j1, "failed", err1)
+
+        monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/test/bin/claude"})
+        fake = FakeCli(monkeypatch)
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+
+        # Rules verdict created, then marked Wrong
+        first = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert first["source"] == "rules" and first["status"] == "done"
+        sig = first["signature"]
+        fb = user.post(f"/api/runs/{r1.trace_id}/triage/feedback", json={"feedback": "wrong"}, headers=H)
+        assert fb.status_code == 200 and tstore.is_rule_disputed(st, sig)
+
+        # Clicking Triage (deep=True) fails on the model, yet the rule dispute MUST remain active
+        fake.reply("claude", fake.bad_json("claude"))
+        failed_click = user.post(f"/api/runs/{r1.trace_id}/triage", json={"deep": True}, headers=H)
+        assert failed_click.status_code == 502
+        assert tstore.is_rule_disputed(st, sig)
+
+        # Sibling failure with the same signature must NOT be served the disputed rule
+        err2 = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/rg"
+        j2 = st.create_job("brew:rg", ["brew", "upgrade", "--formula", "rg"])
+        job2 = st.job(j2)
+        assert job2 is not None
+        with trace.run("upgrade", subject="brew:rg", trace_id=job2["trace_id"]) as r2:
+            with trace.span("subprocess", "brew", argv=["brew", "upgrade", "--formula", "rg"]) as sp2:
+                sp2.set(returncode=1, stderr_tail=err2)
+                sp2.fail("exit 1")
+            r2.fail(err2)
+        st.finish_job(j2, "failed", err2)
+        rec2 = tstore.load_failure(st, r2.trace_id)
+        assert rec2 is not None and worker.signature_of(rec2) == sig
+        assert worker.evaluate_fast(st, rec2) is None
+
+        # A "Wrong" click during a running model job must survive the job finishing
+        err3 = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/fd"
+        j3 = st.create_job("brew:fd", ["brew", "upgrade", "--formula", "fd"])
+        job3 = st.job(j3)
+        assert job3 is not None
+        with trace.run("upgrade", subject="brew:fd", trace_id=job3["trace_id"]) as r3:
+            with trace.span("subprocess", "brew", argv=["brew", "upgrade", "--formula", "fd"]) as sp3:
+                sp3.set(returncode=1, stderr_tail=err3)
+                sp3.fail("exit 1")
+            r3.fail(err3)
+        st.finish_job(j3, "failed", err3)
+        # Seed a rules verdict with a distinct signature so we test disputing during a running job
+        tstore.save_verdict(
+            st, f"job:{j3}", r3.trace_id, "sig-mid-run", "rules",
+            Verdict(
+                category="permissions", cause="Folder not writable.", confidence="high", evidence=[],
+                next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Fix."),
+                needs_person=True, transient=False,
+            ),
+        )
+        started, release = threading.Event(), threading.Event()
+
+        def mid_run_reply(_call):
+            started.set()
+            release.wait(5)
+            return fake.claude_ok({
+                "category": "upstream_broken", "cause": "Mirror failed.", "confidence": "medium",
+                "evidence": [{"source": "output", "ref": "", "line": err3}],
+                "next_step": {"kind": "retry", "recipe": None, "runbook": None, "why": "Try later."},
+                "needs_person": False, "transient": True,
+            })
+
+        fake.reply("claude", mid_run_reply)
+        result_box: list[dict] = []
+        t = threading.Thread(target=lambda: result_box.append(app.state.triager.triage_click(r3.trace_id, deep=True)))
+        t.start()
+        assert started.wait(5)
+        try:
+            mid_fb = user.post(f"/api/runs/{r3.trace_id}/triage/feedback", json={"feedback": "wrong"}, headers=H)
+            assert mid_fb.status_code == 200
+        finally:
+            release.set()
+            t.join(5)
+        assert result_box
+        final = tstore.get_by_trace(st, r3.trace_id)
+        assert final is not None
+        assert final["feedback"] == "wrong" and final["status"] == "disputed"
+        assert tstore.is_rule_disputed(st, final["signature"])
+    finally:
+        trace.configure(None)

@@ -142,8 +142,12 @@ def save_status(
             "INSERT INTO triage (failure, trace_id, signature, status, source, triage_trace, created, finished) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(failure) DO UPDATE SET "
-            "trace_id=excluded.trace_id, signature=excluded.signature, status=excluded.status, "
-            "source=excluded.source, triage_trace=excluded.triage_trace, finished=excluded.finished",
+            "trace_id=excluded.trace_id, signature=excluded.signature, "
+            "status=CASE WHEN triage.status = 'disputed' OR triage.feedback IN ('wrong', 'disputed') "
+            "THEN 'disputed' ELSE excluded.status END, "
+            "source=CASE WHEN excluded.source != '' THEN excluded.source ELSE triage.source END, "
+            "triage_trace=CASE WHEN excluded.triage_trace != '' THEN excluded.triage_trace ELSE triage.triage_trace END, "
+            "finished=excluded.finished",
             (failure, trace_id, signature, status, source, triage_trace, ts, finished),
         )
         row = db.execute("SELECT id FROM triage WHERE failure = ?", (failure,)).fetchone()
@@ -195,9 +199,10 @@ def is_rule_disputed(store: Store, sig: str) -> bool:
         return False
     with store._tx() as db:
         hit = db.execute(
-            "SELECT 1 FROM triage WHERE signature = ? AND source = 'rules' "
+            "SELECT 1 FROM triage_disputed_rules WHERE signature = ? "
+            "UNION SELECT 1 FROM triage WHERE signature = ? AND source = 'rules' "
             "AND (status = 'disputed' OR feedback IN ('wrong', 'disputed')) LIMIT 1",
-            (sig,),
+            (sig, sig),
         ).fetchone()
         return hit is not None
 
@@ -214,26 +219,27 @@ def set_feedback(
         raise ValueError(f"invalid feedback: {feedback!r}")
     ts = time.time() if now is None else now
     with store._tx(write=True) as db:
-        row = db.execute("SELECT id, same_as FROM triage WHERE failure = ?", (failure,)).fetchone()
+        row = db.execute("SELECT id, same_as, source, signature FROM triage WHERE failure = ?", (failure,)).fetchone()
         if row is None:
             return None
         row_id = int(row["id"])
         if feedback == "wrong":
-            db.execute(
-                "UPDATE triage SET status = 'disputed', feedback = ?, feedback_ts = ? WHERE id = ?",
-                (feedback, ts, row_id),
-            )
+            db.execute("UPDATE triage SET status='disputed', feedback=?, feedback_ts=? WHERE id=?", (feedback, ts, row_id))
+            if row["source"] == "rules" and row["signature"]:
+                db.execute(
+                    "INSERT INTO triage_disputed_rules (signature, disputed_at) VALUES (?, ?) "
+                    "ON CONFLICT(signature) DO UPDATE SET disputed_at = excluded.disputed_at",
+                    (row["signature"], ts),
+                )
             origin_id = int(row["same_as"]) if row["same_as"] is not None else row_id
             db.execute(
-                "UPDATE triage SET status = 'disputed', feedback = 'disputed', feedback_ts = ? "
-                "WHERE (id = ? OR same_as = ?) AND id != ?",
+                "UPDATE triage SET status='disputed', feedback='disputed', feedback_ts=? WHERE (id=? OR same_as=?) AND id!=?",
                 (ts, origin_id, origin_id, row_id),
             )
         else:
             db.execute(
-                "UPDATE triage SET feedback = ?, feedback_ts = ?, "
-                "status = CASE WHEN status = 'disputed' AND verdict != '' THEN 'done' ELSE status END "
-                "WHERE id = ?",
+                "UPDATE triage SET feedback=?, feedback_ts=?, "
+                "status=CASE WHEN status='disputed' AND verdict!='' THEN 'done' ELSE status END WHERE id=?",
                 (feedback, ts, row_id),
             )
         updated = db.execute("SELECT * FROM triage WHERE id = ?", (row_id,)).fetchone()
