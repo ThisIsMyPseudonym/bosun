@@ -1,32 +1,19 @@
 """Ask Bosun: the assistant in the dashboard's panel.
 
-It runs on the Claude Agent SDK, which drives the Claude Code CLI with the login Bosun already uses. What it can
-do is fixed here, not by the model:
+Ask Bosun runs behind the `AssistantEngine` interface (`providers/engines.py`):
+- `ClaudeSdkEngine`: today's Claude Agent SDK path, driving Claude Code with an in-process MCP tool server.
+- `CliMcpEngine`: any MCP-capable CLI whose only tools are `bosun mcp --as assistant`, with its own shell, file
+  and web tools switched off.
 
-- Its tools are the action registry and two read-only helpers, served by an in-process MCP server built with the
-  same code as `bosun mcp` (mcp_server.tool_server). No built-in tool is switched on: no shell, no files, no web,
-  no other MCP server, no user or project settings, an empty working directory, no session file on disk.
+What the assistant can do is fixed here, not by the model:
 - A tool that only reads runs at once. Anything else stops and asks: an approval (approvals.py) goes to the panel
-  with the exact input, and the call runs only after the signed-in browser answers yes. The check is not made
-  here: `registry.Actions.permit` refuses the assistant any non-read call that doesn't carry an approval the
-  server issued for exactly that action and input. A bug in this module can't run an upgrade.
-- Every turn is a run (`trace.run("assistant")`) with one llm_calls row; every action it runs is the usual
+  with the exact input, and the call runs only after the signed-in browser answers yes. The check is enforced by
+  `registry.Actions.permit`: no non-read call runs without a spent approval for exactly that action and input.
+- Every turn is a run (`trace.run("assistant")`) with one `llm_calls` row; every action it runs is the usual
   audited action run, started by the assistant and approved by the user.
 
-One turn is one CLI process, in its own thread with its own event loop: the same under uvicorn and in tests, and
-nothing to keep alive between questions. Earlier turns reach the model as a compact record in the prompt, read
-from the messages table, so a conversation survives a restart of the dashboard and Bosun writes nothing into
-Claude Code's own session history.
-
-Events a turn emits (the panel reads them as Server-Sent Events, in this order of first appearance):
-  turn {turn, trace_id, text}        the question was accepted
-  text {delta}                       assistant text as it is written
-  message {id, text}                 a finished piece of assistant text (replaces the deltas before it)
-  tool {id, name, input, risk}       a tool call started
-  tool_result {id, ok, outcome, trace_id, result}
-  approval {id, message_id, tool, summary, tier, risk, input, items, expires}
-  approval_done {id, outcome, reason}   approved, declined, expired or stopped
-  done {status, error, cost_usd}     ok, stopped, budget or error; always last
+Earlier turns reach the model as a compact record in the prompt (`compose()`), read from the `messages` table,
+so a conversation survives restarts and can move between logins or providers without depending on CLI sessions.
 """
 
 from __future__ import annotations
@@ -34,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 import threading
 import time
 import uuid
@@ -43,47 +29,28 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import mcp_types as types
-from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, CLINotFoundError, ResultMessage,
-                              StreamEvent, TextBlock)
-from pydantic import BaseModel, Field
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, CLINotFoundError  # noqa: F401
+from pydantic import BaseModel
 
 from . import llm, mcp_server, redact, trace
 from .approvals import Approval, Approvals
-from .assistant_prompt import (HISTORY_CHARS, HISTORY_RESULT_CHARS, NOT_LOGGED_IN, SYSTEM, _record, compose)  # noqa: F401
+from .assistant_prompt import (DECLINED, HISTORY_CHARS, HISTORY_RESULT_CHARS, MAX_STEPS, NOT_LOGGED_IN, PREFIX,  # noqa: F401
+                               SERVER, SYSTEM, TOOL_TIMEOUT_MS, GuideIn, _record, compose, helpers, read_guide,
+                               tool_names)
 from .config import Settings
-from .providers.engines import AssistantEngine, TurnReport
+from .providers import accounts
+from .providers.engines import AssistantEngine, ClaudeSdkEngine, Connect, TurnReport
 from .registry import (ASSISTANT, ActionContext, ActionError, Actions, ActionSpec, AskIn, Conflict, Forbidden, NotFound,
                        Risk, TraceIn)
 from .store import Store
 
 log = logging.getLogger(__name__)
 
-SERVER = "bosun"
-PREFIX = f"mcp__{SERVER}__"  # how Claude Code names an MCP server's tools
-MAX_STEPS = 30  # model calls in one turn
 MAX_RUNNING = 3  # turns at once, across conversations: each is a CLI process
 RESULT_CHARS = 30_000  # of one tool result given to the model: a panel answer shouldn't cost a whole refresh's trace
 STORED_CHARS = 4_000  # of a tool result kept in messages
 SHOWN_CHARS = 1_500  # of a tool result sent to the panel
 STOP_GRACE_S = 5.0  # after Stop: how long the CLI gets to report what the turn used before it is cancelled
-TOOL_TIMEOUT_MS = 20 * 60 * 1000  # an approval can wait five minutes and an assessment can take a few more
-
-
-class GuideIn(BaseModel):
-    topic: str = Field(max_length=80, description="data-model, or a runbook's name")
-
-
-def helpers() -> dict[str, tuple[type[BaseModel], str]]:
-    """The read-only tools beside the registry's: wait_run (as in `bosun mcp`), and Bosun's own notes, which
-    `bosun mcp` serves as resources and a model without resource tools reads this way."""
-    runbooks = ", ".join(sorted(uri.rsplit("/", 1)[1] for uri in mcp_server.resources() if "/runbook/" in uri))
-    return {**mcp_server.HELPERS,
-            "read_guide": (GuideIn, "Bosun's own notes. topic=data-model: every view and column `query` can read. "
-                           f"Or a runbook for a usual failure: {runbooks}. Read-only: looks, changes nothing.")}
-
-
-def tool_names() -> list[str]:
-    return [t.name for t in mcp_server.tools(helpers(), mcp_server.TIER_PLAIN)]
 
 
 class Turn:
@@ -127,15 +94,12 @@ class Turn:
                 yield seen, kind, data
 
 
-Connect = Callable[[ClaudeAgentOptions], ClaudeSDKClient]
-
-
 class Assistant:
     def __init__(self, store: Store, settings: Settings, actions: Actions, approvals: Approvals,
                  connect: Connect | None = None):
         self.store, self.settings, self.actions, self.approvals = store, settings, actions, approvals
         self.model = settings.assistant_model or settings.model
-        self.login = "claude"  # current engine's login bucket (phase 6 routes across MCP-capable logins)
+        self.login = "claude"  # current engine's login bucket (updated when turns route across MCP-capable logins)
         self.connect: Connect = connect or ClaudeSDKClient  # tests put a scripted model here
         self.engine_factory: Callable[[Any, str], AssistantEngine] | None = None
         self._turns: dict[str, Turn] = {}
@@ -239,35 +203,16 @@ class Assistant:
                 out["run"] = {k: run[k] for k in ("trace_id", "kind", "subject", "status")}
         return out
 
-    # --- the SDK ---------------------------------------------------------------------------------------------------
+    # --- engines ---------------------------------------------------------------------------------------------------
+    def _sdk_engine(self, model: str, login: accounts.Login | None = None) -> ClaudeSdkEngine:
+        return ClaudeSdkEngine(self.settings, model, self.connect, login=login, stop_grace=lambda: STOP_GRACE_S)
+
     def options(self, turn: Turn, stderr: list[str] | None = None) -> ClaudeAgentOptions:
-        """Everything the model is given. Tests assert on this: no built-in tool, nothing from the user's setup."""
+        """Everything the model is given on the Claude SDK path. Tests assert on this."""
         async def call(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
             return await self._call_tool(turn, name, arguments)
 
-        self.settings.claude_sandbox.mkdir(parents=True, exist_ok=True)
-        server = mcp_server.tool_server(call, helpers(), tiers=mcp_server.TIER_PLAIN)
-        return ClaudeAgentOptions(
-            tools=[],  # no built-in tool at all: no Bash, Read, Write, WebFetch, Agent
-            allowed_tools=[PREFIX + name for name in tool_names()],  # exactly Bosun's own, by name
-            permission_mode="dontAsk",  # anything not on that list is denied, never prompted for
-            system_prompt=SYSTEM,
-            mcp_servers={SERVER: {"type": "sdk", "name": SERVER, "instance": server}},
-            strict_mcp_config=True,  # no MCP server from the user's or a project's configuration
-            setting_sources=[],  # no user, project or local settings: no hooks, plugins or CLAUDE.md
-            cwd=str(self.settings.claude_sandbox),  # an empty folder
-            cli_path=shutil.which("claude"),  # the CLI Bosun already uses; the SDK's bundled copy if there is none
-            model=self.model,
-            max_turns=MAX_STEPS,
-            max_budget_usd=None,
-            include_partial_messages=True,  # text as it is written
-            verbatim_prompts=True,  # the prompt is sent as written: no @file expansion, no slash commands
-            extra_args={"no-session-persistence": None,  # nothing in Claude Code's session history
-                        "restricted": None,  # settings files ignored and bypassPermissions refused, even if asked
-                        "disable-slash-commands": None},
-            env={"MCP_TOOL_TIMEOUT": str(TOOL_TIMEOUT_MS), "ENABLE_TOOL_SEARCH": "false",
-                 "CLAUDE_AGENT_SDK_CLIENT_APP": "bosun"},
-            stderr=(lambda line: stderr.append(line)) if stderr is not None else None)
+        return self._sdk_engine(self.model).options(call, stderr)
 
     def _run(self, turn: Turn, prompt: str) -> None:
         """The turn's thread: a run, a loop, and whatever happens, a `done` event at the end."""
@@ -295,68 +240,11 @@ class Assistant:
         turn.task = asyncio.current_task()
         in_turn = trace.bound(lambda fn, *a: fn(*a))  # tool threads report into this turn's run
         turn.offload = lambda fn, *a: loop.run_in_executor(self._pool, in_turn, fn, *a)
-        if self.engine_factory is not None:
-            return await self._turn_with_engine(turn, self.engine_factory(None, self.model), prompt)
-        stderr: list[str] = []
-        report: dict[str, Any] | None = None
-        outcome, error, t0 = "ok", "", time.perf_counter()
-        with trace.span("llm", "assistant", model=self.model, prompt_chars=len(prompt)) as sp:
-            try:
-                async with self.connect(self.options(turn, stderr)) as client:
-                    turn.client = client
-                    if turn.stopped:
-                        raise asyncio.CancelledError
-                    await client.query(prompt)
-                    async for message in client.receive_response():
-                        if isinstance(message, StreamEvent):
-                            delta = message.event.get("delta") or {}
-                            if (message.event.get("type") == "content_block_delta" and delta.get("type") == "text_delta"
-                                    and not message.parent_tool_use_id):
-                                turn.emit("text", delta=redact.text(delta.get("text") or ""))
-                        elif isinstance(message, AssistantMessage):
-                            if message.error:
-                                error = str(message.error)
-                            for block in message.content:
-                                if isinstance(block, TextBlock) and block.text.strip():
-                                    row = self.store.add_message(turn.conversation_id, turn.number, "assistant", text=block.text)
-                                    turn.emit("message", id=row, text=redact.text(block.text))
-                        elif isinstance(message, ResultMessage):
-                            report = {"total_cost_usd": message.total_cost_usd, "modelUsage": message.model_usage,
-                                      "usage": message.usage, "num_turns": message.num_turns,
-                                      "duration_ms": message.duration_ms, "duration_api_ms": message.duration_api_ms,
-                                      "session_id": message.session_id}
-                            if message.is_error or message.subtype != "success":
-                                outcome = "budget" if "budget" in message.subtype else "error"
-                                error = str(message.result or error or message.subtype)[:300]
-            except asyncio.CancelledError:
-                outcome, error = "cancelled", "stopped"
-            except CLINotFoundError:
-                outcome, error = "not_found", "Claude Code (the `claude` command) isn't installed on this computer"
-            except Exception as exc:
-                log.warning("assistant turn %s: %s: %s", turn.trace_id[:8], exc.__class__.__name__, exc)
-                outcome, error = "error", f"{exc.__class__.__name__}: {exc}"[:300]
-            finally:
-                turn.client = None
-            if turn.stopped:
-                outcome, error = "cancelled", "stopped"
-            elif outcome != "ok" and ("Not logged in" in error + "".join(stderr) or "/login" in error
-                                      or error == "authentication_failed"):
-                outcome, error = "not_logged_in", NOT_LOGGED_IN
-            usage = llm.record_report("assistant", report, outcome=outcome, model=self.model, error=error,
-                                      took_ms=(time.perf_counter() - t0) * 1000, prompt_chars=len(prompt),
-                                      conversation=turn.conversation_id)
-            sp.set(outcome=outcome, cost_usd=round(usage.cost_usd, 6), input_tokens=usage.total_input,
-                   output_tokens=usage.output_tokens, turns=(report or {}).get("num_turns"))
-            if outcome not in ("ok", "cancelled"):
-                sp.fail(error or outcome)
-                if stderr:
-                    log.warning("assistant turn %s: claude said: %s", turn.trace_id[:8], " | ".join(stderr[-5:])[:1000])
-        status = {"ok": "ok", "cancelled": "stopped", "budget": "budget"}.get(outcome, "error")
-        if status == "budget":
-            error = "This answer hit a cost limit and was cut short"
-        return status, "" if status == "ok" else error, usage.cost_usd
+        engine = (self.engine_factory(None, self.model) if self.engine_factory is not None
+                  else self._sdk_engine(self.model))
+        return await self._run_engine(turn, engine, prompt)
 
-    async def _turn_with_engine(self, turn: Turn, engine: AssistantEngine, prompt: str) -> tuple[str, str, float]:
+    async def _run_engine(self, turn: Turn, engine: AssistantEngine, prompt: str) -> tuple[str, str, float]:
         t0 = time.perf_counter()
         result: TurnReport | None = None
         turn.engine = engine
@@ -391,6 +279,9 @@ class Assistant:
                    output_tokens=usage.output_tokens, turns=rep.turns or (rep.report or {}).get("num_turns"))
             if outcome not in ("ok", "cancelled"):
                 sp.fail(error or outcome)
+                if rep.stderr:
+                    log.warning("assistant turn %s: claude said: %s", turn.trace_id[:8],
+                                " | ".join(rep.stderr[-5:])[:1000])
         status = {"ok": "ok", "cancelled": "stopped", "budget": "budget"}.get(outcome, "error")
         if status == "budget":
             error = "This answer hit a cost limit and was cut short"
@@ -410,21 +301,11 @@ class Assistant:
         return u
 
     async def _interrupt(self, turn: Turn) -> None:
-        """Stop, politely first: an interrupted CLI still reports what the turn used. Then make sure."""
         if turn.engine is not None:
             try:
                 await turn.engine.stop()
-            except Exception:
-                pass
-            return
-        client, task = turn.client, turn.task
-        if client is not None:
-            try:
-                await asyncio.wait_for(client.interrupt(), STOP_GRACE_S)
             except Exception:  # it was already going away
                 pass
-        if task is not None and turn.loop is not None:
-            turn.loop.call_later(STOP_GRACE_S if client is not None else 0, task.cancel)
 
     # --- tools -----------------------------------------------------------------------------------------------------
     async def _call_tool(self, turn: Turn, name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
@@ -512,15 +393,4 @@ class Assistant:
             if progress is None:
                 raise NotFound("No run with that id (or the prefix matches more than one)")
             return progress
-        topic = body.topic.strip().removeprefix(mcp_server.SCHEME).removeprefix("runbook/")  # type: ignore[attr-defined]
-        files = {uri.rsplit("/", 1)[-1]: found[2] for uri, found in mcp_server.resources().items()}
-        if topic not in files:  # a topic is looked up in this list and never becomes a path
-            raise NotFound(f"No guide named {topic!r}. There are: {', '.join(sorted(files))}")
-        return files[topic].read_text(encoding="utf-8")
-
-
-DECLINED = {
-    "declined": "The user declined this in the Ask Bosun panel. Nothing was run. Do not call it again unless they ask.",
-    "expired": "Nobody answered the approval in time, which counts as declined. Nothing was run.",
-    "stopped": "The user stopped the assistant. Nothing was run.",
-}
+        return read_guide(body.topic)  # type: ignore[attr-defined]

@@ -74,3 +74,21 @@ def test_in_memory_engine_stop_cancels_the_turn(panel):
     events = panel.wait(cid)
     assert engine.stopped is True
     assert events[-1][1]["status"] == "stopped"
+
+
+def test_claude_sdk_engine_satisfies_protocol_and_builds_locked_down_options(panel):
+    from bosun.providers import accounts
+    from bosun.providers.engines import ClaudeSdkEngine
+
+    login = accounts.Login("claude", "work", "Work", "/tmp/claude-work", False, "/test/bin/claude")
+    engine = ClaudeSdkEngine(panel.settings, "sonnet", panel.assistant.connect, login=login)
+    assert isinstance(engine, AssistantEngine)
+
+    async def noop(name, args):
+        raise AssertionError(name)
+
+    opts = engine.options(noop)
+    assert opts.tools == [] and opts.strict_mcp_config is True and opts.setting_sources == []
+    assert opts.env["CLAUDE_CONFIG_DIR"] == "/tmp/claude-work"
+    assert opts.model == "sonnet" and opts.max_budget_usd is None
+

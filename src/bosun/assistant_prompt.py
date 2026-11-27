@@ -9,8 +9,33 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import BaseModel, Field
+
+from . import mcp_server
+
+SERVER = "bosun"
+PREFIX = f"mcp__{SERVER}__"  # how Claude Code names an MCP server's tools
+MAX_STEPS = 30  # model calls in one turn
+TOOL_TIMEOUT_MS = 20 * 60 * 1000  # an approval can wait five minutes and an assessment can take a few more
 HISTORY_CHARS = 24_000  # of the earlier conversation replayed to the model
 HISTORY_RESULT_CHARS = 1_200
+
+
+class GuideIn(BaseModel):
+    topic: str = Field(max_length=80, description="data-model, or a runbook's name")
+
+
+def helpers() -> dict[str, tuple[type[BaseModel], str]]:
+    """The read-only tools beside the registry's: wait_run (as in `bosun mcp`), and Bosun's own notes, which
+    `bosun mcp` serves as resources and a model without resource tools reads this way."""
+    runbooks = ", ".join(sorted(uri.rsplit("/", 1)[1] for uri in mcp_server.resources() if "/runbook/" in uri))
+    return {**mcp_server.HELPERS,
+            "read_guide": (GuideIn, "Bosun's own notes. topic=data-model: every view and column `query` can read. "
+                           f"Or a runbook for a usual failure: {runbooks}. Read-only: looks, changes nothing.")}
+
+
+def tool_names() -> list[str]:
+    return [t.name for t in mcp_server.tools(helpers(), mcp_server.TIER_PLAIN)]
 
 SYSTEM = """You are Bosun's built-in assistant, in the Ask Bosun panel of the Bosun dashboard on the user's own \
 computer. Bosun watches this computer for outdated and vulnerable software, in the system and in the user's code \
@@ -71,6 +96,23 @@ package-manager names unless asked. Say what to do and why it matters.
 
 NOT_LOGGED_IN = ("Claude Code isn't logged in for this session. Run `claude` in a terminal on this computer, type "
                  "/login, then ask again.")
+
+DECLINED = {
+    "declined": "The user declined this in the Ask Bosun panel. Nothing was run. Do not call it again unless they ask.",
+    "expired": "Nobody answered the approval in time, which counts as declined. Nothing was run.",
+    "stopped": "The user stopped the assistant. Nothing was run.",
+}
+
+
+def read_guide(topic: str) -> str:
+    """Read one listed Bosun guide (`data-model` or a runbook). A topic never becomes an arbitrary path."""
+    from .registry import NotFound
+
+    name = topic.strip().removeprefix(mcp_server.SCHEME).removeprefix("runbook/")
+    files = {uri.rsplit("/", 1)[-1]: found[2] for uri, found in mcp_server.resources().items()}
+    if name not in files:
+        raise NotFound(f"No guide named {name!r}. There are: {', '.join(sorted(files))}")
+    return files[name].read_text(encoding="utf-8")
 
 
 def compose(context: dict[str, Any], history: list[dict[str, Any]], text: str) -> str:
