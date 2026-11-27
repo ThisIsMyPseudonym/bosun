@@ -184,10 +184,12 @@ async function runTriage(traceId, deep = false) {
   R.triaging = traceId;
   MC.render();
   try {
-    const updated = await api(`/api/runs/${encodeURIComponent(traceId)}/triage`,
-      { method: "POST", body: JSON.stringify({ deep: Boolean(deep) }) });
+    const updated = await api(`/api/runs/${encodeURIComponent(traceId)}/triage`, { method: "POST", body: JSON.stringify({ deep: Boolean(deep) }) });
     if (R.trace && R.trace.run.trace_id === traceId) R.trace.triage = updated;
-  } catch (e) { if (MC.banner) MC.banner(`Triage failed: ${e.message}`); }
+  } catch (e) {
+    if (deep && R.trace && R.trace.run.trace_id === traceId && R.trace.triage) R.trace.triage.last_error = e.message;
+    if (MC.banner) MC.banner(`Triage failed: ${e.message}`);
+  }
   R.triaging = "";
   MC.render();
 }
@@ -228,10 +230,8 @@ function triageAction(trace) {
   const busy = R.triaging === r.trace_id;
   const force = Boolean(tri && ["failed", "disputed"].includes(tri.status));
   return el("span", { class: "triage-run-action" },
-    el("button", {
-      class: "quiet", disabled: !avail || busy, title: !avail ? why : "Ask an AI model to diagnose this failure",
-      text: busy ? "Triaging…" : "Triage", onclick: () => runTriage(r.trace_id, force),
-    }),
+    el("button", { class: "quiet", disabled: !avail || busy, title: !avail ? why : "Ask an AI model to diagnose this failure",
+      text: busy ? "Triaging…" : "Triage", onclick: () => runTriage(r.trace_id, force) }),
     !avail ? el("span", { class: "hint", text: why }) : null);
 }
 
@@ -311,19 +311,17 @@ function verdictCard(triage, trace, S) {
   const tid = trace.run.trace_id, avail = trace.triage_available !== false;
   const whyOff = trace.triage_unavailable_reason || "Model triage is unavailable", busy = R.triaging === tid;
   const fbBtn = (label, val) => el("button", { class: `quiet${triage.feedback === val ? " on" : ""}`, "aria-pressed": String(triage.feedback === val), text: label, onclick: () => sendFeedback(tid, val) });
-  const deeperBtn = ["rules", "cache"].includes(triage.source) ? el("button", {
-    class: "quiet", disabled: !avail || busy, title: !avail ? whyOff : "Ask a model directly, skipping rules and cache",
-    text: busy ? "Triaging…" : "Look deeper", onclick: () => runTriage(tid, true),
-  }) : null;
+  const deeperBtn = ["rules", "cache"].includes(triage.source) ? el("button", { class: "quiet", disabled: !avail || busy,
+    title: !avail ? whyOff : "Ask a model directly, skipping rules and cache", text: busy ? "Triaging…" : "Look deeper", onclick: () => runTriage(tid, true) }) : null;
   const disputed = triage.status === "disputed" || triage.feedback === "disputed" || triage.feedback === "wrong";
+  const note = triage.last_error ? el("p", { class: "hint triage-note", text: `Look deeper failed: ${triage.last_error}` }) : null;
   return el("div", { class: "panel triage-card" },
     el("div", { class: "triage-head" }, el("strong", { text: heading }),
       el("span", { class: `triage-conf ${CONF_TONE[v.confidence] || ""}`, text: CONF_LABEL[v.confidence] || v.confidence }),
       disputed ? el("span", { class: "triage-conf warn", text: "Disputed" }) : null, seenSummary(trace)),
-    el("p", { class: "triage-cause", text: v.cause }), evList,
+    el("p", { class: "triage-cause", text: v.cause }), evList, note,
     el("div", { class: "triage-step" }, triageStepAction(v.next_step, trace, triage, S), v.next_step && v.next_step.why ? el("span", { class: "hint", text: v.next_step.why }) : null),
-    el("div", { class: "triage-foot" }, triageProvenance(triage, S),
-      el("div", { class: "triage-fb" }, fbBtn("Helpful", "helpful"), fbBtn("Wrong", "wrong"), deeperBtn)));
+    el("div", { class: "triage-foot" }, triageProvenance(triage, S), el("div", { class: "triage-fb" }, fbBtn("Helpful", "helpful"), fbBtn("Wrong", "wrong"), deeperBtn)));
 }
 
 MC.triageHelpers = { verdictCard, renderRunbookMarkdown, triageProvenance, openRunbook, triageAction, seenSummary, runTriage };

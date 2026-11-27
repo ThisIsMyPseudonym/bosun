@@ -696,6 +696,13 @@ def test_triage_buttons_look_deeper_disabled_provenance_and_related_seen():
       throw new Error("model verdict should not show Look deeper");
     }}
 
+    // 5. Failed Look deeper keeps showing earlier rules verdict with a note explaining the failure
+    const rulesWithErr = {{ ...rulesTriage, last_error: "Claude timed out" }};
+    const errCard = H.verdictCard(rulesWithErr, baseTrace, {{}});
+    if (!errCard.textContent.includes("Not writable.") || !errCard.textContent.includes("Look deeper failed: Claude timed out")) {{
+      throw new Error("failed Look deeper must keep rules verdict and note failure: " + errCard.textContent);
+    }}
+
     (async () => {{
       for (const fn of triBtn.listeners.click || []) await fn();
       for (const fn of lookBtn.listeners.click || []) await fn();

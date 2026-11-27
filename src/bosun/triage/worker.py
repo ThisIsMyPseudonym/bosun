@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any
@@ -18,6 +19,7 @@ from bosun.triage import model as tmodel
 from bosun.triage import store as tstore
 from bosun.triage.schema import FailureRecord, Verdict
 
+log = logging.getLogger(__name__)
 SKIPPED_STATUSES: frozenset[str] = frozenset({"interrupted", "cancelled", "no_changes"})
 MAX_CONCURRENT_TRIAGE = 2
 
@@ -72,6 +74,7 @@ def _ephemeral_row(
         "verdict": redact.value(verdict.model_dump(mode="json")) if verdict is not None else None,
         "same_as": same_as,
         "triage_trace": "",
+        "last_error": "",
         "feedback": "",
         "feedback_ts": None,
         "created": ts,
@@ -220,6 +223,36 @@ class Triager:
         with self._lock:
             self._active_runs.discard(tid)
 
+    def _run_model_click(self, rec: FailureRecord, tid: str) -> dict[str, Any]:
+        sig = signature_of(rec)
+        previous = tstore.get(self.store, rec.failure)
+        try:
+            tstore.save_status(self.store, rec.failure, tid, sig, "running")
+            outcome = tmodel.run_model(self.store, self.settings, rec, clicked=True, tokens=self.tokens)
+            if outcome.ok and outcome.verdict is not None:
+                tstore.save_verdict(
+                    self.store, rec.failure, tid, sig, "model", outcome.verdict,
+                    triage_trace=outcome.triage_trace,
+                )
+                saved = tstore.get(self.store, rec.failure)
+                assert saved is not None
+                return saved
+            reason = outcome.reason or "Triage model call failed"
+            tstore.restore_or_fail(
+                self.store, rec.failure, tid, sig, previous, reason, triage_trace=outcome.triage_trace,
+            )
+            raise Failed(reason)
+        except Failed:
+            raise
+        except Exception as exc:
+            log.exception("triage click failed unexpectedly for %s", tid[:12])
+            reason = f"Triage failed unexpectedly ({exc.__class__.__name__})"
+            try:
+                tstore.restore_or_fail(self.store, rec.failure, tid, sig, previous, reason)
+            except Exception:
+                log.exception("failed to restore triage state for %s", tid[:12])
+            raise Failed(reason) from None
+
     def triage_click(self, trace_id: str, *, deep: bool = False) -> dict[str, Any]:
         """Run on-click triage (or Look deeper when deep=True) for one failed run."""
         found = self.store.trace(trace_id)
@@ -238,22 +271,7 @@ class Triager:
             if fast is not None and fast.get("status") in ("done", "fixed_since"):
                 return fast
         self._acquire(tid)
-        sig = signature_of(rec)
         try:
-            tstore.save_status(self.store, rec.failure, tid, sig, "running")
-            outcome = tmodel.run_model(self.store, self.settings, rec, clicked=True, tokens=self.tokens)
-            if outcome.ok and outcome.verdict is not None:
-                tstore.save_verdict(
-                    self.store, rec.failure, tid, sig, "model", outcome.verdict,
-                    triage_trace=outcome.triage_trace,
-                )
-                saved = tstore.get(self.store, rec.failure)
-                assert saved is not None
-                return saved
-            tstore.save_status(
-                self.store, rec.failure, tid, sig, "failed", source="model",
-                triage_trace=outcome.triage_trace,
-            )
-            raise Failed(outcome.reason or "Triage model call failed")
+            return self._run_model_click(rec, tid)
         finally:
             self._release(tid)

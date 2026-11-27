@@ -463,3 +463,65 @@ def test_rules_dispute_survives_failed_model_click_and_wrong_click_during_runnin
         assert tstore.is_rule_disputed(st, final["signature"])
     finally:
         trace.configure(None)
+
+
+def test_unexpected_exception_and_failed_look_deeper_restore_verdict_and_return_502(tmp_path, monkeypatch):
+    from fake_cli import FakeCli
+    from bosun.providers import accounts
+    from bosun.triage import model as tmodel
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        err = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq"
+        j1 = st.create_job("brew:jq", ["brew", "upgrade", "--formula", "jq"])
+        job1 = st.job(j1)
+        assert job1 is not None
+        with trace.run("upgrade", subject="brew:jq", trace_id=job1["trace_id"]) as r1:
+            with trace.span("subprocess", "brew", argv=["brew", "upgrade", "--formula", "jq"]) as sp:
+                sp.set(returncode=1, stderr_tail=err)
+                sp.fail("exit 1")
+            r1.fail(err)
+        st.finish_job(j1, "failed", err)
+
+        with trace.run("upgrade", subject="brew:mystery") as r2:
+            r2.fail("unplaced failure 12345")
+
+        monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/test/bin/claude"})
+        fake = FakeCli(monkeypatch)
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in(), raise_server_exceptions=False)
+
+        # Establish a rules verdict on r1
+        before = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert before["status"] == "done" and before["source"] == "rules"
+        assert before["verdict"]["category"] == "permissions"
+
+        # 1. Failed "Look deeper" (model returns bad JSON) restores the earlier rules verdict + records last_error
+        fake.reply("claude", fake.bad_json("claude"))
+        res = user.post(f"/api/runs/{r1.trace_id}/triage", json={"deep": True}, headers=H)
+        assert res.status_code == 502 and res.json()["detail"]
+        after = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert after["status"] == "done" and after["source"] == "rules"
+        assert after["verdict"]["category"] == "permissions"
+        assert after["last_error"]
+
+        # 2. Unexpected exception during "Look deeper" restores the earlier rules verdict and returns 502, not 500
+        def boom(*_a, **_k):
+            raise RuntimeError("disk hiccup")
+
+        monkeypatch.setattr(tmodel, "run_model", boom)
+        res_exc = user.post(f"/api/runs/{r1.trace_id}/triage", json={"deep": True}, headers=H)
+        assert res_exc.status_code == 502 and "RuntimeError" in res_exc.json()["detail"]
+        after_exc = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert after_exc["status"] == "done" and after_exc["source"] == "rules"
+        assert after_exc["verdict"]["category"] == "permissions"
+        assert "RuntimeError" in after_exc["last_error"]
+
+        # 3. Unexpected exception with no prior verdict marks the row failed (never left 'running') and returns 502
+        res_none = user.post(f"/api/runs/{r2.trace_id}/triage", json={"deep": True}, headers=H)
+        assert res_none.status_code == 502
+        row2 = tstore.get_by_trace(st, r2.trace_id)
+        assert row2 is not None and row2["status"] == "failed" and row2["last_error"]
+    finally:
+        trace.configure(None)

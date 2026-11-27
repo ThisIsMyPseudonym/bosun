@@ -682,6 +682,11 @@ WHERE source = 'rules' AND signature != '' AND (status = 'disputed' OR feedback 
 """
 
 
+def _triage_last_error(db: sqlite3.Connection) -> None:
+    if "last_error" not in _columns(db, "triage"):
+        db.execute("ALTER TABLE triage ADD COLUMN last_error TEXT NOT NULL DEFAULT ''")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline", fn=_baseline),
     Migration(2, "tracing", fn=_tracing),
@@ -696,6 +701,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(11, "retire_budgets", fn=_retire_budgets),
     Migration(12, "triage", sql=TRIAGE),
     Migration(13, "triage_rule_disputes", sql=TRIAGE_RULE_DISPUTES),
+    Migration(14, "triage_last_error", fn=_triage_last_error),
 )
 
 

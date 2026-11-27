@@ -90,49 +90,31 @@ def _login_label(db: sqlite3.Connection, provider: str, account: str) -> str:
 
 
 def save_verdict(
-    store: Store,
-    failure: str,
-    trace_id: str,
-    signature: str,
-    source: str,
-    verdict: Verdict,
-    *,
-    same_as: int | None = None,
-    triage_trace: str = "",
-    status: str = "done",
-    now: float | None = None,
+    store: Store, failure: str, trace_id: str, signature: str, source: str, verdict: Verdict,
+    *, same_as: int | None = None, triage_trace: str = "", status: str = "done", now: float | None = None,
 ) -> int:
     """Redact and upsert a checked Verdict row; returns the triage row id."""
     ts = time.time() if now is None else now
-    clean = redact.value(verdict.model_dump(mode="json"))
-    payload = json.dumps(clean, separators=(",", ":"))
+    payload = json.dumps(redact.value(verdict.model_dump(mode="json")), separators=(",", ":"))
     finished = ts if status in _TERMINAL else None
     with store._tx(write=True) as db:
         db.execute(
             "INSERT INTO triage (failure, trace_id, signature, status, source, verdict, same_as, "
-            "triage_trace, created, finished) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "triage_trace, last_error, created, finished) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?) "
             "ON CONFLICT(failure) DO UPDATE SET "
             "trace_id=excluded.trace_id, signature=excluded.signature, "
-            "status=CASE WHEN triage.status = 'disputed' OR triage.feedback IN ('wrong', 'disputed') "
+            "status=CASE WHEN triage.status='disputed' OR triage.feedback IN ('wrong','disputed') "
             "THEN 'disputed' ELSE excluded.status END, "
             "source=excluded.source, verdict=excluded.verdict, same_as=excluded.same_as, "
-            "triage_trace=excluded.triage_trace, finished=excluded.finished",
+            "triage_trace=excluded.triage_trace, last_error='', finished=excluded.finished",
             (failure, trace_id, signature, status, source, payload, same_as, triage_trace, ts, finished),
         )
-        row = db.execute("SELECT id FROM triage WHERE failure = ?", (failure,)).fetchone()
-        return int(row["id"])
+        return int(db.execute("SELECT id FROM triage WHERE failure = ?", (failure,)).fetchone()["id"])
 
 
 def save_status(
-    store: Store,
-    failure: str,
-    trace_id: str,
-    signature: str,
-    status: str,
-    *,
-    source: str = "",
-    triage_trace: str = "",
-    now: float | None = None,
+    store: Store, failure: str, trace_id: str, signature: str, status: str,
+    *, source: str = "", triage_trace: str = "", now: float | None = None,
 ) -> int:
     """Upsert a non-verdict triage status row (queued, running, fixed_since, skipped, failed)."""
     ts = time.time() if now is None else now
@@ -143,15 +125,42 @@ def save_status(
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(failure) DO UPDATE SET "
             "trace_id=excluded.trace_id, signature=excluded.signature, "
-            "status=CASE WHEN triage.status = 'disputed' OR triage.feedback IN ('wrong', 'disputed') "
+            "status=CASE WHEN triage.status='disputed' OR triage.feedback IN ('wrong','disputed') "
             "THEN 'disputed' ELSE excluded.status END, "
-            "source=CASE WHEN excluded.source != '' THEN excluded.source ELSE triage.source END, "
-            "triage_trace=CASE WHEN excluded.triage_trace != '' THEN excluded.triage_trace ELSE triage.triage_trace END, "
+            "source=CASE WHEN excluded.source!='' THEN excluded.source ELSE triage.source END, "
+            "triage_trace=CASE WHEN excluded.triage_trace!='' THEN excluded.triage_trace ELSE triage.triage_trace END, "
             "finished=excluded.finished",
             (failure, trace_id, signature, status, source, triage_trace, ts, finished),
         )
-        row = db.execute("SELECT id FROM triage WHERE failure = ?", (failure,)).fetchone()
-        return int(row["id"])
+        return int(db.execute("SELECT id FROM triage WHERE failure = ?", (failure,)).fetchone()["id"])
+
+
+def restore_or_fail(
+    store: Store, failure: str, trace_id: str, signature: str, previous: dict[str, Any] | None, error: str,
+    *, triage_trace: str = "", now: float | None = None,
+) -> None:
+    """After a failed model run, restore any prior verdict row or mark failed, recording the redacted error."""
+    ts = time.time() if now is None else now
+    note = redact.text(error).strip()[:300]
+    has_prev = previous is not None and previous.get("verdict") is not None and previous.get("status") in ("done", "disputed")
+    with store._tx(write=True) as db:
+        if has_prev and previous is not None:
+            db.execute(
+                "UPDATE triage SET "
+                "status=CASE WHEN status='disputed' OR feedback IN ('wrong','disputed') THEN 'disputed' ELSE ? END, "
+                "source=?, triage_trace=?, finished=?, last_error=? WHERE failure=?",
+                (previous["status"], previous["source"], previous.get("triage_trace") or "", previous.get("finished"), note, failure),
+            )
+            return
+        db.execute(
+            "INSERT INTO triage (failure, trace_id, signature, status, source, triage_trace, last_error, created, finished) "
+            "VALUES (?, ?, ?, 'failed', 'model', ?, ?, ?, ?) "
+            "ON CONFLICT(failure) DO UPDATE SET "
+            "status=CASE WHEN triage.status='disputed' OR triage.feedback IN ('wrong','disputed') THEN 'disputed' ELSE 'failed' END, "
+            "source='model', triage_trace=CASE WHEN excluded.triage_trace!='' THEN excluded.triage_trace ELSE triage.triage_trace END, "
+            "last_error=excluded.last_error, finished=excluded.finished",
+            (failure, trace_id, signature, triage_trace, note, ts, ts),
+        )
 
 
 def get(store: Store, failure: str) -> dict[str, Any] | None:
@@ -316,24 +325,15 @@ def _item_source(subject: str) -> str:
 
 
 def _resolve_fallbacks(
-    db: sqlite3.Connection,
-    what: str,
-    what_id: str,
-    kind: str,
-    subject: str,
-    status: str,
-    trace_id: str,
-    command: tuple[str, ...],
-    output: str,
-    error: str,
+    db: sqlite3.Connection, what: str, what_id: str, kind: str, subject: str, status: str,
+    trace_id: str, command: tuple[str, ...], output: str, error: str,
 ) -> tuple[str, str, str, str, tuple[str, ...], str]:
     """Normalize partial fixes (conflict 1) and fill missing output/command (conflict 2)."""
     if what == "run" and kind == "fix":
         fix = db.execute("SELECT * FROM fixes WHERE trace_id = ? LIMIT 1", (trace_id,)).fetchone()
         if fix is not None:
             what, what_id, subject, status = "fix", str(fix["id"]), str(fix["item_key"]), str(fix["status"])
-            if not output:
-                output = _fix_output_text(fix["result"])
+            output = output or _fix_output_text(fix["result"])
     if what == "job" and (not output or not command):
         job = db.execute("SELECT argv, output FROM jobs WHERE id = ?", (int(what_id),)).fetchone()
         if job is not None:
@@ -351,8 +351,7 @@ def _resolve_fallbacks(
 def _failing_span_id(db: sqlite3.Connection, trace_id: str) -> str:
     row = db.execute(
         "SELECT span_id FROM spans WHERE trace_id = ? AND status = 'error' AND kind != 'run' "
-        "ORDER BY (kind = 'subprocess') DESC, started DESC LIMIT 1",
-        (trace_id,),
+        "ORDER BY (kind = 'subprocess') DESC, started DESC LIMIT 1", (trace_id,),
     ).fetchone()
     return str(row["span_id"]) if row is not None else ""
 
@@ -365,31 +364,14 @@ def load_failure(store: Store, trace_id: str) -> FailureRecord | None:
             return None
         error = redact.text(str(row["error"] or ""))
         what, what_id, subject, status, command, output = _resolve_fallbacks(
-            db,
-            str(row["what"]),
-            str(row["id"]),
-            str(row["kind"] or ""),
-            str(row["subject"] or ""),
-            str(row["status"] or ""),
-            trace_id,
-            _parse_argv(row["failed_command"]),
-            redact.text(str(row["failed_output"] or "")),
-            error,
+            db, str(row["what"]), str(row["id"]), str(row["kind"] or ""), str(row["subject"] or ""),
+            str(row["status"] or ""), trace_id, _parse_argv(row["failed_command"]),
+            redact.text(str(row["failed_output"] or "")), error,
         )
         return FailureRecord(
-            failure=f"{what}:{what_id}",
-            what=what,
-            what_id=what_id,
-            kind=str(row["kind"] or ""),
-            subject=subject,
-            item_source=_item_source(subject),
-            status=status,
-            ts=float(row["ts"] or 0.0),
-            actor=str(row["actor"] or ""),
-            trace_id=trace_id,
-            error=error,
-            command=command,
+            failure=f"{what}:{what_id}", what=what, what_id=what_id, kind=str(row["kind"] or ""),
+            subject=subject, item_source=_item_source(subject), status=status, ts=float(row["ts"] or 0.0),
+            actor=str(row["actor"] or ""), trace_id=trace_id, error=error, command=command,
             exit_code=int(row["failed_exit"]) if row["failed_exit"] is not None else None,
-            output=output,
-            span_id=_failing_span_id(db, trace_id),
+            output=output, span_id=_failing_span_id(db, trace_id),
         )
