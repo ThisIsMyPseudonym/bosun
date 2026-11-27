@@ -112,7 +112,7 @@ def _one(store: Store, job: str, cand: router.Candidate, prompt: str, system: st
     if not store.read_only and not ledger.readings(store, cand.bucket):
         ledger.seed_from_coho(store, cand.bucket, now=now())
     before = {r.window: r for r in ledger.readings(store, cand.bucket)}
-    chosen_model = models[cand.provider] if models and cand.provider in models else catalog.model(cand.provider, tier)
+    chosen_model = models[cand.provider] if models and cand.provider in models else catalog.models_for(cand.provider, tier)
     res, took_ms = _invoke(cand, chosen_model, schema, system, prompt, timeout)
     at = now()
     rep = replies.parse(cand.provider, res, at)

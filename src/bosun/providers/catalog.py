@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal
 
 
 class Capability(StrEnum):
@@ -151,8 +151,26 @@ def capable(job: str, catalog: Mapping[str, ProviderSpec] = CATALOG) -> tuple[st
     return tuple(p for p, s in catalog.items() if j.needs <= s.capabilities and (s.locked_down or not j.untrusted))
 
 
+def models_for(provider: str, tier: Literal["light", "strong"], settings: Any = None,
+               env: Mapping[str, str] | None = None) -> str:
+    """The model a tier runs on: `BOSUN_MODEL_<PROVIDER>_LIGHT|STRONG`, else Claude's existing settings/env
+    (`BOSUN_MODEL_SUMMARIZE` / `BOSUN_MODEL`), else the spec's constant."""
+    s = spec(provider)
+    source = os.environ if env is None else env
+    chosen = source.get(f"BOSUN_MODEL_{provider.upper()}_{tier.upper()}", "").strip()
+    if chosen:
+        return chosen
+    if provider == "claude":
+        if settings is not None:
+            from_settings = str(getattr(settings, "summary_model" if tier == "light" else "model", "") or "").strip()
+            if from_settings:
+                return from_settings
+        legacy = source.get("BOSUN_MODEL_SUMMARIZE" if tier == "light" else "BOSUN_MODEL", "").strip()
+        if legacy:
+            return legacy
+    return s.light_model if tier == "light" else s.strong_model
+
+
 def model(provider: str, tier: Literal["light", "strong"], env: Mapping[str, str] | None = None) -> str:
     """The model a tier runs on: BOSUN_MODEL_<PROVIDER>_LIGHT|STRONG, else the spec's constant."""
-    s = spec(provider)
-    chosen = (os.environ if env is None else env).get(f"BOSUN_MODEL_{provider.upper()}_{tier.upper()}", "").strip()
-    return chosen or (s.light_model if tier == "light" else s.strong_model)
+    return models_for(provider, tier, settings=None, env=env)

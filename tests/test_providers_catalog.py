@@ -68,3 +68,21 @@ def test_a_cli_that_is_not_locked_down_never_gets_untrusted_text():
     loose = {"loose": replace(spec("claude"), id="loose", capabilities=every, locked_down=False)}
     assert capable("summarize", loose) == () and capable("triage", loose) == ()
     assert capable("assistant", loose) == ("loose",)  # its own job, with no release-note text in it
+
+
+def test_bosun_model_variables_still_choose_claudes_models(monkeypatch):
+    from bosun.config import load_settings
+    from bosun.providers import catalog
+
+    monkeypatch.setenv("BOSUN_MODEL", "opus")
+    monkeypatch.setenv("BOSUN_MODEL_SUMMARIZE", "haiku")
+    monkeypatch.setenv("BOSUN_MODEL_CODEX_LIGHT", "gpt-x-mini")
+    monkeypatch.delenv("BOSUN_MODEL_CLAUDE_STRONG", raising=False)
+    monkeypatch.delenv("BOSUN_MODEL_CLAUDE_LIGHT", raising=False)
+    s = load_settings()
+    assert catalog.models_for("claude", "strong", s) == "opus"
+    assert catalog.models_for("claude", "light", s) == "haiku"
+    assert catalog.models_for("claude", "strong") == "opus"
+    assert catalog.models_for("claude", "light") == "haiku"
+    assert catalog.models_for("codex", "light", s) == "gpt-x-mini"
+    assert catalog.models_for("codex", "strong", s) == "gpt-5.6-terra"
