@@ -126,3 +126,19 @@ def test_draw_is_the_largest_rise_in_a_window_that_kept_its_reset():
     assert quota.draw({}, (R("five_hour", "allowed", 0.34, r, NOW + 9),)) is None
     assert quota.draw(before, (R("five_hour", "allowed", 0.20, r, NOW + 9),)) == 0.0  # a fall is no draw
     assert quota.draw(before, (R("five_hour", "rejected", None, r, NOW + 9),)) is None  # no figure to compare
+
+
+# --- where a login's figures come from ---------------------------------------------------------------------------
+
+
+def test_codex_and_grok_count_as_estimated_until_a_real_reading_is_recorded():
+    assert {p: quota.estimated(p) for p in ("claude", "codex", "gemini", "grok", "antigravity", "muse")} == {
+        "claude": False, "codex": True, "gemini": True, "grok": True, "antigravity": False, "muse": True}
+    assert quota.estimated("nonesuch")  # a CLI Bosun has no spec for has no readings Bosun trusts
+
+
+def test_antigravitys_usage_is_read_at_most_every_15_minutes():
+    assert quota.probe_due(None, NOW)
+    assert not quota.probe_due(NOW - 14 * 60, NOW)
+    assert quota.probe_due(NOW - 15 * 60, NOW)
+    assert quota.probe_due(NOW + 3600, NOW)  # a clock that went back: the last probe's time says nothing

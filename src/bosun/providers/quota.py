@@ -11,6 +11,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from bosun.providers.catalog import CATALOG
 from bosun.providers.windows import Reading, window_hours
 
 UNDATED_STALE_S = 7 * 86400  # an undated reading says nothing about now after a week
@@ -132,3 +133,23 @@ def draw(before: Mapping[str, Reading], after: Iterable[Reading]) -> float | Non
             continue
         rises.append(max(0.0, r.used - prev.used))
     return max(rises) if rises else None
+
+
+# --- where a login's figures come from ---------------------------------------------------------------------------
+
+# Read from output no CLI here has recorded yet (hand-made fixtures, risk R3): its figures count as estimated until a
+# recording confirms the shape, then it leaves this set.
+UNCONFIRMED: frozenset[str] = frozenset({"codex"})
+PROBE_EVERY_S = 15 * 60  # Antigravity's /usage is a call of its own: at most this often
+
+
+def estimated(provider: str) -> bool:
+    """Whether a login's use is counted from calls and tokens rather than read from the plan's own windows."""
+    found = CATALOG.get(provider)
+    return found is None or found.windows == "estimated" or provider in UNCONFIRMED
+
+
+def probe_due(last: float | None, now: float) -> bool:
+    """Whether a probe (Antigravity's /usage) may run: never tried, 15 minutes since the last try, or a last try
+    in the future (the clock went back, so its time says nothing)."""
+    return last is None or not 0 <= now - last < PROBE_EVERY_S
