@@ -89,3 +89,14 @@ def test_gemini_json_gives_response_and_token_stats_marked_estimated():
     assert replies.parse("gemini", proc.Result(("gemini",), 1, rl, ""), at=100.0).outcome == "rate_limit"
     assert replies.parse("gemini", proc.Result(("gemini",), 0, "{}", ""), at=100.0).outcome == "empty"
     assert replies.parse("gemini", proc.Result(("gemini",), 0, "{broken", ""), at=100.0).outcome == "error"
+
+
+def test_grok_json_gives_its_answer_marked_estimated():
+    raw = (FIX / "grok/handmade/ok-assessment.json").read_text()
+    rep = replies.parse("grok", proc.Result(("grok",), 0, raw, ""), at=100.0)
+    assert rep.outcome == "ok" and '"headline":"h"' in rep.text and rep.estimated and rep.readings == ()
+    assert (rep.usage.input_tokens, rep.usage.output_tokens, rep.usage.cache_read_tokens) == (90, 35, 12)
+    assert rep.model == "grok-4.7-build-fast" and rep.session_id == "grok-sess-1"
+    err = json.dumps({"is_error": True, "error": "429 Too Many Requests"})
+    assert replies.parse("grok", proc.Result(("grok",), 1, err, ""), at=100.0).outcome == "rate_limit"
+    assert replies.parse("grok", proc.Result(("grok",), 0, "", ""), at=100.0).outcome == "empty"

@@ -315,10 +315,56 @@ def _gemini(result: proc.Result, at: float) -> Reply:
     return Reply("ok", text, text, usage, (), model, True, "", sid)
 
 
+def _usage_dict(u: object) -> llm.Usage:
+    if not isinstance(u, dict):
+        return llm.Usage()
+    return llm.Usage(
+        input_tokens=_nonneg_int(u.get("input_tokens") or u.get("prompt_tokens") or u.get("prompt")),
+        output_tokens=_nonneg_int(u.get("output_tokens") or u.get("completion_tokens") or u.get("candidates")),
+        cache_read_tokens=_nonneg_int(u.get("cached_tokens") or u.get("cached_input_tokens") or u.get("cache_read_input_tokens")),
+        cache_write_tokens=_nonneg_int(u.get("cache_creation_input_tokens")),
+        cost_usd=_nonneg_float(u.get("cost_usd")),
+    )
+
+
+def _ok_or_limit(text: str, payload: Any, at: float, *, estimated: bool, usage: llm.Usage,
+                 readings: tuple[Reading, ...] = (), model: str = "", sid: str = "") -> Reply:
+    if payload is None and not text.strip():
+        return _fail("empty", "empty reply", estimated=estimated, usage=usage, readings=readings, model=model, session_id=sid)
+    if (payload is None or isinstance(payload, str)) and not _is_json_text(text):
+        if (lim := limits.limit_reading(text, at)) is not None:
+            return _fail("usage_limit", text, estimated=estimated, usage=usage, readings=(*readings, lim), model=model, session_id=sid)
+    return Reply("ok", text, payload if payload is not None else text, usage, readings, model, estimated, "", sid)
+
+
+def _grok(result: proc.Result, at: float) -> Reply:
+    if (pf := _proc_failure(result, estimated=True)) is not None:
+        return pf
+    stdout, stderr = result.stdout or "", result.stderr or ""
+    if result.ok and not stdout.strip():
+        return _fail("empty", "empty reply", estimated=True)
+    obj = _loads_dict(stdout)
+    if obj is None:
+        return _classify_error_text(stderr or stdout, result.returncode, at, estimated=True)
+    usage = _usage_dict(obj.get("usage"))
+    model = str(obj.get("model") or "")
+    sid = str(obj.get("session_id") or "")
+    err = obj.get("error")
+    if obj.get("is_error") or err or not result.ok:
+        msg = (str(err.get("message") or "") if isinstance(err, dict) else str(err or "")) or str(obj.get("result") or stderr or stdout)
+        code = _opt_int(err.get("code")) if isinstance(err, dict) else None
+        return _classify_error_text(msg, result.returncode, at, estimated=True, usage=usage, model=model, session_id=sid, code=code)
+    structured = obj.get("structured_output")
+    raw = next((v for k in ("result", "response", "text", "content") if isinstance(v := obj.get(k), str)), "")
+    text = raw or (json.dumps(structured) if structured is not None else "")
+    return _ok_or_limit(text, structured, at, estimated=True, usage=usage, model=model, sid=sid)
+
+
 PARSERS: dict[str, Callable[[proc.Result, float], Reply]] = {
     "claude": _claude,
     "codex": _codex,
     "gemini": _gemini,
+    "grok": _grok,
 }
 
 
