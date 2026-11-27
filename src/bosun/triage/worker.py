@@ -21,7 +21,31 @@ from bosun.triage.schema import FailureRecord, Verdict
 
 log = logging.getLogger(__name__)
 SKIPPED_STATUSES: frozenset[str] = frozenset({"interrupted", "cancelled", "no_changes"})
+AUTO_MODEL_KINDS: frozenset[str] = frozenset({
+    "upgrade", "pin", "manual", "fix", "refresh", "recheck", "recheck-project",
+})
+REFRESH_KINDS: frozenset[str] = frozenset({"refresh", "recheck", "recheck-project"})
 MAX_CONCURRENT_TRIAGE = 2
+
+
+def eligible_for_rules(rec: FailureRecord) -> bool:
+    """True when rules and cache evaluation may run for this failure."""
+    if rec.status in SKIPPED_STATUSES or rec.kind == "triage":
+        return False
+    return True
+
+
+def eligible_for_auto_model(rec: FailureRecord) -> bool:
+    """True when automatic background model triage may run if rules and cache don't place this failure."""
+    if not eligible_for_rules(rec):
+        return False
+    if rec.actor.startswith("agent:") or rec.actor == "assistant":
+        return False
+    if rec.kind not in AUTO_MODEL_KINDS and rec.what not in ("job", "fix"):
+        return False
+    if rec.kind in REFRESH_KINDS and rec.status == "partial" and rules.is_outage_only(rec.error):
+        return False
+    return True
 
 
 def signature_of(rec: FailureRecord) -> str:
@@ -137,7 +161,7 @@ def evaluate_fast(
     save: bool = True,
 ) -> dict[str, Any] | None:
     """Run steps 1-4 (superseded -> signature -> rules -> 30-day cache) without calling a model."""
-    if rec.status in SKIPPED_STATUSES:
+    if not eligible_for_rules(rec):
         return None
 
     existing = tstore.get(store, rec.failure)
