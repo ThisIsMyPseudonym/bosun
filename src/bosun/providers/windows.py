@@ -22,6 +22,7 @@ STATUSES: tuple[Status, ...] = ("allowed", "allowed_warning", "rejected")
 SOURCES: tuple[Source, ...] = ("output", "probe", "coho", "limit")
 NAME = re.compile(r"^[a-z0-9_]{1,40}$")
 MS_EPOCH = 1e12  # an epoch at or past this is in milliseconds
+MAX_JSON_CHARS = 1 << 17  # cap line/document length before json.loads so hostile input stays cheap
 
 
 @dataclass(frozen=True)
@@ -86,16 +87,18 @@ def worse(a: Status, b: Status) -> Status:
 
 def json_object(line: str) -> dict[str, Any] | None:
     """A line that is a JSON object, else None."""
+    if len(line) > MAX_JSON_CHARS:
+        return None
     try:
         value = json.loads(line.strip())
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return value if isinstance(value, dict) else None
 
 
 def json_lines(raw: str, marker: re.Pattern[str]) -> tuple[dict[str, Any], ...]:
     """Each line matching `marker` that is a JSON object."""
-    found = (json_object(line) for line in raw.splitlines() if marker.search(line))
+    found = (json_object(line) for line in raw.splitlines() if len(line) <= MAX_JSON_CHARS and marker.search(line))
     return tuple(o for o in found if o is not None)
 
 
@@ -305,6 +308,8 @@ def _agy_json(parsed: object, at: float) -> list[Reading]:
 def _agy_lines(text: str, at: float) -> list[Reading]:
     out: list[Reading] = []
     for line in text.splitlines():
+        if len(line) > MAX_JSON_CHARS:
+            continue
         cells = [c.strip() for c in line.split("\t")]
         share_cell = next((c for c in cells[1:] if _PERCENT_CELL.match(c)), None)
         if len(cells) < 2 or share_cell is None:
@@ -320,9 +325,9 @@ def parse_antigravity(raw: str, at: float) -> tuple[Reading, ...]:
     """Antigravity's `/usage` report: JSON quota entries (a remaining fraction and a reset time), or lines of
     `name<TAB>remaining<TAB>reset`. Built from its changelog's description; no recorded reply exists yet."""
     text = raw.strip()
-    if text.startswith(("{", "[")):
+    if text.startswith(("{", "[")) and len(text) <= MAX_JSON_CHARS:
         try:
             return latest_per_window(_agy_json(json.loads(text), at))
-        except ValueError:
+        except (ValueError, RecursionError):
             pass  # not JSON after all: read it as lines
     return latest_per_window(_agy_lines(text, at))

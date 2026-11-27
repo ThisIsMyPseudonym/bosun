@@ -157,7 +157,7 @@ def _coho_file(path: Path) -> dict[str, Any] | None:
         with path.open("rb") as f:
             raw = f.read(COHO_MAX_BYTES + 1)
         parsed = json.loads(raw) if len(raw) <= COHO_MAX_BYTES else None
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         log.info("Coho's windows unreadable at %s: %s", path, exc)
         return None
     return parsed if isinstance(parsed, dict) else None

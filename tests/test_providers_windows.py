@@ -121,3 +121,12 @@ def test_antigravity_other_shapes_and_junk():
     assert windows.parse_antigravity("{broken\nFlash\t0.4\n", at=1.0)[0].used == pytest.approx(0.6)
     assert windows.parse_antigravity("Third-party quota reached. Resets in 2h55m54s.", at=1.0) == ()
     assert windows.parse_antigravity("a\tb\n\n", at=1.0) == ()
+
+
+def test_parsers_never_raise_on_deeply_nested_or_oversized_json():
+    assert windows.parse_claude("[" * 200_000 + "rate_limit_event", 0.0) == ()
+    assert windows.parse_claude("[" * 10_000 + "rate_limit_event", 0.0) == ()
+    assert windows.parse_codex("[" * 200_000 + "rate_limits", 0.0) == ()
+    assert windows.parse_codex("[" * 10_000 + "rate_limits", 0.0) == ()
+    assert windows.parse_antigravity("[" * 200_000, 0.0) == ()
+    assert windows.parse_antigravity("[" * 10_000, 0.0) == ()

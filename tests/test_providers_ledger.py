@@ -159,6 +159,12 @@ def test_coho_entries_go_through_the_same_checks_and_stale_ones_are_left_out(sto
     assert ledger.seed_from_coho(store, "gemini", f, now=SEEN) == 0
 
 
+def test_coho_seed_survives_deeply_nested_json(store, tmp_path):
+    f = tmp_path / "cli-windows.json"
+    f.write_text("[" * 200_000)
+    assert ledger.seed_from_coho(store, "claude", f, now=SEEN) == 0
+
+
 def test_cohos_file_is_found_where_coho_keeps_it(tmp_path):
     home = tmp_path / "home"
     assert ledger.coho_windows_path({"BOSUN_COHO_WINDOWS": "/x/w.json", "COHO_HOME": "/c"}, home) == Path("/x/w.json")
