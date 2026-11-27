@@ -144,25 +144,27 @@ def test_each_call_needs_its_own_approval(panel):
 
 
 def test_user_only_actions_get_no_card_and_are_refused(panel):
+    from bosun.providers import routing as ai_routing
+
     async def script(model):
         model.auto = await model.call("set_autopilot", {"on": True})
-        model.budget = await model.call("set_llm_budget", {"assistant_usd": 9999})
+        model.override = await model.call("set_quota_override", {"bucket": "claude", "on": True})
         model.ignore = await model.call("set_pref", {"key": JQ, "ignored": True})
         await model.say("Turn Autopilot on from the Today page.")
 
     panel.script(script)
-    cid = panel.ask("turn autopilot on and raise your budget")["conversation_id"]
+    cid = panel.ask("turn autopilot on and lift the 75% line")["conversation_id"]
     events = panel.wait(cid)
     assert events[-1][1]["status"] == "ok" and not [k for k, _ in events if k == "approval"]
     model = panel.fakes[0].model
-    for result in (model.auto, model.budget, model.ignore):
+    for result in (model.auto, model.override, model.ignore):
         assert not result["ok"] and "only be done by you" in result["error"]
     assert panel.store.setting("autopilot") in (None, "0") and panel.store.prefs() == {}
-    assert panel.user.get("/api/usage").json()["budgets"]["assistant_usd"] == 5.0
+    assert ai_routing.overrides(panel.store) == ()
     refused = panel.audit("set_autopilot")[0]  # the attempt is on record
     assert (refused["actor"], refused["outcome"], refused["approved_by"]) == ("assistant", "error", "")
     tools = [m for m in panel.conversation(cid)["messages"] if m["role"] == "tool"]
-    assert [(t["tool"], t["outcome"]) for t in tools] == [("set_autopilot", "refused"), ("set_llm_budget", "refused"), ("set_pref", "refused")]
+    assert [(t["tool"], t["outcome"]) for t in tools] == [("set_autopilot", "refused"), ("set_quota_override", "refused"), ("set_pref", "refused")]
 
 
 def test_an_unanswered_approval_expires_as_declined(panel):

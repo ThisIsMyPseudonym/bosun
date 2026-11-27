@@ -21,7 +21,7 @@ TOKEN = "t" * 32
 BASE = "http://127.0.0.1:8787"
 AGENT = auth.AgentAuth(SESSION_KEY)  # signs each request
 USER = {"x-bosun-token": TOKEN}
-USER_ONLY = {"set_autopilot": {"on": True}, "set_llm_budget": {"daily_usd": 9999, "refresh_usd": 999},
+USER_ONLY = {"set_autopilot": {"on": True},
              "set_agent_policy": {"system": True, "external": True},
              "set_pref": {"key": "winget:Git.Git", "ignored": True}, "set_notify": {"on": False},
              # which AI CLI and whose plan sees this machine's data (a folder that exists anywhere will do)

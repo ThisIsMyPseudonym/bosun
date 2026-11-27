@@ -172,12 +172,6 @@ class UsageIn(_In):
     days: float = Field(30, gt=0, le=366, description="How far back to look")
 
 
-class BudgetIn(_In):
-    refresh_usd: float | None = Field(None, ge=0, le=1000, description="Cap on summaries per refresh, list-price USD; 0 = none")
-    daily_usd: float | None = Field(None, ge=0, le=10000, description="Rolling 24-hour cap on summaries and explanations; 0 = none")
-    assistant_usd: float | None = Field(None, ge=0, le=10000, description="Rolling 24-hour cap on the Ask Bosun assistant; 0 = none")
-
-
 class QueryIn(_In):
     sql: str = Field(min_length=1, max_length=4000,
                      description="One SELECT over the views and tables in docs/data-model.md (start with v_current_items, "
@@ -345,8 +339,8 @@ SPECS: dict[str, ActionSpec] = _specs(
     ActionSpec("diagnose", "A redacted troubleshooting bundle for one run: failed steps first, timeline, log "
                "lines, related failures, machine and tool versions", Risk.READ, DiagnoseIn, "GET",
                "/api/runs/{trace_id}/diagnose"),
-    ActionSpec("llm_usage", "Where Claude tokens went: per day, purpose, model, source and item; costliest calls, "
-               "outliers, cache hit rate, budgets", Risk.READ, UsageIn, "GET", "/api/usage"),
+    ActionSpec("llm_usage", "AI plan usage windows, pace, Bosun's share, top jobs, notices, and token detail",
+               Risk.READ, UsageIn, "GET", "/api/usage"),
     ActionSpec("query", "Ask the database a question: one read-only SELECT over the documented views and tables "
                "(row cap, 2-second limit)", Risk.READ, QueryIn, "GET", "/api/query"),
     ActionSpec("agent_prompt", "A ready-to-paste prompt for your own coding agent to fix these items",
@@ -365,8 +359,6 @@ SPECS: dict[str, ActionSpec] = _specs(
                Risk.LOCAL, ListPrefsIn, "POST", "/api/list-prefs", user_only=True, panel=True),
     ActionSpec("set_notify", "Turn desktop notifications on or off", Risk.LOCAL, OnIn, "POST", "/api/notify",
                user_only=True),  # off would silence "actively exploited" for you
-    ActionSpec("set_llm_budget", "Cap what Bosun spends on Claude: per refresh, per 24 hours, and for the assistant",
-               Risk.LOCAL, BudgetIn, "POST", "/api/usage/budget", user_only=True),
     ActionSpec("ai_logins", "Each installed AI CLI's logins (its own folder plus added ones), with its version, "
                "whether it passed its lockdown check, and whether you excluded it", Risk.READ, Empty, "GET",
                "/api/ai/logins"),

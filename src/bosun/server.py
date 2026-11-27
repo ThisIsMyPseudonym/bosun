@@ -48,7 +48,7 @@ from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
                        NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TypeIn, ViewIn, UsageIn, BudgetIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+                       TraceIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, routing as ai_routing
@@ -926,16 +926,6 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             return query.run(store.path, body.sql, limit=body.limit)
         except query.QueryError as exc:
             raise Invalid(str(exc))
-
-    @actions.bind("set_llm_budget")
-    def set_budget(ctx: ActionContext, body: BudgetIn):
-        if body.refresh_usd is not None:
-            store.set_setting("llm_refresh_budget_usd", str(body.refresh_usd))
-        if body.daily_usd is not None:
-            store.set_setting("llm_daily_budget_usd", str(body.daily_usd))
-        if body.assistant_usd is not None:
-            store.set_setting("llm_assistant_budget_usd", str(body.assistant_usd))
-        return {}
 
     @actions.bind("ai_logins")
     def ai_logins(ctx: ActionContext, body: Empty):
