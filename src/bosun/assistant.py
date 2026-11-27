@@ -39,7 +39,7 @@ from .assistant_prompt import (DECLINED, HISTORY_CHARS, HISTORY_RESULT_CHARS, MA
 from .assistant_tools import RESULT_CHARS, SHOWN_CHARS, STORED_CHARS, ApprovalDeclined, ToolRunner  # noqa: F401
 from .config import Settings
 from .providers import accounts, catalog, ledger, limits, quota, router, routing, run as provider_run, windows
-from .providers.engines import AssistantEngine, ClaudeSdkEngine, Connect, TurnReport
+from .providers.engines import AssistantEngine, ClaudeSdkEngine, CliMcpEngine, Connect, TurnReport
 from .registry import Actions, ActionSpec, AskIn, Conflict, NotFound
 from .store import Store
 
@@ -182,7 +182,7 @@ class Assistant:
                 return self.engine_factory(cand, model)
         if cand.provider == "claude":
             return self._sdk_engine(model, login=cand.login)
-        raise RuntimeError(f"no assistant engine for {cand.provider}")
+        return CliMcpEngine(self.settings, cand.login, model, turn_token)
 
     def options(self, turn: Turn, stderr: list[str] | None = None) -> ClaudeAgentOptions:
         """Everything the model is given on the Claude SDK path. Tests assert on this."""

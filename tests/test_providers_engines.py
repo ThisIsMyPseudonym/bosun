@@ -130,10 +130,11 @@ def test_conversation_can_move_login_between_turns_with_full_history(panel, tmp_
 
 
 def test_ask_bosun_fails_cleanly_when_no_mcp_login_is_available(panel):
-    from bosun.providers import accounts
+    from bosun.providers import accounts, catalog
 
     panel.assistant.connect = lambda _opts: (_ for _ in ()).throw(AssertionError("should not start any CLI"))
-    accounts.set_excluded(panel.store, "claude", "default", True)
+    for provider in catalog.capable("assistant"):
+        accounts.set_excluded(panel.store, provider, "default", True)
     cid = panel.ask("hello")["conversation_id"]
     done = panel.wait(cid)[-1][1]
     assert done["status"] == "error" and "excluded" in done["error"]
@@ -345,6 +346,125 @@ def test_mcp_assistant_approval_approve_decline_replay_and_user_only(panel):
     res_rev, body_rev = _call("upgrade", {"keys": [JQ]})
     assert res_rev.is_error and "invalid or expired assistant token" in body_rev["error"]
     assert panel.upgrades == [(JQ, False)]
+
+
+def test_build_mcp_locks_down_claude_and_codex_without_token_in_argv_or_files(tmp_path):
+    import json
+    from pathlib import Path
+    from bosun import auth
+    from bosun.providers import argv
+    from bosun.providers.catalog import Capability, spec
+
+    tok = auth.ASSISTANT_TOKEN_PREFIX + "s" * 43
+    # Claude CLI MCP invocation
+    cl = argv.build_mcp("claude", binary="/bin/claude", model="sonnet", system="SYS", prompt="USER_PROMPT",
+                        workdir=tmp_path, port=9876, token=tok, tool_names=("status", "upgrade"))
+    a = cl.argv
+    assert a[a.index("--tools") + 1] == "" and "--strict-mcp-config" in a
+    assert a[a.index("--setting-sources") + 1] == "" and "--no-session-persistence" in a
+    assert a[a.index("--permission-mode") + 1] == "dontAsk" and "--include-partial-messages" in a
+    assert a[a.index("--allowedTools") + 1] == "mcp__bosun__status,mcp__bosun__upgrade"
+    cfg_path = Path(a[a.index("--mcp-config") + 1])
+    assert cfg_path.parent == tmp_path and cfg_path.is_file()
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert list(cfg["mcpServers"]) == ["bosun"]
+    assert "--as" in cfg["mcpServers"]["bosun"]["args"] and "assistant" in cfg["mcpServers"]["bosun"]["args"]
+    assert "9876" in cfg["mcpServers"]["bosun"]["args"]
+    assert tok not in " ".join(a) and tok not in cfg_path.read_text(encoding="utf-8") and tok not in (cl.stdin or "")
+    assert cl.env[auth.ASSISTANT_TOKEN_ENV] == tok and int(cl.env["MCP_TOOL_TIMEOUT"]) >= 300_000
+    # Every long flag emitted for Claude MCP is checked by the contract
+    cl_checked = set(spec("claude").lockdown_flags) | set(spec("claude").mcp_flags)
+    assert {f for f in a if f.startswith("--")} <= cl_checked
+
+    # Codex CLI MCP invocation
+    cx = argv.build_mcp("codex", binary="/bin/codex", model="gpt-5.6-terra", system="SYS", prompt="USER_PROMPT",
+                        workdir=tmp_path, port=9876, token=tok, tool_names=("status", "upgrade"))
+    ca = cx.argv
+    assert ca[:3] == ("/bin/codex", "exec", "--json") and ca[-1] == "-"
+    assert ca[ca.index("--sandbox") + 1] == "read-only" and "--ignore-user-config" in ca
+    assert 'mcp_servers.bosun.env_vars=["BOSUN_ASSISTANT_TOKEN"]' in ca
+    assert any(x.startswith("mcp_servers.bosun.tool_timeout_sec=") for x in ca)
+    assert tok not in " ".join(ca) and tok not in (cx.stdin or "")
+    assert cx.env == {auth.ASSISTANT_TOKEN_ENV: tok}
+    cx_checked = set(spec("codex").lockdown_flags) | set(spec("codex").mcp_flags)
+    assert {f for f in ca if f.startswith("--")} <= cx_checked
+    assert Capability.MCP in spec("codex").capabilities
+
+
+def test_cli_mcp_engine_streams_claude_and_codex_and_stop_kills_process_group(tmp_path):
+    import asyncio
+    import stat
+    import sys
+    import time
+    from bosun import auth, proc
+    from bosun.assistant_prompt import Turn
+    from bosun.config import load_settings
+    from bosun.providers import accounts
+    from bosun.providers.engines import CliMcpEngine
+
+    # Fake CLI that emits Claude stream-json
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "assert os.environ.get('BOSUN_ASSISTANT_TOKEN', '').startswith('bsn_at_')\n"
+        "print(json.dumps({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':'Hi '}}}), flush=True)\n"
+        "print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'Hi there.'}]}}), flush=True)\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,'num_turns':1,'duration_ms':15,'session_id':'s1','result':'Hi there.','usage':{'input_tokens':10,'output_tokens':5}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(fake_claude.stat().st_mode | stat.S_IEXEC)
+
+    settings = load_settings()
+    login = accounts.Login("claude", "default", "Default", None, False, str(fake_claude))
+    tok = auth.ASSISTANT_TOKEN_PREFIX + "x" * 43
+
+    async def _run_claude():
+        eng = CliMcpEngine(settings, login, "sonnet", tok)
+        turn = Turn("a" * 32, 1)
+        await eng.start_turn(turn, "hello")
+        return [ev async for ev in eng.stream()]
+
+    evs = asyncio.run(_run_claude())
+    assert [(e.kind, e.text) for e in evs if e.kind != "result"] == [("text", "Hi "), ("message", "Hi there.")]
+    rep = evs[-1].report
+    assert rep is not None and rep.outcome == "ok" and rep.usage is not None and rep.usage.input_tokens == 10
+
+    # Fake CLI that spawns a grandchild sleeping in the same process group: stop() must kill BOTH
+    child_pid_file = tmp_path / "child.pid"
+    fake_codex = tmp_path / "fake-codex"
+    fake_codex.write_text(
+        f"#!{sys.executable}\n"
+        "import json, subprocess, sys, time\n"
+        f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(child_pid_file)!r}, 'w').write(str(p.pid))\n"
+        "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Working...'}}), flush=True)\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IEXEC)
+    codex_login = accounts.Login("codex", "default", "Default", None, False, str(fake_codex))
+
+    async def _run_and_stop():
+        eng = CliMcpEngine(settings, codex_login, "gpt-5.6-terra", tok)
+        turn = Turn("b" * 32, 1)
+        await eng.start_turn(turn, "hang")
+        seen = []
+        async for ev in eng.stream():
+            seen.append(ev)
+            if ev.kind == "message":
+                turn.stopped = True
+                await eng.stop()
+        return seen
+
+    stop_evs = asyncio.run(_run_and_stop())
+    assert stop_evs[-1].report is not None and stop_evs[-1].report.outcome == "cancelled"
+    grandchild_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+    deadline = time.monotonic() + 3.0
+    while proc.pid_alive(grandchild_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not proc.pid_alive(grandchild_pid), "stop() must kill the CLI's whole process group"
+
 
 
 

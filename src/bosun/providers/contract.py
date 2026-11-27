@@ -105,7 +105,7 @@ def _binary_key(binary: str) -> tuple[str, int, int]:
 def cache_key(s: ProviderSpec, version: str) -> str:
     """Where a version's verdict is kept: the CLI, its version, and a digest of everything Bosun requires of it, so a
     later Bosun that requires one more flag or feature never trusts a verdict made against the shorter list."""
-    wanted = json.dumps([s.help_args, s.lockdown_flags, s.features_args, s.lockdown_features, s.fixer_flags])
+    wanted = json.dumps([s.help_args, s.lockdown_flags, s.mcp_flags, s.features_args, s.lockdown_features, s.fixer_flags])
     return f"{s.id}|{version}|{hashlib.sha256(wanted.encode()).hexdigest()[:12]}"
 
 
@@ -128,7 +128,7 @@ def _judge(s: ProviderSpec, version: str, binary: str) -> tuple[ContractStatus, 
         # a cut-off help or crash error lists no flags: not the same as a release that dropped them
         finding = f"{s.label} {version}: its --help could not be read to check its safety flags"
         return ContractStatus(s.id, version, False, (), finding), False
-    missing = missing_flags(text, s.lockdown_flags)
+    missing = missing_flags(text, (*s.lockdown_flags, *s.mcp_flags))
     if missing and not r.ok:
         # a crash part-way through printing looks like a dropped flag: fail closed, and ask again in a minute
         finding = f"{s.label} {version}: its --help could not be read to check its safety flags"

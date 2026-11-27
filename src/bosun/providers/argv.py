@@ -10,11 +10,14 @@ a CLI version that no longer knows one. Builders only build; `run.py` (phase 4) 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+import sys
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import auth
+from ..assistant_prompt import PREFIX, SERVER, TOOL_TIMEOUT_MS
 from ..llm import ONE_SHOT_ENV
 from .catalog import CODEX_DISABLED_FEATURES
 
@@ -174,3 +177,77 @@ def build(provider: str, *, binary: str, model: str, schema: Mapping[str, Any], 
     if builder is None:
         raise ValueError(f"no argv builder for {provider!r}")
     return builder(Call(binary, model, schema, system, prompt, Path(workdir)))
+
+
+# --- MCP assistant calls (CliMcpEngine, phase 6) -----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class McpCall:
+    binary: str
+    model: str
+    system: str
+    prompt: str
+    workdir: Path
+    port: int
+    token: str
+    tool_names: tuple[str, ...]
+    timeout_ms: int = TOOL_TIMEOUT_MS
+
+
+def _mcp_server_cmd(port: int) -> tuple[str, tuple[str, ...]]:
+    return sys.executable, ("-m", "bosun.cli", "mcp", "--as", "assistant", "--port", str(port))
+
+
+def _claude_mcp(c: McpCall) -> Invocation:
+    """Claude CLI with only `bosun mcp --as assistant`, no built-in tools, token in env only (never in config/argv)."""
+    cmd, cmd_args = _mcp_server_cmd(c.port)
+    cfg = _write(c.workdir, "mcp-config.json",
+                 json.dumps({"mcpServers": {SERVER: {"command": cmd, "args": list(cmd_args)}}}, separators=(",", ":")))
+    allowed = ",".join(f"{PREFIX}{name}" for name in c.tool_names)
+    a = (c.binary, "-p",
+         "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+         "--tools", "",
+         "--disallowedTools", "WebSearch,WebFetch,Bash",
+         "--allowedTools", allowed,
+         "--mcp-config", str(cfg),
+         "--strict-mcp-config",
+         "--setting-sources", "",
+         "--no-session-persistence",
+         "--disable-slash-commands",
+         "--permission-mode", "dontAsk",
+         *_model("--model", c.model),
+         "--system-prompt", c.system)
+    env = {"MCP_TOOL_TIMEOUT": str(c.timeout_ms), "ENABLE_TOOL_SEARCH": "false",
+           auth.ASSISTANT_TOKEN_ENV: c.token}
+    return Invocation(a, c.prompt, env, files=(cfg,))
+
+
+def _codex_mcp(c: McpCall) -> Invocation:
+    """Codex exec with only `bosun mcp --as assistant` via `-c`, forwarding only the per-turn token via `env_vars`."""
+    cmd, cmd_args = _mcp_server_cmd(c.port)
+    timeout_sec = max(1, int(c.timeout_ms // 1000))
+    mcp_cfg = (
+        "-c", f"mcp_servers.{SERVER}.command={json.dumps(cmd)}",
+        "-c", f"mcp_servers.{SERVER}.args={json.dumps(list(cmd_args))}",
+        "-c", f'mcp_servers.{SERVER}.env_vars=["{auth.ASSISTANT_TOKEN_ENV}"]',
+        "-c", f"mcp_servers.{SERVER}.tool_timeout_sec={timeout_sec}",
+    )
+    a = (c.binary, "exec", "--json", *CODEX_NO_TOOLS, *mcp_cfg, *_model("-m", c.model), "-")
+    return Invocation(a, with_system(c.system, c.prompt), {auth.ASSISTANT_TOKEN_ENV: c.token})
+
+
+MCP_BUILDERS: Mapping[str, Callable[[McpCall], Invocation]] = {
+    "claude": _claude_mcp,
+    "codex": _codex_mcp,
+}
+
+
+def build_mcp(provider: str, *, binary: str, model: str, system: str, prompt: str, workdir: Path,
+              port: int, token: str, tool_names: Sequence[str] = (),
+              timeout_ms: int = TOOL_TIMEOUT_MS) -> Invocation:
+    """Build one locked-down MCP-backed assistant invocation for `provider`."""
+    builder = MCP_BUILDERS.get(provider)
+    if builder is None:
+        raise ValueError(f"no MCP argv builder for {provider!r}")
+    return builder(McpCall(binary, model, system, prompt, Path(workdir), port, token, tuple(tool_names), timeout_ms))

@@ -202,3 +202,6 @@ class ClaudeSdkEngine:
                 pass
         if turn is not None and turn.task is not None and turn.loop is not None:
             turn.loop.call_later(grace if client is not None else 0, turn.task.cancel)
+
+
+from .mcp_engine import CliMcpEngine  # noqa: E402, F401

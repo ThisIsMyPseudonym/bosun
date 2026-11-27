@@ -70,6 +70,7 @@ def test_every_recorded_version_lists_every_lockdown_flag(provider, version):
     text = (FIXTURES / provider / version / "help.txt").read_text()
     assert parse_version((FIXTURES / provider / version / "version.txt").read_text()) == version
     assert missing_flags(text, spec(provider).lockdown_flags) == ()
+    assert missing_flags(text, spec(provider).mcp_flags) == ()
     assert missing_flags(text, spec(provider).fixer_flags) == ()
     if spec(provider).lockdown_features:
         features = (FIXTURES / provider / version / "features.txt").read_text()
@@ -80,6 +81,13 @@ def test_dropping_a_fixer_only_flag_does_not_block_one_shots(store, monkeypatch)
     no_restricted = _drop_option(_drop_option(CLAUDE_HELP, "--restricted"), "--permission-prompts")
     monkeypatch.setattr(proc, "run", help_runner(help_text=no_restricted))
     assert contract.check(store, "claude", "/bin/claude").ok
+
+
+def test_dropping_a_claude_mcp_flag_fails_closed(store, monkeypatch):
+    no_mcp = _drop_option(CLAUDE_HELP, "--mcp-config")
+    monkeypatch.setattr(proc, "run", help_runner(help_text=no_mcp))
+    got = contract.check(store, "claude", "/bin/claude")
+    assert not got.ok and got.missing == ("--mcp-config",)
 
 
 def test_codex_features_must_exist_and_not_be_removed(store, monkeypatch):

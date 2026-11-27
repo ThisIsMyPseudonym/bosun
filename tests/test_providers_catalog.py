@@ -46,8 +46,8 @@ def test_a_cli_is_offered_only_the_jobs_its_capabilities_allow():
 
     assert capable("summarize") == ("claude", "codex", "gemini")
     assert capable("fix") == ("claude",)
-    assert capable("assistant") == ("claude",)
-    assert capable("computer_use") == ("claude",)
+    assert capable("assistant") == ("claude", "codex")
+    assert capable("computer_use") == ("claude", "codex")
     with pytest.raises(KeyError):
         capable("no-such-job")
 
