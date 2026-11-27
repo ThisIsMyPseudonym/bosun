@@ -8,12 +8,12 @@ never raised, and nothing here may ever make a login look like it has more room 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Set as AbstractSet
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from . import catalog, ledger
+from . import accounts, catalog, contract, ledger, quota, windows
 
 if TYPE_CHECKING:
     from ..store import Store
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 SETTING = "ai_routing"
 Mode = Literal["default", "balance"]
 MODES: tuple[Mode, ...] = ("default", "balance")
+SkipReason = Literal["capability", "not_installed", "excluded", "contract", "limit", "cooldown", "line"]
 DEFAULT_PINS: Mapping[str, str] = MappingProxyType({"fix": "claude"})
 MAX_SETTING_CHARS = 1 << 16  # cap JSON size before parsing
 
@@ -104,3 +105,83 @@ def settings(store: Store) -> RoutingSettings:
         return clean_settings(json.loads(raw))
     except (ValueError, RecursionError):
         return RoutingSettings.default()
+
+
+# --- pure routing ------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Context:
+    logins: tuple[accounts.Login, ...]
+    contracts: Mapping[str, contract.ContractStatus]
+    readings: Mapping[str, tuple[windows.Reading, ...]]
+    cooldowns: AbstractSet[str] | Mapping[str, float]
+    overrides: tuple[quota.Override, ...]
+    now: float
+    settings: RoutingSettings
+
+
+@dataclass(frozen=True)
+class Candidate:
+    provider: str
+    bucket: str
+    login: accounts.Login
+    pace: float | None = None
+
+
+@dataclass(frozen=True)
+class Skip:
+    bucket: str
+    reason: SkipReason
+    detail: str
+    hit: quota.Hit | None = None
+
+
+@dataclass(frozen=True)
+class Route:
+    job: str
+    candidates: tuple[Candidate, ...]
+    skipped: tuple[Skip, ...]
+    mode: str
+    fell_back_from: str | None = None
+
+
+def _capability_detail(job: catalog.Job, provider: str) -> str:
+    spec = catalog.CATALOG[provider]
+    missing = sorted(job.needs - spec.capabilities)
+    if missing:
+        return f"{spec.label} lacks {', '.join(missing)}"
+    return f"{spec.label} is not locked down for untrusted input"
+
+
+def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Login, ctx: Context) -> Skip | None:
+    if login.provider not in capable:
+        return Skip(login.bucket, "capability", _capability_detail(job, login.provider))
+    spec = catalog.CATALOG[login.provider]
+    if not login.binary:
+        return Skip(login.bucket, "not_installed", f"{spec.label} is not installed")
+    if login.excluded:
+        return Skip(login.bucket, "excluded", f"{spec.label} ({login.label}) is excluded")
+    status = ctx.contracts.get(login.provider)
+    if status is None or not status.ok:
+        detail = status.finding if status is not None and status.finding else f"{spec.label}: contract check failed"
+        return Skip(login.bucket, "contract", detail)
+    return None
+
+
+def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
+    """Filter and order candidates for `job` from pure `ctx` (no store, no clock)."""
+    capable = frozenset(catalog.capable(job))
+    job_spec = catalog.JOBS[job]
+    candidates: list[Candidate] = []
+    skipped: list[Skip] = []
+    for login in ctx.logins:
+        if login.provider not in catalog.CATALOG:
+            continue
+        skip = _check_login(job_spec, capable, login, ctx)
+        if skip is not None:
+            skipped.append(skip)
+        else:
+            pace = quota.login_pace(ctx.readings.get(login.bucket, ()), ctx.now)
+            candidates.append(Candidate(login.provider, login.bucket, login, pace))
+    return Route(job, tuple(candidates), tuple(skipped), ctx.settings.mode)
