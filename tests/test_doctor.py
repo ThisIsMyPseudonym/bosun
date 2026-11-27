@@ -208,3 +208,17 @@ def test_doctor_reads_the_contract_cache_read_only_and_never_writes_it(s, tmp_pa
                         or ContractStatus(p, "1.0", True, (), ""))
     lines(own)
     assert len(seen) == len(CATALOG) and all(ro is True for ro in seen)
+
+
+def test_doctor_notes_retired_budget_env_vars_as_ignored(s, monkeypatch):
+    for var in ("BOSUN_REFRESH_BUDGET_USD", "BOSUN_DAILY_BUDGET_USD", "BOSUN_ASSISTANT_BUDGET_USD"):
+        monkeypatch.delenv(var, raising=False)
+    assert not any("BUDGET_USD" in ln.fact for ln in lines(s))
+
+    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "5")
+    monkeypatch.setenv("BOSUN_ASSISTANT_BUDGET_USD", "2")
+    found = lines(s)
+    notes = [ln for ln in found if "BUDGET_USD" in ln.fact]
+    assert len(notes) == 2
+    assert all(ln.mark == OPTIONAL and "ignored: AI use is now measured by your plans' windows" in ln.fact and ln.fix for ln in notes)
+    assert doctor.report(found)[1] == 0  # optional notice, never fails doctor

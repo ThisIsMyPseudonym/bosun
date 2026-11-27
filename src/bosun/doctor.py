@@ -170,6 +170,14 @@ def _ai_clis(probe: Probe, s: Settings) -> list[Line]:
     return out
 
 
+def _retired_budget_env() -> list[Line]:
+    """Note any retired BOSUN_*_BUDGET_USD variables still set in the environment."""
+    found = sorted(k for k, v in os.environ.items()
+                   if k.startswith("BOSUN_") and k.endswith("_BUDGET_USD") and v.strip())
+    return [Line(OPTIONAL, f"{name} is set and ignored: AI use is now measured by your plans' windows",
+                 f"unset {name} in your shell or service environment") for name in found]
+
+
 def check(s: Settings, probe: Probe | None = None, root: Path = PROJECT_ROOT) -> list[Line]:
     p = probe or Probe()
     tools = p.tools()
@@ -204,6 +212,7 @@ def check(s: Settings, probe: Probe | None = None, root: Path = PROJECT_ROOT) ->
     out += _managers(p, tools, s)
 
     out += _ai_clis(p, s)
+    out += _retired_budget_env()
 
     scanner = s.osv_scanner
     out.append(Line(OK, f"osv-scanner: {_tilde(scanner)}") if scanner.exists() else
