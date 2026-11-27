@@ -263,3 +263,24 @@ def test_corrupt_triage_row_is_re_evaluated_on_http_read(tmp_path):
         assert body["verdict"]["category"] == "permissions"
     finally:
         trace.configure(None)
+
+
+def test_a_bug_in_triage_never_breaks_the_run_page(tmp_path, monkeypatch):
+    from bosun.triage import worker
+
+    def boom(*_a, **_k):
+        raise RuntimeError("triage bug")
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        with trace.run("upgrade", subject="brew:jq") as r:
+            r.fail("Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq")
+        monkeypatch.setattr(worker, "triage_for", boom)
+        user = TestClient(create_app(load_settings(), st, TOKEN), base_url="http://127.0.0.1:8787", cookies=signed_in())
+        run_resp = user.get(f"/api/runs/{r.trace_id}")
+        assert run_resp.status_code == 200 and run_resp.json()["triage"] is None
+        tri = user.get(f"/api/runs/{r.trace_id}/triage")
+        assert tri.status_code == 200 and tri.json()["status"] is None
+    finally:
+        trace.configure(None)

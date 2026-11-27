@@ -948,7 +948,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             **found,
             "tree": diagnose.span_tree(found["spans"]),
             "failures": diagnose.failures(found["spans"]),
-            "triage": tworker.triage_for(store, tid, save=not s.demo and not store.read_only),
+            "triage": _triage_or_none(tid),
         }
 
     @actions.bind("diagnose")
@@ -964,8 +964,15 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
         tid = found["run"]["trace_id"]
-        row = tworker.triage_for(store, tid, save=not s.demo and not store.read_only)
-        return row or {"trace_id": tid, "status": None, "verdict": None}
+        return _triage_or_none(tid) or {"trace_id": tid, "status": None, "verdict": None}
+
+    def _triage_or_none(tid: str) -> dict | None:
+        """A run's verdict, worked out on first read. Triage is advice: a bug in it never breaks the run page."""
+        try:
+            return tworker.triage_for(store, tid, save=not s.demo and not store.read_only)
+        except Exception:  # noqa: BLE001 - logged; the run itself still shows
+            log.exception("triage failed for run %s", tid[:12])
+            return None
 
     @actions.bind("triage_feedback")
     def triage_feedback(ctx: ActionContext, body: TriageFeedbackIn):
