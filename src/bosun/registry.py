@@ -480,6 +480,7 @@ AGENT_TIER_WORDS = {Risk.SYSTEM: "quit and reopen apps and open system updaters"
 
 
 ASSISTANT = "assistant"  # the built-in Ask Bosun assistant (assistant.py)
+TRIAGE = "triage"  # read-only error triage worker (triage/model.py)
 
 # What `bosun demo` refuses, besides everything that installs, upgrades, pins, fixes, quits, opens or restores
 # (Risk.INSTALL and above): the small actions that would look at, or run something on, the real computer.
@@ -583,6 +584,10 @@ class Actions:
                                 "until the user turns that on in the dashboard (AI usage, Agents). Ask the user to do "
                                 "this step themselves, or to turn the switch on")
             return None
+        if ctx.actor == TRIAGE:
+            if spec.risk == Risk.READ:
+                return None
+            raise Forbidden(f"{spec.name} is refused for triage: triage is read-only and cannot change anything")
         if ctx.actor == ASSISTANT:
             if spec.risk == Risk.READ:
                 return None
