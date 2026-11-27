@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from bosun import mcp_server, recipes, redact
 from bosun.models import Item, Source
@@ -14,6 +14,7 @@ from bosun.triage.schema import Category, Confidence, Evidence, NextStep, Verdic
 log = logging.getLogger(__name__)
 _CUT_NOTE = "Blocked unsafe content in model reply; inspect the run output."
 _EMPTY_CAUSE_NOTE = "Cause could not be determined from the run output."
+MIN_EVIDENCE_CHARS = 12
 
 _BREW_SOURCES = frozenset({Source.BREW, Source.BREW_CASK, Source.MAC_APP})
 _APT_SOURCES = frozenset({Source.APT, Source.WSL_APT})
@@ -134,9 +135,9 @@ def _norm_ws(text: str) -> str:
 
 
 def evidence_matches(line: str, source_text: str) -> bool:
-    """True when `line` appears in `source_text` after whitespace normalization (and is not empty/mask-only)."""
+    """True when `line` has >= MIN_EVIDENCE_CHARS non-space chars and appears in `source_text`."""
     norm_line = _norm_ws(line)
-    if not norm_line or norm_line == redact.MASK:
+    if not norm_line or norm_line == redact.MASK or len(norm_line.replace(" ", "")) < MIN_EVIDENCE_CHARS:
         return False
     return norm_line in _norm_ws(source_text)
 
@@ -150,14 +151,29 @@ def sanitize_text(text: str) -> tuple[str, bool]:
     return clean[: match.start()].rstrip(), True
 
 
-def _checked_evidence(evidence: list[Evidence], clean_sources: Mapping[str, str]) -> list[Evidence]:
+def _checked_evidence(
+    evidence: list[Evidence],
+    clean_sources: Mapping[str, str],
+    failure_text: str,
+    span_ids: Collection[str],
+) -> tuple[list[Evidence], bool]:
+    valid_spans = frozenset(s for s in span_ids if s)
     kept: list[Evidence] = []
+    any_ref_cut = False
     for ev in evidence:
+        clean_ref, ref_cut = sanitize_text(ev.ref)
+        if ref_cut:
+            any_ref_cut = True
+            clean_ref = ""
+        elif clean_ref and clean_ref not in valid_spans:
+            clean_ref = ""
         clean_line = redact.text(ev.line)
-        clean_ref = redact.text(ev.ref)
-        if evidence_matches(clean_line, clean_sources.get(ev.source, "")):
+        if (
+            evidence_matches(clean_line, clean_sources.get(ev.source, ""))
+            and evidence_matches(clean_line, failure_text)
+        ):
             kept.append(ev.model_copy(update={"ref": clean_ref, "line": clean_line}))
-    return kept
+    return kept, any_ref_cut
 
 
 def _constrain_unknown(step: NextStep, item: Item | None, run_kind: str) -> NextStep:
@@ -175,15 +191,18 @@ def check_verdict(
     item: Item | None,
     output: str,
     run_kind: str,
+    span_ids: Collection[str] = (),
 ) -> Verdict:
     """Apply Bosun's final checks: redact, ground evidence, sanitize free text, and re-check the next step."""
     clean_sources = {k: redact.text(v) for k, v in sources.items()}
-    kept = _checked_evidence(verdict.evidence, clean_sources)
+    clean_output = redact.text(output)
+    failure_text = "\n".join(p for p in (clean_output, clean_sources.get("output", "")) if p) or clean_sources.get("trace", "")
+    kept, ref_cut = _checked_evidence(verdict.evidence, clean_sources, failure_text, span_ids)
     cause, cause_cut = sanitize_text(verdict.cause)
     why, why_cut = sanitize_text(verdict.next_step.why)
 
-    if cause_cut or why_cut:
-        log.warning("triage verdict downgraded: unsafe content cut (cause=%s why=%s)", cause_cut, why_cut)
+    if cause_cut or why_cut or ref_cut:
+        log.warning("triage verdict downgraded: unsafe content cut (cause=%s why=%s ref=%s)", cause_cut, why_cut, ref_cut)
         return verdict.model_copy(update={
             "category": "unknown",
             "cause": cause.strip() or _CUT_NOTE,
@@ -207,7 +226,7 @@ def check_verdict(
         verdict.next_step.model_copy(update={"why": why}),
         category=category,
         item=item,
-        output=redact.text(output),
+        output=clean_output,
         run_kind=run_kind,
     )
     if category == "unknown":

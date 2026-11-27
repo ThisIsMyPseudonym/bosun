@@ -125,11 +125,26 @@ def _runbooks_text() -> str:
     return "\n".join(parts)
 
 
+def _run_span_ids(store: Store, bundle: Mapping[str, Any], rec: FailureRecord) -> frozenset[str]:
+    ids = {rec.span_id} if rec.span_id else set()
+    ids.update(str(f["span_id"]) for f in (bundle.get("failures") or ()) if isinstance(f, Mapping) and f.get("span_id"))
+    tr = store.trace(rec.trace_id)
+    if tr is not None:
+        ids.update(str(sp["span_id"]) for sp in (tr.get("spans") or ()) if isinstance(sp, Mapping) and sp.get("span_id"))
+    return frozenset(ids)
+
+
 def _evidence_sources(bundle: Mapping[str, Any], rec: FailureRecord) -> dict[str, str]:
     out_parts = [rec.output, rec.error]
+    trace_parts = [str((bundle.get("run") or {}).get("error") or "")]
     for f in bundle.get("failures") or ():
         if isinstance(f, Mapping) and isinstance(a := f.get("attrs"), Mapping):
-            out_parts.extend(str(a.get(k) or "") for k in ("stderr_tail", "stdout_tail", "error"))
+            vals = [str(a.get(k) or "") for k in ("stderr_tail", "stdout_tail", "error")]
+            out_parts.extend(vals)
+            trace_parts.extend(vals)
+    for w in bundle.get("warnings") or ():
+        if isinstance(w, Mapping) and w.get("message"):
+            trace_parts.append(str(w["message"]))
     for j in bundle.get("jobs") or ():
         if isinstance(j, Mapping) and j.get("output"):
             out_parts.append(str(j["output"]))
@@ -138,10 +153,7 @@ def _evidence_sources(bundle: Mapping[str, Any], rec: FailureRecord) -> dict[str
             out_parts.append(json.dumps(fx["result"], default=str))
     return {
         "output": "\n".join(p for p in out_parts if p),
-        "trace": json.dumps(
-            {"run": bundle.get("run"), "failures": bundle.get("failures"), "warnings": bundle.get("warnings")},
-            default=str,
-        ),
+        "trace": "\n".join(p for p in trace_parts if p),
         "item": json.dumps(bundle.get("item") or {}, default=str),
         "related_run": json.dumps(bundle.get("related_failures") or [], default=str),
         "runbook": _runbooks_text(),
@@ -354,6 +366,7 @@ def run_model(
     offered = recipes.describe(item, rec.output or rec.error) if item else []
     bundle = _build_bundle(store, settings, rec)
     sources = _evidence_sources(bundle, rec)
+    span_ids = _run_span_ids(store, bundle, rec)
     deadline = time.monotonic() + timeout
 
     with trace.run("triage", subject=rec.failure, actor="user" if clicked else "triage") as tr:
@@ -372,7 +385,8 @@ def run_model(
         if done.ok and done.result is not None and done.candidate is not None:
             validated, chosen_model = done.result.value
             checked = check.check_verdict(
-                validated, sources=sources, item=item, output=rec.output or rec.error, run_kind=rec.kind,
+                validated, sources=sources, item=item, output=rec.output or rec.error,
+                run_kind=rec.kind, span_ids=span_ids,
             )
             return ModelOutcome(
                 ok=True, verdict=checked, login=done.candidate.login, model=chosen_model,

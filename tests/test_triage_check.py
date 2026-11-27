@@ -200,3 +200,55 @@ def test_any_sanitizer_cut_or_empty_cause_downgrades_category_step_and_records_w
     out3 = check_verdict(v_blank, sources=sources, item=item, output=sources["output"], run_kind="upgrade")
     assert out3.category == "unknown" and out3.confidence == "low" and out3.next_step.kind == "none"
     assert out3.cause.strip() != ""
+
+
+def test_evidence_grounding_requires_12_nonspace_chars_in_failure_output_and_valid_safe_ref():
+    failure_out = "Error: fail\nError: Permission denied @ dir_s_mkdir - /opt/homebrew/Caskroom"
+    sources = {
+        "output": failure_out,
+        "runbook": "Homebrew permissions runbook guidance text",
+        "item": '{"key": "brew-cask:vlc", "name": "VLC media player"}',
+    }
+    item = Item(Source.BREW_CASK, "vlc", "VLC", "3.0.20", "3.0.21")
+
+    # 1. Line shorter than 12 non-space characters is rejected and cannot sustain high confidence
+    assert not evidence_matches("Error: fail", failure_out)  # 10 non-space chars
+    assert not evidence_matches("E r r o r :   f a i l", failure_out)
+    v_short = Verdict(
+        category="permissions", cause="Folder not writable.", confidence="high",
+        evidence=[Evidence(source="output", ref="sp-real", line="Error: fail")],
+        next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Fix folder owner."),
+        needs_person=True, transient=False,
+    )
+    out_short = check_verdict(v_short, sources=sources, item=item, output=failure_out, run_kind="upgrade", span_ids={"sp-real"})
+    assert out_short.evidence == [] and out_short.confidence == "low"
+
+    # 2. Line only in runbook/item (not in actual failure text/output) is rejected for grounding
+    v_non_failure = v_short.model_copy(update={
+        "evidence": [
+            Evidence(source="runbook", ref="", line="Homebrew permissions runbook guidance text"),
+            Evidence(source="item", ref="", line='"name": "VLC media player"'),
+        ],
+    })
+    out_non = check_verdict(v_non_failure, sources=sources, item=item, output=failure_out, run_kind="upgrade", span_ids={"sp-real"})
+    assert out_non.evidence == [] and out_non.confidence == "low"
+
+    # 3. Grounded >=12 non-space line with real span id keeps high confidence and real ref; bogus ref becomes ""
+    v_good = v_short.model_copy(update={
+        "evidence": [
+            Evidence(source="output", ref="sp-real", line="Permission denied @ dir_s_mkdir"),
+            Evidence(source="output", ref="bogus-span-id", line="Permission denied @ dir_s_mkdir"),
+        ],
+    })
+    out_good = check_verdict(v_good, sources=sources, item=item, output=failure_out, run_kind="upgrade", span_ids={"sp-real"})
+    assert out_good.confidence == "high" and len(out_good.evidence) == 2
+    assert out_good.evidence[0].ref == "sp-real" and out_good.evidence[1].ref == ""
+
+    # 4. Unsafe content in ref triggers sanitizer downgrade
+    v_bad_ref = v_short.model_copy(update={
+        "evidence": [Evidence(source="output", ref="javascript:alert(1)", line="Permission denied @ dir_s_mkdir")],
+    })
+    out_bad_ref = check_verdict(v_bad_ref, sources=sources, item=item, output=failure_out, run_kind="upgrade", span_ids={"sp-real"})
+    assert out_bad_ref.category == "unknown" and out_bad_ref.confidence == "low"
+    assert out_bad_ref.next_step.kind == "none"
+    assert all("javascript:" not in ev.ref for ev in out_bad_ref.evidence)
