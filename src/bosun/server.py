@@ -285,7 +285,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                 "history": store.history(), "autopilot": _autopilot(snap), "relaunch": _pending_relaunch(),
                 "notify": {"on": notify.is_on(store)},
                 "agents": registry.agent_policy(store),
-                "assistant": {"model": assistant.model if assistant else s.model},
+                "assistant": {"model": assistant.model if assistant else s.model,
+                              "login": assistant.login if assistant else "claude"},
                 "terminal": _terminal_now(), "watches": appwatch.view(store),
                 "view": store.setting("view") or "auto", "list_prefs": listprefs.read(store)}
         if snap:

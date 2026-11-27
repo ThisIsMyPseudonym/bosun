@@ -284,8 +284,8 @@ const STARTERS = ["What should I do first?", "What failed lately, and why?", "Wh
 function renderFoot() {
   const p = panel(); if (!p) return;
   const info = MC.assistantInfo || {};
-  const budget = info.budget_usd ? ` ${usd(info.left_usd)} of ${usd(info.budget_usd)} left for today.` : "";
-  p.querySelector(".askhint").textContent = A.error || `It reads Bosun's own data. Any change waits for your Approve.${budget}`;
+  const who = info.login ? ` Using ${info.login}.` : "";
+  p.querySelector(".askhint").textContent = A.error || `It reads Bosun's own data. Any change waits for your Approve.${who}`;
   p.querySelector(".askhint").classList.toggle("bad", !!A.error);
 }
 

@@ -193,6 +193,7 @@ class Assistant:
                  connect: Connect | None = None):
         self.store, self.settings, self.actions, self.approvals = store, settings, actions, approvals
         self.model = settings.assistant_model or settings.model
+        self.login = "claude"  # current engine's login bucket (phase 6 routes across MCP-capable logins)
         self.connect: Connect = connect or ClaudeSDKClient  # tests put a scripted model here
         self._turns: dict[str, Turn] = {}
         self._lock = threading.Lock()

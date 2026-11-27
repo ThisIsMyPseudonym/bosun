@@ -452,7 +452,9 @@ def test_each_turn_is_a_run_and_one_counted_claude_call(panel):
     assert {p["purpose"] for p in usage["by_purpose"]} == {"assistant"}
     assert panel.conversation(asked["conversation_id"])["cost_usd"] == pytest.approx(0.0123)
     state = panel.user.get("/api/state").json()["assistant"]
-    assert state["model"] == "sonnet" and "budget_usd" not in state and "left_usd" not in state
+    assert state == {"model": "sonnet", "login": "claude"}
+    js = (Path(__file__).resolve().parents[1] / "src" / "bosun" / "static" / "assistant.js").read_text(encoding="utf-8")
+    assert "budget_usd" not in js and "left_usd" not in js
 
 
 def test_retired_dollar_budgets_and_the_75_percent_line_do_not_stop_ask_bosun(panel, monkeypatch):
