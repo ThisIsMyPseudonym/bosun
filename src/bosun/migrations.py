@@ -636,6 +636,41 @@ def _vacuum(db: sqlite3.Connection) -> None:
         log.warning("bosun.db: the WAL could not be emptied after withholding http addresses (another reader)")
 
 
+TRIAGE = """
+CREATE TABLE IF NOT EXISTS triage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,  -- stable row id referenced by cached copies (same_as)
+    failure TEXT NOT NULL UNIQUE,          -- job:<id>, fix:<id>, or run:<trace_id>; one row per failure
+    trace_id TEXT NOT NULL,                -- the failed run's trace_id
+    signature TEXT NOT NULL DEFAULT '',    -- SHA-256 over normalized failure kind, source, verb, exit code and error line
+    status TEXT NOT NULL,                  -- queued, running, waiting_quota, done, skipped, failed, fixed_since
+    source TEXT NOT NULL DEFAULT '',       -- rules, cache, model, or '' before completion
+    verdict TEXT NOT NULL DEFAULT '',      -- checked and redacted Verdict JSON, or '' when none
+    same_as INTEGER,                       -- for cache rows: the origin triage.id whose verdict was reused
+    triage_trace TEXT NOT NULL DEFAULT '', -- the model triage job's own trace_id, if a model ran
+    feedback TEXT NOT NULL DEFAULT '',     -- helpful, wrong, disputed, or ''
+    feedback_ts REAL,                      -- Unix time feedback was last updated
+    created REAL NOT NULL,                 -- Unix time this triage row was created
+    finished REAL                          -- Unix time triage reached a terminal status
+);
+CREATE INDEX IF NOT EXISTS triage_by_trace ON triage (trace_id);
+CREATE INDEX IF NOT EXISTS triage_by_sig ON triage (signature, created DESC);
+CREATE INDEX IF NOT EXISTS triage_by_status ON triage (status, created);
+CREATE VIEW IF NOT EXISTS v_triage AS
+SELECT id, failure, trace_id, signature, status, source, same_as, triage_trace, feedback, feedback_ts,
+       created, finished,
+       CASE WHEN json_valid(verdict) THEN json_extract(verdict, '$.category') END AS category,
+       CASE WHEN json_valid(verdict) THEN json_extract(verdict, '$.cause') END AS cause,
+       CASE WHEN json_valid(verdict) THEN json_extract(verdict, '$.confidence') END AS confidence,
+       CASE WHEN json_valid(verdict) THEN json_extract(verdict, '$.next_step.kind') END AS next_step_kind,
+       CASE WHEN json_valid(verdict) THEN json_extract(verdict, '$.next_step.recipe') END AS next_step_recipe,
+       CASE WHEN json_valid(verdict) THEN json_extract(verdict, '$.next_step.runbook') END AS next_step_runbook,
+       CASE WHEN json_valid(verdict) THEN json_extract(verdict, '$.next_step.why') END AS next_step_why,
+       CASE WHEN json_valid(verdict) THEN json_extract(verdict, '$.needs_person') END AS needs_person,
+       CASE WHEN json_valid(verdict) THEN json_extract(verdict, '$.transient') END AS transient
+FROM triage;
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline", fn=_baseline),
     Migration(2, "tracing", fn=_tracing),
@@ -648,6 +683,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(9, "quota_windows", sql=QUOTA_WINDOWS),
     Migration(10, "llm_calls_providers", fn=_llm_calls_providers),
     Migration(11, "retire_budgets", fn=_retire_budgets),
+    Migration(12, "triage", sql=TRIAGE),
 )
 
 

@@ -503,7 +503,13 @@ class Store:
             old = "(SELECT id FROM conversations WHERE updated < ?)"
             self._db.execute(f"DELETE FROM messages WHERE conversation_id IN {old}", (now - RECORD_DAYS * day,))
             chats = self._db.execute("DELETE FROM conversations WHERE updated < ?", (now - RECORD_DAYS * day,)).rowcount
-        return {"cache": cache, "jobs": jobs, "fixes": fixes, "llm_calls": llm, "audit": audit, "conversations": chats}
+            triage = self._db.execute(
+                "DELETE FROM triage WHERE status NOT IN ('queued', 'running', 'waiting_quota') "
+                "AND COALESCE(finished, created) < ?",
+                (now - RECORD_DAYS * day,),
+            ).rowcount
+        return {"cache": cache, "jobs": jobs, "fixes": fixes, "llm_calls": llm, "audit": audit,
+                "conversations": chats, "triage": triage}
 
     # --- the audit trail (written by registry.Actions.run) ------------------------------------------------------
     def record_action(self, *, actor: str, action: str, args: dict, risk: str, surface: str, trace_id: str,
