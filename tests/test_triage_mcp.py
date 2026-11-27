@@ -164,3 +164,144 @@ def test_triage_token_enforces_trace_binding_forces_facts_false_and_drops_cross_
         assert set(mcp_server.triage_tool_specs()) == {"diagnose", "get_trace", "get_triage", "get_runbook"}
     finally:
         trace.configure(None)
+
+
+def test_triage_eight_call_cap_under_concurrent_load(tmp_path):
+    import threading
+
+    # 1. Unit-level atomicity on TriageTokens.consume_call under 20 concurrent threads
+    tokens = auth.TriageTokens(max_calls=8, ttl_s=300.0)
+    tok = tokens.issue("trace-race")
+    barrier = threading.Barrier(20)
+    grants: list[auth.TriageGrant | None] = []
+    lock = threading.Lock()
+
+    def hit_token():
+        barrier.wait()
+        g = tokens.consume_call(tok)
+        with lock:
+            grants.append(g)
+
+    threads = [threading.Thread(target=hit_token) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert sum(1 for g in grants if g is not None) == 8
+    assert sum(1 for g in grants if g is None) == 12
+
+    # 2. HTTP-level concurrency against the server with one triage token
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        app = create_app(load_settings(), st, "t" * 32)
+        http_tok = app.state.triage_tokens.issue("trace-http-race")
+        client = TestClient(app, base_url="http://127.0.0.1:8787")
+        http_barrier = threading.Barrier(14)
+        codes: list[int] = []
+
+        def hit_http():
+            http_barrier.wait()
+            r = client.get("/api/runbooks/homebrew-permissions", headers={auth.TRIAGE_TOKEN_HEADER: http_tok})
+            with lock:
+                codes.append(r.status_code)
+
+        http_threads = [threading.Thread(target=hit_http) for _ in range(14)]
+        for t in http_threads:
+            t.start()
+        for t in http_threads:
+            t.join(10)
+        assert codes.count(200) == 8 and codes.count(429) == 6
+    finally:
+        trace.configure(None)
+
+
+def test_triage_and_assistant_tokens_are_refused_on_each_others_roles_and_routes(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        with trace.run("upgrade", subject="brew:jq") as r:
+            r.fail("boom")
+        app = create_app(load_settings(), st, "t" * 32)
+        raw = TestClient(app, base_url="http://127.0.0.1:8787")
+        triage_tok = app.state.triage_tokens.issue(r.trace_id)
+        triage_rk = app.state.triage_tokens.reply_key(triage_tok)
+        asst_tok = app.state.assistant_tokens.issue("c" * 32, 1)
+        asst_rk = app.state.assistant_tokens.reply_key(asst_tok)
+
+        # Triage token presented as an assistant token -> 401
+        assert raw.get("/api/status", headers={auth.ASSISTANT_TOKEN_HEADER: triage_tok}).status_code == 401
+        # Assistant token presented as a triage token -> 401
+        assert raw.get("/api/runbooks/homebrew-permissions", headers={auth.TRIAGE_TOKEN_HEADER: asst_tok}).status_code == 401
+        # Conflicting tokens sent together -> 403
+        assert raw.get(
+            "/api/runbooks/homebrew-permissions",
+            headers={auth.TRIAGE_TOKEN_HEADER: triage_tok, auth.ASSISTANT_TOKEN_HEADER: asst_tok},
+        ).status_code == 403
+
+        # Triage token on assistant panel routes -> 403
+        triage_hdr = {auth.TRIAGE_TOKEN_HEADER: triage_tok}
+        assert raw.post("/api/assistant/ask", json={"text": "hi"}, headers=triage_hdr).status_code == 403
+        assert raw.get("/api/assistant/conversations", headers=triage_hdr).status_code == 403
+        assert raw.get(f"/api/assistant/conversations/{'c' * 32}/events", headers=triage_hdr).status_code == 403
+
+        # Assistant token on triage write actions -> 403
+        asst_hdr = {auth.ASSISTANT_TOKEN_HEADER: asst_tok}
+        assert raw.post(f"/api/runs/{r.trace_id}/triage", json={"deep": True}, headers=asst_hdr).status_code == 403
+        assert raw.post(f"/api/runs/{r.trace_id}/triage/feedback", json={"feedback": "wrong"}, headers=asst_hdr).status_code == 403
+
+        # Through mcp_server.Dashboard with swapped roles -> 401
+        asst_dash_with_triage_tok = mcp_server.Dashboard(
+            load_settings(), http=raw, as_role="assistant", assistant_token=triage_tok, reply_key=triage_rk,
+        )
+        triage_dash_with_asst_tok = mcp_server.Dashboard(
+            load_settings(), http=raw, as_role="triage", assistant_token=asst_tok, reply_key=asst_rk,
+        )
+        assert mcp_server.dispatch(asst_dash_with_triage_tok, "status", {}).is_error
+        assert mcp_server.dispatch(triage_dash_with_asst_tok, "get_runbook", {"topic": "homebrew-permissions"}).is_error
+    finally:
+        trace.configure(None)
+
+
+def test_triage_401_and_429_paths_over_http_and_mcp_dashboard(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        with trace.run("upgrade", subject="brew:jq") as r:
+            r.fail("boom")
+        app = create_app(load_settings(), st, "t" * 32)
+        raw = TestClient(app, base_url="http://127.0.0.1:8787")
+
+        # 401: invalid and revoked triage tokens over HTTP and via mcp_server.Dashboard
+        revoked = app.state.triage_tokens.issue(r.trace_id)
+        revoked_rk = app.state.triage_tokens.reply_key(revoked)
+        app.state.triage_tokens.revoke(revoked)
+        for bad_tok in ("", "bsn_tt_bogus", revoked):
+            res = raw.get(f"/api/runs/{r.trace_id}/diagnose", headers={auth.TRIAGE_TOKEN_HEADER: bad_tok})
+            assert res.status_code == 401 and "invalid or expired" in res.json()["error"].lower()
+
+        bad_dash = mcp_server.Dashboard(
+            load_settings(), http=raw, as_role="triage", assistant_token=revoked, reply_key=revoked_rk,
+        )
+        bad_mcp = mcp_server.dispatch(bad_dash, "get_runbook", {"topic": "homebrew-permissions"})
+        assert bad_mcp.is_error and "invalid or expired" in json.loads(bad_mcp.content[0].text)["error"].lower()
+
+        # 429: 9th call returns 429 with reply proof and clear stop-calling-tools error
+        tok = app.state.triage_tokens.issue(r.trace_id)
+        rk = app.state.triage_tokens.reply_key(tok)
+        for _ in range(8):
+            ok_r = raw.get("/api/runbooks/homebrew-permissions", headers={auth.TRIAGE_TOKEN_HEADER: tok})
+            assert ok_r.status_code == 200
+        limited = raw.get("/api/runbooks/homebrew-permissions", headers={auth.TRIAGE_TOKEN_HEADER: tok})
+        assert limited.status_code == 429
+        assert "limit" in limited.json()["error"].lower()
+        assert auth.valid_triage_reply(
+            rk, "GET", "/api/runbooks/homebrew-permissions", limited.headers.get(auth.REPLY_HEADER),
+        )
+
+        # Via mcp_server.Dashboard, 429 passes reply proof verification and frames the limit message
+        dash = mcp_server.Dashboard(load_settings(), http=raw, as_role="triage", assistant_token=tok, reply_key=rk)
+        limited_mcp = mcp_server.dispatch(dash, "get_runbook", {"topic": "homebrew-permissions"})
+        assert limited_mcp.is_error and "limit" in json.loads(limited_mcp.content[0].text)["error"].lower()
+    finally:
+        trace.configure(None)
