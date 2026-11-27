@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import llm, proc
-from . import limits, windows
+from . import limits, quota, windows
 from .windows import Reading
 
 MAX_DOC_CHARS = 1 << 20  # 1 MiB cap before json.loads on a whole document
@@ -240,8 +240,44 @@ def _claude(result: proc.Result, at: float) -> Reply:
     return Reply("ok", text, payload, usage, readings, model, False, "", sid, dur, api_ms, turns)
 
 
+def _codex(result: proc.Result, at: float) -> Reply:
+    est = quota.estimated("codex")
+    readings = windows.parse_codex(result.stdout or "", at)
+    if (pf := _proc_failure(result, estimated=est, readings=readings)) is not None:
+        return pf
+    stdout, stderr = result.stdout or "", result.stderr or ""
+    if result.ok and not stdout.strip():
+        return _fail("empty", "empty reply", estimated=est, readings=readings)
+    text, err_msg, sid, usage = "", "", "", llm.Usage()
+    for ev in _iter_jsonl(stdout):
+        kind = ev.get("type")
+        if kind == "thread.started" and isinstance(ev.get("thread_id"), str):
+            sid = ev["thread_id"]
+        elif kind == "item.completed" and isinstance(item := ev.get("item"), dict) and item.get("type") == "agent_message":
+            if isinstance(item.get("text"), str):
+                text = item["text"]
+        elif kind == "turn.completed" and isinstance(u := ev.get("usage"), dict):
+            usage = llm.Usage(input_tokens=_nonneg_int(u.get("input_tokens")),
+                              cache_read_tokens=_nonneg_int(u.get("cached_input_tokens")),
+                              output_tokens=_nonneg_int(u.get("output_tokens")))
+        elif kind in ("turn.failed", "error"):
+            raw_err = ev.get("error")
+            msg = raw_err.get("message") if isinstance(raw_err, dict) else ev.get("message") or raw_err
+            if isinstance(msg, str) and msg.strip():
+                err_msg = msg.strip()
+    if err_msg or not result.ok:
+        return _classify_error_text(err_msg or stderr or stdout, result.returncode, at,
+                                    estimated=est, usage=usage, readings=readings, session_id=sid)
+    if not text.strip():
+        return _fail("empty", "empty reply", estimated=est, usage=usage, readings=readings, session_id=sid)
+    if not _is_json_text(text) and (lim := limits.limit_reading(text, at)) is not None:
+        return _fail("usage_limit", text, estimated=est, usage=usage, readings=(*readings, lim), session_id=sid)
+    return Reply("ok", text, text, usage, readings, "", est, "", sid)
+
+
 PARSERS: dict[str, Callable[[proc.Result, float], Reply]] = {
     "claude": _claude,
+    "codex": _codex,
 }
 
 

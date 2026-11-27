@@ -62,3 +62,18 @@ def test_claude_hostile_and_malformed_replies_never_raise():
 def test_unknown_provider_raises_value_error():
     with pytest.raises(ValueError, match="no reply parser"):
         replies.parse("nonesuch", proc.Result(("x",), 0, "{}", ""), at=1.0)
+
+
+def test_codex_jsonl_gives_the_last_agent_message_tokens_and_rate_limits():
+    raw = (FIX / "codex/handmade/exec-json.jsonl").read_text()
+    at = 1799990000.0
+    rep = replies.parse("codex", proc.Result(("codex",), 0, raw, ""), at=at)
+    assert rep.outcome == "ok" and rep.text == '{"headline":"ok"}' and rep.payload == '{"headline":"ok"}'
+    assert (rep.usage.input_tokens, rep.usage.cache_read_tokens, rep.usage.output_tokens) == (1200, 0, 40)
+    assert {r.window: r.used for r in rep.readings} == {"five_hour": 0.12, "seven_day": 0.315}
+    assert rep.session_id == "00000000-0000-0000-0000-000000000000"
+    failed = json.dumps({"type": "turn.failed", "error": {"message": "You've hit your usage limit. Resets in 2h"}})
+    lim = replies.parse("codex", proc.Result(("codex",), 1, failed, ""), at=at)
+    assert lim.outcome == "usage_limit" and lim.readings[0].status == "rejected"
+    assert replies.parse("codex", proc.Result(("codex",), 0, "", ""), at=at).outcome == "empty"
+    assert replies.parse("codex", proc.Result(("codex",), 0, "not json", ""), at=at).outcome in ("empty", "error")

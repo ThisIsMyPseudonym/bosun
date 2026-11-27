@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"codex-thread-1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"headline\":\"h\",\"security_fixes\":[],\"notable_features\":[],\"breaking_changes\":[],\"upgrade_value\":\"low\",\"migration_effort\":\"none\",\"rationale\":\"r\"}"}}
+{"type":"token_count","info":{"total_token_usage":{"input_tokens":800,"output_tokens":55}},"rate_limits":{"primary":{"used_percent":14.0,"window_minutes":300,"resets_at":1800000000},"secondary":{"used_percent":22.0,"window_minutes":10080,"resets_at":1800400000}}}
+{"type":"turn.completed","usage":{"input_tokens":800,"cached_input_tokens":100,"output_tokens":55}}
