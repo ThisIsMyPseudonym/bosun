@@ -427,6 +427,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     app.state.assistant, app.state.approvals, app.state.assistant_tokens = assistant, approvals, assistant_tokens
     triager = tworker.Triager(store, s, triage_tokens)
     app.state.triage_tokens, app.state.triager = triage_tokens, triager
+    if not s.demo and not store.read_only:
+        threading.Thread(target=triager.run, daemon=True, name="triage").start()
     app.state.terminals, app.state.upgrader = terminals, upgrader
     if store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")

@@ -76,6 +76,12 @@ def _no_notification_loop(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_triage_loop(monkeypatch):
+    """Every dashboard a test builds would start the background triage loop; tests drive Triager.tick directly."""
+    monkeypatch.setattr("bosun.triage.worker.Triager.run", lambda self, interval=0: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_store_apps(monkeypatch, tmp_path):
     """The check for an App Store copy before a cask install looks in an empty folder, never this Mac's
     /Applications (tests/test_storeguard.py gives it its own)."""

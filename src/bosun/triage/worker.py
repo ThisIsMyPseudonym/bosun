@@ -14,9 +14,11 @@ from bosun.config import Settings
 from bosun.models import Item
 from bosun.registry import Conflict, Failed, Invalid, NotFound
 from bosun.store import Store
-from bosun.triage import check, rules, signature
+from bosun.triage import auto as tauto
+from bosun.triage import check, queue as tqueue, rules, settings as tsettings, signature
 from bosun.triage import model as tmodel
 from bosun.triage import store as tstore
+from bosun.triage.auto import AUTO_MAX_AGE_S, TickReport
 from bosun.triage.schema import FailureRecord, Verdict
 
 log = logging.getLogger(__name__)
@@ -26,6 +28,11 @@ AUTO_MODEL_KINDS: frozenset[str] = frozenset({
 })
 REFRESH_KINDS: frozenset[str] = frozenset({"refresh", "recheck", "recheck-project"})
 MAX_CONCURRENT_TRIAGE = 2
+TICK_S = 30.0
+__all__ = [
+    "AUTO_MAX_AGE_S", "MAX_CONCURRENT_TRIAGE", "SKIPPED_STATUSES", "TICK_S", "TickReport",
+    "Triager", "eligible_for_auto_model", "eligible_for_rules", "evaluate_fast", "signature_of", "triage_for",
+]
 
 
 def eligible_for_rules(rec: FailureRecord) -> bool:
@@ -233,6 +240,7 @@ class Triager:
         self.tokens = tokens
         self._max_concurrent = max(1, max_concurrent)
         self._lock = threading.Lock()
+        self._tick_lock = threading.Lock()
         self._active_runs: set[str] = set()
 
     def _acquire(self, tid: str) -> None:
@@ -247,6 +255,9 @@ class Triager:
         with self._lock:
             self._active_runs.discard(tid)
 
+    def _recheck_record(self, verdict: Verdict, rec: FailureRecord) -> Verdict:
+        return _recheck(verdict, _lookup_item(self.store, rec.subject), rec)
+
     def _run_model_click(self, rec: FailureRecord, tid: str) -> dict[str, Any]:
         sig = signature_of(rec)
         previous = tstore.get(self.store, rec.failure)
@@ -254,9 +265,14 @@ class Triager:
             tstore.save_status(self.store, rec.failure, tid, sig, "running")
             outcome = tmodel.run_model(self.store, self.settings, rec, clicked=True, tokens=self.tokens)
             if outcome.ok and outcome.verdict is not None:
-                tstore.save_verdict(
+                origin_id = tstore.save_verdict(
                     self.store, rec.failure, tid, sig, "model", outcome.verdict,
                     triage_trace=outcome.triage_trace,
+                )
+                tsettings.clear_quota_reset(self.store, rec.failure)
+                tqueue.resolve_siblings(
+                    self.store, sig, origin_id, outcome.verdict,
+                    exclude_failure=rec.failure, recheck_fn=self._recheck_record,
                 )
                 saved = tstore.get(self.store, rec.failure)
                 assert saved is not None
@@ -299,3 +315,27 @@ class Triager:
             return self._run_model_click(rec, tid)
         finally:
             self._release(tid)
+
+    def tick(self, *, now: float | None = None) -> TickReport:
+        """Scan new failures, evaluate rules/cache immediately, revisit waiting_quota, and run bounded auto model jobs."""
+        return tauto.run_tick(
+            self,
+            now=now,
+            eligible_rules=eligible_for_rules,
+            eligible_auto=eligible_for_auto_model,
+            eval_fast=lambda rec, when: evaluate_fast(self.store, rec, now=when, save=True),
+            reuse_cached=lambda rec, sig, when: _reuse_cached(
+                self.store, rec, sig, _lookup_item(self.store, rec.subject), persist=True, now=when,
+            ),
+            sig_of=signature_of,
+            recheck_fn=self._recheck_record,
+        )
+
+    def run(self, interval: float = TICK_S) -> None:
+        """Dedicated single background thread loop for automatic error triage."""
+        while True:
+            time.sleep(interval)
+            try:
+                self.tick()
+            except Exception:  # a bad tick must not stop future ones
+                log.exception("background triage tick failed")

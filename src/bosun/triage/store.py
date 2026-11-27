@@ -356,22 +356,26 @@ def _failing_span_id(db: sqlite3.Connection, trace_id: str) -> str:
     return str(row["span_id"]) if row is not None else ""
 
 
+def record_from_row(db: sqlite3.Connection, row: sqlite3.Row) -> FailureRecord:
+    """Normalize one v_failures row into a FailureRecord using an existing DB connection."""
+    trace_id = str(row["trace_id"] or "")
+    error = redact.text(str(row["error"] or ""))
+    what, what_id, subject, status, command, output = _resolve_fallbacks(
+        db, str(row["what"]), str(row["id"]), str(row["kind"] or ""), str(row["subject"] or ""),
+        str(row["status"] or ""), trace_id, _parse_argv(row["failed_command"]),
+        redact.text(str(row["failed_output"] or "")), error,
+    )
+    return FailureRecord(
+        failure=f"{what}:{what_id}", what=what, what_id=what_id, kind=str(row["kind"] or ""),
+        subject=subject, item_source=_item_source(subject), status=status, ts=float(row["ts"] or 0.0),
+        actor=str(row["actor"] or ""), trace_id=trace_id, error=error, command=command,
+        exit_code=int(row["failed_exit"]) if row["failed_exit"] is not None else None,
+        output=output, span_id=_failing_span_id(db, trace_id),
+    )
+
+
 def load_failure(store: Store, trace_id: str) -> FailureRecord | None:
     """Load and normalize one failure from v_failures by trace_id."""
     with store._tx() as db:
         row = db.execute("SELECT * FROM v_failures WHERE trace_id = ? LIMIT 1", (trace_id,)).fetchone()
-        if row is None:
-            return None
-        error = redact.text(str(row["error"] or ""))
-        what, what_id, subject, status, command, output = _resolve_fallbacks(
-            db, str(row["what"]), str(row["id"]), str(row["kind"] or ""), str(row["subject"] or ""),
-            str(row["status"] or ""), trace_id, _parse_argv(row["failed_command"]),
-            redact.text(str(row["failed_output"] or "")), error,
-        )
-        return FailureRecord(
-            failure=f"{what}:{what_id}", what=what, what_id=what_id, kind=str(row["kind"] or ""),
-            subject=subject, item_source=_item_source(subject), status=status, ts=float(row["ts"] or 0.0),
-            actor=str(row["actor"] or ""), trace_id=trace_id, error=error, command=command,
-            exit_code=int(row["failed_exit"]) if row["failed_exit"] is not None else None,
-            output=output, span_id=_failing_span_id(db, trace_id),
-        )
+        return None if row is None else record_from_row(db, row)
