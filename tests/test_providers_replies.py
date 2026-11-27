@@ -135,3 +135,46 @@ def test_every_parser_handles_malformed_and_hostile_input_without_raising(provid
         for rc in (0, 1, 124, 127):
             rep = replies.parse(provider, proc.Result((provider,), rc, raw, ""), at=100.0)
             assert rep.outcome != "ok" and rep.usage.input_tokens >= 0 and rep.usage.output_tokens >= 0
+
+
+# --- review fixes ------------------------------------------------------------------------------------------------
+
+
+def test_a_fenced_answer_that_mentions_a_limit_is_an_answer_not_a_limit():
+    fenced = "```json\n" + json.dumps({**GOOD, "rationale": "Upgrade to Pro; you hit your weekly limit"}) + "\n```"
+    rep = replies.parse("gemini", proc.Result(("gemini",), 0, json.dumps({"response": fenced}), ""), at=1000.0)
+    assert rep.outcome == "ok" and rep.readings == ()
+
+
+def test_huge_numbers_are_clamped_so_they_can_be_stored():
+    big = 10 ** 30
+    gem = {"response": json.dumps(GOOD), "stats": {"models": {"g": {"tokens": {"prompt": big, "candidates": big}}}}}
+    rep = replies.parse("gemini", proc.Result(("gemini",), 0, json.dumps(gem), ""), at=1.0)
+    assert rep.outcome == "ok" and rep.usage.input_tokens <= replies.MAX_COUNT
+    env = _claude_envelope(num_turns=big)
+    rep = replies.parse("claude", proc.Result(("claude",), 0, json.dumps(env), ""), at=1.0)
+    assert rep.turns is None or rep.turns <= replies.MAX_COUNT
+
+
+@pytest.mark.parametrize("provider,lines", [
+    ("codex", [{"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(GOOD)}},
+               {"type": "turn.failed", "error": {"code": 5}}]),
+    ("muse", [{"type": "assistant", "text": json.dumps(GOOD)}, {"type": "error"}]),
+])
+def test_an_error_event_with_no_message_is_never_ok(provider, lines):
+    out = "\n".join(json.dumps(x) for x in lines)
+    assert replies.parse(provider, proc.Result((provider,), 0, out, ""), at=1.0).outcome != "ok"
+
+
+def test_antigravity_output_that_cannot_be_read_in_full_is_refused():
+    huge = json.dumps({"type": "tool_result", "content": "x" * (replies.MAX_LINE_CHARS + 10)})
+    tail = json.dumps({"type": "result", "result": json.dumps(GOOD)})
+    rep = replies.parse("antigravity", proc.Result(("agy",), 0, f"{huge}\n{tail}", ""), at=1.0)
+    assert rep.outcome == "error"
+
+
+def test_ids_and_model_names_from_a_reply_are_short_plain_text():
+    env = _claude_envelope(session_id="s" * 5000 + "\x1b[31m")
+    env["modelUsage"] = {("m" * 5000): {"inputTokens": 1, "outputTokens": 1}}
+    rep = replies.parse("claude", proc.Result(("claude",), 0, json.dumps(env), ""), at=1.0)
+    assert rep.outcome == "ok" and rep.session_id == "" and all(len(k) <= 128 for k in rep.usage.models)

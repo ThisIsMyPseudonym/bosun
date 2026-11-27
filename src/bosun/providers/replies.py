@@ -8,18 +8,15 @@ reading that makes a login look like it has more room.
 from __future__ import annotations
 
 import json
-import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from .. import llm, proc
-from . import limits, quota, windows
+from . import jsontext, limits, quota, windows
+from .jsontext import MAX_COUNT, MAX_LINE_CHARS, ident, strip_fence  # noqa: F401
 from .windows import Reading
-
-MAX_DOC_CHARS = 1 << 20  # 1 MiB cap before json.loads on a whole document
-MAX_LINE_CHARS = 1 << 18  # 256 KiB per JSONL line
 
 _AUTH_RE = re.compile(
     r"not logged in|please run /login|authentication required|unauthenticated|login required|"
@@ -44,55 +41,6 @@ class Reply:
     duration_ms: float | None = None
     api_ms: float | None = None
     turns: int | None = None
-
-
-def _opt_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    try:
-        f = float(value)
-    except OverflowError:
-        return None
-    return f if math.isfinite(f) else None
-
-
-def _nonneg_float(value: object) -> float:
-    f = _opt_float(value)
-    return f if f is not None and f >= 0 else 0.0
-
-
-def _nonneg_int(value: object) -> int:
-    return int(_nonneg_float(value))
-
-
-def _opt_int(value: object) -> int | None:
-    return None if isinstance(value, bool) or not isinstance(value, int) else value
-
-
-def _loads_dict(raw: str, limit: int = MAX_DOC_CHARS) -> dict[str, Any] | None:
-    text = raw.strip()
-    if not text or len(text) > limit or not text.startswith("{"):
-        return None
-    try:
-        parsed = json.loads(text)
-    except (ValueError, RecursionError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _iter_jsonl(raw: str) -> tuple[dict[str, Any], ...]:
-    return tuple(obj for line in raw.splitlines() if (obj := _loads_dict(line, MAX_LINE_CHARS)) is not None)
-
-
-def _is_json_text(text: str) -> bool:
-    stripped = text.strip()
-    if not stripped or len(stripped) > MAX_DOC_CHARS or stripped[0] not in "{[":
-        return False
-    try:
-        json.loads(stripped)
-        return True
-    except (ValueError, RecursionError):
-        return False
 
 
 def _fail(outcome: str, error: str, *, estimated: bool, usage: llm.Usage | None = None,
@@ -129,12 +77,12 @@ def _usage_dict(u: object) -> llm.Usage:
     if not isinstance(u, dict):
         return llm.Usage()
     return llm.Usage(
-        input_tokens=_nonneg_int(u.get("input_tokens") or u.get("prompt_tokens") or u.get("prompt")),
-        output_tokens=_nonneg_int(u.get("output_tokens") or u.get("completion_tokens") or u.get("candidates")),
-        cache_read_tokens=_nonneg_int(
+        input_tokens=jsontext.nonneg_int(u.get("input_tokens") or u.get("prompt_tokens") or u.get("prompt")),
+        output_tokens=jsontext.nonneg_int(u.get("output_tokens") or u.get("completion_tokens") or u.get("candidates")),
+        cache_read_tokens=jsontext.nonneg_int(
             u.get("cached_tokens") or u.get("cached_input_tokens") or u.get("cache_read_input_tokens") or u.get("cached")),
-        cache_write_tokens=_nonneg_int(u.get("cache_creation_input_tokens")),
-        cost_usd=_nonneg_float(u.get("cost_usd")),
+        cache_write_tokens=jsontext.nonneg_int(u.get("cache_creation_input_tokens")),
+        cost_usd=jsontext.nonneg_float(u.get("cost_usd")),
     )
 
 
@@ -144,7 +92,7 @@ def _ok_or_limit(text: str, payload: Any, at: float, *, estimated: bool, usage: 
     if payload is None and not text.strip():
         return _fail("empty", "empty reply", estimated=estimated, usage=usage, readings=readings,
                      model=model, session_id=sid, duration_ms=duration_ms, api_ms=api_ms, turns=turns)
-    if (payload is None or isinstance(payload, str)) and not _is_json_text(text):
+    if (payload is None or isinstance(payload, str)) and not jsontext.is_json_text(text):
         if (lim := limits.limit_reading(text, at)) is not None:
             return _fail("usage_limit", text, estimated=estimated, usage=usage, readings=(*readings, lim),
                          model=model, session_id=sid, duration_ms=duration_ms, api_ms=api_ms, turns=turns)
@@ -155,7 +103,7 @@ def _ok_or_limit(text: str, payload: Any, at: float, *, estimated: bool, usage: 
 def _err_text(err: object, fallback: str = "") -> tuple[str, int | None]:
     if isinstance(err, dict):
         msg = str(err.get("message") or err.get("type") or "")
-        return msg or fallback, _opt_int(err.get("code"))
+        return msg or fallback, jsontext.opt_int(err.get("code"))
     return (str(err) if err else fallback), None
 
 
@@ -163,11 +111,11 @@ def _err_text(err: object, fallback: str = "") -> tuple[str, int | None]:
 
 
 def _claude_envelope(stdout: str) -> dict[str, Any] | None:
-    if (single := _loads_dict(stdout)) is not None:
+    if (single := jsontext.loads_dict(stdout)) is not None:
         return single
     last_result: dict[str, Any] | None = None
     fallback: dict[str, Any] | None = None
-    for obj in _iter_jsonl(stdout):
+    for obj in jsontext.iter_jsonl(stdout):
         if obj.get("type") == "result":
             last_result = obj
         elif "is_error" in obj or "subtype" in obj:
@@ -176,15 +124,15 @@ def _claude_envelope(stdout: str) -> dict[str, Any] | None:
 
 
 def _claude_usage(envelope: dict[str, Any]) -> llm.Usage:
-    u = llm.Usage(cost_usd=_nonneg_float(envelope.get("total_cost_usd")))
+    u = llm.Usage(cost_usd=jsontext.nonneg_float(envelope.get("total_cost_usd")))
     per_model = envelope.get("modelUsage")
     if isinstance(per_model, dict) and per_model:
         for name, m in per_model.items():
-            if not isinstance(name, str) or not isinstance(m, dict):
+            if not (name := ident(name)) or not isinstance(m, dict):
                 continue
-            inp, out = _nonneg_int(m.get("inputTokens")), _nonneg_int(m.get("outputTokens"))
-            cr, cw = _nonneg_int(m.get("cacheReadInputTokens")), _nonneg_int(m.get("cacheCreationInputTokens"))
-            cost = _nonneg_float(m.get("costUSD"))
+            inp, out = jsontext.nonneg_int(m.get("inputTokens")), jsontext.nonneg_int(m.get("outputTokens"))
+            cr, cw = jsontext.nonneg_int(m.get("cacheReadInputTokens")), jsontext.nonneg_int(m.get("cacheCreationInputTokens"))
+            cost = jsontext.nonneg_float(m.get("costUSD"))
             u.models[name] = {"input": inp, "output": out, "cache_read": cr, "cache_write": cw, "cost_usd": cost}
             u.input_tokens += inp
             u.output_tokens += out
@@ -193,10 +141,10 @@ def _claude_usage(envelope: dict[str, Any]) -> llm.Usage:
         if not u.cost_usd:
             u.cost_usd = sum(r["cost_usd"] for r in u.models.values())
     elif isinstance(top := envelope.get("usage"), dict):
-        u.input_tokens = _nonneg_int(top.get("input_tokens"))
-        u.output_tokens = _nonneg_int(top.get("output_tokens"))
-        u.cache_read_tokens = _nonneg_int(top.get("cache_read_input_tokens"))
-        u.cache_write_tokens = _nonneg_int(top.get("cache_creation_input_tokens"))
+        u.input_tokens = jsontext.nonneg_int(top.get("input_tokens"))
+        u.output_tokens = jsontext.nonneg_int(top.get("output_tokens"))
+        u.cache_read_tokens = jsontext.nonneg_int(top.get("cache_read_input_tokens"))
+        u.cache_write_tokens = jsontext.nonneg_int(top.get("cache_creation_input_tokens"))
     return u
 
 
@@ -210,10 +158,10 @@ def _claude(result: proc.Result, at: float) -> Reply:
     env = _claude_envelope(stdout)
     usage = _claude_usage(env) if env is not None else llm.Usage()
     model = next((k for k in usage.models if k), "")
-    sid = str(env.get("session_id") or "") if env is not None else ""
-    dur = _opt_float(env.get("duration_ms")) if env is not None else None
-    api_ms = _opt_float(env.get("duration_api_ms")) if env is not None else None
-    turns = _opt_int(env.get("num_turns")) if env is not None else None
+    sid = ident(env.get("session_id")) if env is not None else ""
+    dur = jsontext.opt_float(env.get("duration_ms")) if env is not None else None
+    api_ms = jsontext.opt_float(env.get("duration_api_ms")) if env is not None else None
+    turns = jsontext.opt_int(env.get("num_turns")) if env is not None else None
     meta: dict[str, Any] = dict(estimated=False, usage=usage, model=model, session_id=sid,
                                 duration_ms=dur, api_ms=api_ms, turns=turns)
     combined = f"{stdout}\n{stderr}".strip()
@@ -246,22 +194,23 @@ def _codex(result: proc.Result, at: float) -> Reply:
     stdout, stderr = result.stdout or "", result.stderr or ""
     if result.ok and not stdout.strip():
         return _fail("empty", "empty reply", estimated=est, readings=readings)
-    text, err_msg, sid, usage = "", "", "", llm.Usage()
-    for ev in _iter_jsonl(stdout):
+    text, err_msg, sid, usage, saw_error = "", "", "", llm.Usage(), False
+    for ev in jsontext.iter_jsonl(stdout):
         kind = ev.get("type")
-        if kind == "thread.started" and isinstance(ev.get("thread_id"), str):
-            sid = ev["thread_id"]
+        if kind == "thread.started" and ident(ev.get("thread_id")):
+            sid = ident(ev["thread_id"])
         elif kind == "item.completed" and isinstance(item := ev.get("item"), dict) and item.get("type") == "agent_message":
             if isinstance(item.get("text"), str):
                 text = item["text"]
         elif kind == "turn.completed" and isinstance(ev.get("usage"), dict):
             usage = _usage_dict(ev["usage"])
         elif kind in ("turn.failed", "error"):
+            saw_error = True
             msg, _ = _err_text(ev.get("error"), str(ev.get("message") or ""))
             err_msg = msg.strip() or err_msg
-    if err_msg or not result.ok:
-        return _classify_error_text(err_msg or stderr or stdout, result.returncode, at,
-                                    estimated=est, usage=usage, readings=readings, session_id=sid)
+    if saw_error or not result.ok:
+        return _classify_error_text(err_msg or stderr or "Codex reported an error", result.returncode,
+                                    at, estimated=est, usage=usage, readings=readings, session_id=sid)
     return _ok_or_limit(text, None, at, estimated=est, usage=usage, readings=readings, sid=sid)
 
 
@@ -271,15 +220,15 @@ def _gemini(result: proc.Result, at: float) -> Reply:
     stdout, stderr = result.stdout or "", result.stderr or ""
     if result.ok and not stdout.strip():
         return _fail("empty", "empty reply", estimated=True)
-    obj = _loads_dict(stdout)
+    obj = jsontext.loads_dict(stdout)
     if obj is None:
         return _classify_error_text(stderr or stdout, result.returncode, at, estimated=True)
-    sid, usage, model = str(obj.get("session_id") or ""), llm.Usage(), ""
+    sid, usage, model = ident(obj.get("session_id")), llm.Usage(), ""
     stats = obj.get("stats")
     models = stats.get("models") if isinstance(stats, dict) else None
     if isinstance(models, dict):
         for name, info in models.items():
-            if not isinstance(name, str) or not isinstance(info, dict):
+            if not (name := ident(name)) or not isinstance(info, dict):
                 continue
             model = model or name
             if isinstance(tok := info.get("tokens"), dict):
@@ -302,10 +251,10 @@ def _grok(result: proc.Result, at: float) -> Reply:
     stdout, stderr = result.stdout or "", result.stderr or ""
     if result.ok and not stdout.strip():
         return _fail("empty", "empty reply", estimated=True)
-    obj = _loads_dict(stdout)
+    obj = jsontext.loads_dict(stdout)
     if obj is None:
         return _classify_error_text(stderr or stdout, result.returncode, at, estimated=True)
-    usage, model, sid = _usage_dict(obj.get("usage")), str(obj.get("model") or ""), str(obj.get("session_id") or "")
+    usage, model, sid = _usage_dict(obj.get("usage")), ident(obj.get("model")), ident(obj.get("session_id"))
     if obj.get("is_error") or obj.get("error") or not result.ok:
         msg, code = _err_text(obj.get("error"), str(obj.get("result") or stderr or stdout))
         return _classify_error_text(msg, result.returncode, at, estimated=True, usage=usage, model=model, session_id=sid, code=code)
@@ -343,16 +292,19 @@ def _jsonl_stream(result: proc.Result, at: float, *, refuse_tools: bool = False)
     stdout, stderr = result.stdout or "", result.stderr or ""
     if result.ok and not stdout.strip():
         return _fail("empty", "empty reply", estimated=True)
-    text, structured, err_msg, model, sid, usage = "", None, "", "", "", llm.Usage()
-    for ev in _iter_jsonl(stdout):
+    if refuse_tools and jsontext.unread_lines(stdout):  # a line it can't read could hide a tool step
+        return _fail("error", "Antigravity output could not be read in full", estimated=True)
+    text, structured, err_msg, model, sid, usage, saw_error = "", None, "", "", "", llm.Usage(), False
+    for ev in jsontext.iter_jsonl(stdout):
         if refuse_tools and _has_tool_step(ev):
             return _fail("error", "Antigravity used a tool", estimated=True, usage=usage, model=model, session_id=sid)
         kind = str(ev.get("event") or ev.get("type") or "")
-        model = ev["model"] if isinstance(ev.get("model"), str) and ev["model"] else model
-        sid = ev["session_id"] if isinstance(ev.get("session_id"), str) and ev["session_id"] else sid
+        model = ident(ev.get("model")) or model
+        sid = ident(ev.get("session_id")) or sid
         if isinstance(ev.get("usage"), dict):
             usage = _usage_dict(ev["usage"])
         if kind == "error" or ev.get("is_error") or ev.get("error"):
+            saw_error = True
             msg, _ = _err_text(ev.get("error"), str(ev.get("message") or ""))
             err_msg = msg or err_msg
         elif kind in ("assistant", "message", "final") and isinstance(message := ev.get("message"), dict):
@@ -363,8 +315,8 @@ def _jsonl_stream(result: proc.Result, at: float, *, refuse_tools: bool = False)
             structured = ev["structured_output"] if ev.get("structured_output") is not None else structured
             if isinstance(rtext := ev.get("result"), str):
                 text = rtext
-    if err_msg or not result.ok:
-        return _classify_error_text(err_msg or stderr or stdout, result.returncode, at,
+    if saw_error or not result.ok:
+        return _classify_error_text(err_msg or stderr or "the CLI reported an error", result.returncode, at,
                                     estimated=True, usage=usage, model=model, session_id=sid)
     return _ok_or_limit(text or (json.dumps(structured) if structured is not None else ""),
                         structured, at, estimated=True, usage=usage, model=model, sid=sid)

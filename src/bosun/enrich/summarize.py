@@ -123,9 +123,13 @@ class Summarizer:
         """The small model reads routine release notes as well as the large one (measured: same lane on 8 of 8).
         The large one is kept for what a wrong answer would cost: an upgrade that fixes a serious or exploited
         vulnerability, and a major version jump, where "drop-in or not" decides the lane."""
+        return self.model if self.decides(item) else self.routine_model
+
+    @staticmethod
+    def decides(item: Item) -> bool:
+        """Whether a wrong answer here would cost something: such summaries run on each CLI's strong model."""
         serious = any(v.kev or (v.cvss or 0) >= HIGH_RISK_CVSS for v in item.vulns_fixed)
-        major = jump(item.installed, item.available or item.installed) == "major" and not kinds.browser(item)
-        return self.model if serious or major else self.routine_model
+        return serious or (jump(item.installed, item.available or item.installed) == "major" and not kinds.browser(item))
 
     def summarize(self, item: Item, notes: str) -> Summary:
         cached = self.cached(item)
@@ -161,9 +165,8 @@ class Summarizer:
                 f"Known vulnerabilities fixed by this upgrade:\n{vulns}\n\n"
                 f"<release_notes{cut}>\n{notes or '(no release notes found)'}\n</release_notes>")
 
-    def _ask(self, item: Item, notes: str, model: str, *, pin: accounts.Login | None = None,
-             **attrs: Any) -> ai_run.Outcome:
-        tier: Literal["light", "strong"] = "strong" if model == self.model else "light"
+    def _ask(self, item: Item, notes: str, model: str, tier: Literal["light", "strong"], *,
+             pin: accounts.Login | None = None, **attrs: Any) -> ai_run.Outcome:
         return ai_run.run(
             self.store, "summarize", prompt=self.prompt(item, notes), system=SYSTEM, schema=Assessment,
             tier=tier, item_key=item.key, pin=pin, models={"claude": model}, logins=self._logins(),
@@ -188,14 +191,16 @@ class Summarizer:
             llm.record("summarize", outcome="budget", item_key=item.key, error=reason, source=item.source.value)
             return None
         model = self.model_for(item)
-        out = self._ask(item, notes, model)
+        strong = self.decides(item)
+        out = self._ask(item, notes, model, "strong" if strong else "light")
         # The small model's answer stands unless it failed its schema or says "migration needed", which moves the
         # item out of the drop-in lanes: the large model confirms on the same login.
         last_outcome = out.attempts[-1].outcome if out.attempts else ""
         doubt = ("schema_error" if not out.ok and last_outcome == "schema_error"
                  else "says migration needed" if out.ok and out.payload.migration_effort == "high" else "")
-        if model != self.model and doubt and out.login is not None and not llm.over_budget(self.store, "summarize"):
-            out = self._ask(item, notes, self.model, pin=out.login, escalated_because=doubt)
+        if not strong and doubt and out.login is not None and not llm.over_budget(self.store, "summarize"):
+            confirmed = self._ask(item, notes, self.model, "strong", pin=out.login, escalated_because=doubt)
+            out = confirmed if confirmed.ok or not out.ok else out  # a failed confirmation keeps a valid answer
         if not out.ok or out.login is None:
             self._record_problem(out)
             log.warning("AI summary failed for %s: %s", item.key, out.reason)

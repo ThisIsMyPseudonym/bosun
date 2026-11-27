@@ -11,7 +11,6 @@ Every summary and "Will this break?" call enters here:
 
 from __future__ import annotations
 
-import re
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -28,8 +27,8 @@ if TYPE_CHECKING:
     from ..store import Store
 
 COOLDOWNS = limits.Cooldowns()
-POOL_OUT = frozenset({"usage_limit", "rate_limit", "not_logged_in"})
-_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n(.*?)\n\s*```\s*$", re.S | re.I)
+# Outcomes that keep a login out for longer than a refresh. A rate limit is a 30 s cool-down: it never counts.
+LASTING_OUT = frozenset({"usage_limit", "not_logged_in"})
 
 
 @dataclass(frozen=True)
@@ -49,15 +48,10 @@ def model_tag(provider: str, model: str) -> str:
     return f"{prefix}:{model}" if model else prefix
 
 
-def _strip_fence(text: str) -> str:
-    m = _FENCE_RE.match(text)
-    return m.group(1) if m else text
-
-
 def _validate(schema: type[BaseModel], payload: Any) -> tuple[BaseModel | None, str]:
     try:
         if isinstance(payload, str):
-            return schema.model_validate_json(_strip_fence(payload)), ""
+            return schema.model_validate_json(replies.strip_fence(payload)), ""
         return schema.model_validate(payload), ""
     except (ValidationError, ValueError, TypeError) as exc:
         return None, str(exc)[:300]
@@ -179,6 +173,16 @@ def _reason(done: router.Attempted, route: router.Route, store: Store, cd: limit
     return "no AI CLI installed"
 
 
+def _exhausted(route: router.Route, done: router.Attempted) -> bool:
+    """Whether no login can answer for the rest of a refresh: none was a candidate, or every one was tried and is
+    out for longer than a cool-down. A cool-down skip or a rate limit is passing, so it never counts."""
+    if any(s.reason == "cooldown" for s in route.skipped):
+        return False
+    if not route.candidates:
+        return True
+    return len(done.attempts) == len(route.candidates) and all(a.outcome in LASTING_OUT for a in done.attempts)
+
+
 def run(store: Store, job: str, *, prompt: str, system: str, schema: type[BaseModel],
         tier: Literal["light", "strong"], item_key: str = "", project: str = "", timeout: float = 240.0,
         clicked: bool = False, pin: accounts.Login | None = None, models: Mapping[str, str] | None = None,
@@ -203,8 +207,6 @@ def run(store: Store, job: str, *, prompt: str, system: str, schema: type[BaseMo
     if done.ok and done.result is not None and done.candidate is not None:
         validated, chosen_model = done.result.value
         return Outcome(True, validated, done.candidate.login, chosen_model, done.attempts, "", exhausted=False)
-    exhausted = not route.candidates or (
-        len(done.attempts) == len(route.candidates) and all(a.outcome in POOL_OUT for a in done.attempts)
-    )
+    exhausted = pin is None and _exhausted(route, done)
     return Outcome(False, None, done.candidate.login if done.candidate else None, "", done.attempts,
                    _reason(done, route, store, cd, now(), labels), exhausted=exhausted)

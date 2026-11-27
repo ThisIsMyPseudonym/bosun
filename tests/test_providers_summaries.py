@@ -132,3 +132,44 @@ def test_with_every_login_out_summaries_use_built_in_rules_and_say_so_once(store
         assert calls_after_first == 3 and sm2.problem and not sm2.enabled
         assert sm2.summarize(b, "notes").generated_by == "heuristic"
         assert len(fake.calls) == calls_after_first  # no CLI spawned for the second item
+
+
+RATE_LIMITED = json.dumps({"type": "result", "subtype": "error", "is_error": True, "result": "429 Too Many Requests"})
+
+
+def test_one_rate_limit_does_not_stop_summaries_for_the_rest_of_the_refresh(store, fake, monkeypatch):
+    from bosun import proc
+    from bosun.providers import accounts
+
+    claude_only = (accounts.default("claude", "/bin/claude"),)
+    monkeypatch.setattr(accounts, "logins", lambda *a, **k: claude_only)
+    fake.reply("claude", proc.Result(("claude",), 0, RATE_LIMITED, ""), fake.claude_ok(GOOD))
+    sm = Summarizer(store, "sonnet", store.path.parent / "sb", routine_model="haiku")
+    first = sm.summarize(Item(Source.BREW, "a", "a", "1.0", "1.1"), "notes")
+    assert first.generated_by == "heuristic" and not sm.problem and sm.enabled
+    from bosun.providers import limits, run as ai_run
+
+    blocked = sm.summarize(Item(Source.BREW, "c", "c", "1.0", "1.1"), "notes")  # still cooling down: skipped
+    assert blocked.generated_by == "heuristic" and not sm.problem and len(fake.calls) == 1
+    monkeypatch.setattr(ai_run, "COOLDOWNS", limits.Cooldowns())  # the 30 s pass
+    second = sm.summarize(Item(Source.BREW, "b", "b", "1.0", "1.1"), "notes")
+    assert second.generated_by.startswith("claude-code:")
+
+
+def test_a_failed_confirmation_keeps_the_small_models_valid_answer_and_does_not_latch(store, fake):
+    from bosun import proc
+
+    store.set_setting(router.SETTING, json.dumps({"order": ["codex", "claude"]}))
+    high = {**GOOD, "migration_effort": "high", "headline": "small"}
+    fake.reply("codex", fake.codex_ok(high), proc.Result(("codex",), 1, "", "429 Too Many Requests"))
+    sm = Summarizer(store, "sonnet", store.path.parent / "sb", routine_model="haiku")
+    out = sm.summarize(Item(Source.BREW, "fd", "fd", "10.3.0", "10.4.0"), "migration notes")
+    assert out.headline == "small" and out.generated_by.startswith("codex:") and not sm.problem
+
+
+def test_routine_notes_on_another_cli_use_its_light_model(store, fake):
+    store.set_setting(router.SETTING, json.dumps({"order": ["codex"]}))
+    fake.reply("codex", fake.codex_ok(GOOD))
+    sm = Summarizer(store, "sonnet", store.path.parent / "sb")  # no BOSUN_MODEL_SUMMARIZE: one Claude model
+    out = sm.summarize(Item(Source.BREW, "fd", "fd", "10.3.0", "10.3.1"), "bug fixes")
+    assert out.generated_by == "codex:gpt-5.6-luna"
