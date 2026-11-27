@@ -114,3 +114,24 @@ def test_antigravity_refuses_a_reply_that_used_a_tool():
     ok = replies.parse("antigravity", proc.Result(("agy",), 0, ok_raw, ""), at=100.0)
     assert ok.outcome == "ok" and ok.estimated and ok.readings == () and '"headline":"h"' in ok.text
     assert (ok.usage.input_tokens, ok.usage.output_tokens) == (80, 30) and ok.model == "gemini-3.8-flash"
+
+
+def test_muse_jsonl_gives_its_final_message_marked_estimated():
+    raw = (FIX / "muse/handmade/ok-assessment.jsonl").read_text()
+    rep = replies.parse("muse", proc.Result(("muse",), 0, raw, ""), at=100.0)
+    assert rep.outcome == "ok" and rep.estimated and rep.readings == () and '"headline":"h"' in rep.text
+    assert (rep.usage.input_tokens, rep.usage.output_tokens) == (70, 28)
+    assert rep.model == "meta-llama-4" and rep.session_id == "muse-1"
+    err = json.dumps({"type": "error", "message": "Usage limit reached. Resets in 30m"})
+    lim = replies.parse("muse", proc.Result(("muse",), 1, err, ""), at=100.0)
+    assert lim.outcome == "usage_limit" and lim.readings[0].status == "rejected"
+    assert replies.parse("muse", proc.Result(("muse",), 0, "", ""), at=100.0).outcome == "empty"
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "grok", "antigravity", "muse"])
+def test_every_parser_handles_malformed_and_hostile_input_without_raising(provider):
+    for raw in ("", "   ", "{bad", "[]", "[" * 10000, '{"usage":{"input_tokens":"NaN","output_tokens":-5}}',
+                '{"error":123,"is_error":true}', '{"type":"result","result":null}'):
+        for rc in (0, 1, 124, 127):
+            rep = replies.parse(provider, proc.Result((provider,), rc, raw, ""), at=100.0)
+            assert rep.outcome != "ok" and rep.usage.input_tokens >= 0 and rep.usage.output_tokens >= 0
