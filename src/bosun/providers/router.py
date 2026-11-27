@@ -12,7 +12,6 @@ import math
 import statistics
 from collections.abc import Callable, Mapping, Set as AbstractSet
 from dataclasses import dataclass
-from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -158,54 +157,47 @@ def _capability_detail(job: catalog.Job, provider: str) -> str:
     return f"{spec.label} is not locked down for untrusted input"
 
 
-def _window_label(window: str) -> str:
-    if window == "five_hour":
-        return "5-hour limit"
-    if window == "seven_day":
-        return "weekly limit"
-    if window.startswith("seven_day_"):
-        return f"weekly ({window.removeprefix('seven_day_')}) limit"
-    if window == "one_day":
-        return "daily limit"
-    if window.startswith("quota:"):
-        return f"{window.removeprefix('quota:')} quota"
-    return "usage limit" if window == "limit" else f"{window} limit"
-
-
-def _format_reset(resets_at: float) -> str:
-    return datetime.fromtimestamp(resets_at).astimezone().strftime("%a %I:%M %p").replace(" 0", " ")
-
-
 def _limit_skip(bucket: str, curr: tuple[windows.Reading, ...]) -> Skip | None:
     rejected = [r for r in curr if r.status == "rejected"]
     if not rejected:
         return None
     scored = [(windows.valid_reset(r.window, r.resets_at, r.at), r) for r in rejected]
     resets, worst = max(scored, key=lambda pair: (-1.0 if pair[0] is None else pair[0], pair[1].at))
-    label = _window_label(worst.window)
-    detail = f"{label} reached, resets {_format_reset(resets)}" if resets is not None else f"{label} reached"
+    label = ledger.window_label(worst.window)
+    detail = f"{label} reached, resets {ledger.format_reset(resets)}" if resets is not None else f"{label} reached"
     return Skip(bucket, "limit", detail, hit=quota.Hit(worst.window, 1.0, resets))
 
 
 def _cooldown_skip(bucket: str, cooldowns: AbstractSet[str] | Mapping[str, float], now: float) -> Skip | None:
     if isinstance(cooldowns, Mapping):
         until = cooldowns.get(bucket)
-        if until is not None and math.isfinite(until) and until > now:
-            secs = max(1, round(until - now))
-            return Skip(bucket, "cooldown", f"rate limited, try again in {secs} s")
-        return None
+        if until is None or until <= now:  # NaN compares false: an unreadable cool-down keeps the login out
+            return None
+        if not math.isfinite(until):
+            return Skip(bucket, "cooldown", "rate limited, cooling down")
+        return Skip(bucket, "cooldown", f"rate limited, try again in {max(1, round(until - now))} s")
     if bucket in cooldowns:
         return Skip(bucket, "cooldown", "rate limited, cooling down")
     return None
 
 
+def _line_hit(bucket: str, curr: tuple[windows.Reading, ...], ctx: Context) -> quota.Hit | None:
+    """The worst hit, holding each window to the line unless an override lifts that window (or every window)."""
+    active = [o for o in ctx.overrides if quota.lifted(o, bucket, ctx.now)]
+    every = any(o.window is None for o in active)
+    names = frozenset(o.window for o in active if o.window is not None)
+    freed = tuple(r for r in curr if every or r.window in names)
+    held = tuple(r for r in curr if not (every or r.window in names))
+    hits = [h for h in (quota.line_hit(held, ctx.now), quota.line_hit(freed, ctx.now, 1.0)) if h is not None]
+    return max(hits, key=lambda h: h.used) if hits else None
+
+
 def _line_skip(bucket: str, curr: tuple[windows.Reading, ...], ctx: Context) -> Skip | None:
-    stop = quota.stop_at(bucket, ctx.overrides, ctx.now)
-    hit = quota.line_hit(curr, ctx.now, stop)
+    hit = _line_hit(bucket, curr, ctx)
     if hit is None:
         return None
-    label, pct = _window_label(hit.window), f"{round(hit.used * 100)}%"
-    detail = f"{label} at {pct}, resets {_format_reset(hit.resets_at)}" if hit.resets_at is not None else f"{label} at {pct}"
+    label, pct = ledger.window_label(hit.window), f"{round(hit.used * 100)}%"
+    detail = f"{label} at {pct}, resets {ledger.format_reset(hit.resets_at)}" if hit.resets_at is not None else f"{label} at {pct}"
     return Skip(bucket, "line", detail, hit=hit)
 
 
@@ -305,14 +297,21 @@ def _balance_order(candidates: list[Candidate]) -> list[Candidate]:
     owner's order (Python's sort is stable)."""
     known = [c.pace for c in candidates if c.pace is not None and math.isfinite(c.pace)]
     fallback = statistics.median(known) if known else UNKNOWN_PACE
-    return sorted(candidates, key=lambda c: fallback if c.pace is None else c.pace)
+    def key(c: Candidate) -> float:
+        if c.pace is None:
+            return fallback
+        return math.inf if math.isnan(c.pace) else c.pace  # an unreadable pace never ranks first
+
+    return sorted(candidates, key=key)
 
 
 def _pinned_bucket(job: str, rs: RoutingSettings) -> str | None:
-    if job in rs.pins:
-        return rs.pins[job]
-    jm = rs.job_modes.get(job, "")
-    return jm.removeprefix("pinned:") if jm.startswith("pinned:") else None
+    """A per-job mode is the owner's explicit choice for that job, so it wins over a pin (including the default
+    `fix` pin): `pinned:<bucket>` pins there, `default` or `balance` unpins."""
+    jm = rs.job_modes.get(job)
+    if jm is not None:
+        return jm.removeprefix("pinned:") if jm.startswith("pinned:") else None
+    return rs.pins.get(job)
 
 
 def _job_mode(job: str, rs: RoutingSettings) -> str:

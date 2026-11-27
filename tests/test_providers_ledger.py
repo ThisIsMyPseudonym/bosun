@@ -279,3 +279,16 @@ def test_notice_delivery_respects_notify_setting_and_read_only_store(tmp_path, m
         assert len(ledger.notices(ro, now=NOW)) == 2
         with pytest.raises(RuntimeError, match="read-only"):
             ledger.notice_skips(ro, (hit2,), now=NOW)
+
+
+def test_a_reset_that_drifts_by_seconds_is_the_same_window_and_notifies_once(store, monkeypatch):
+    sent: list[str] = []
+    monkeypatch.setattr(ledger, "deliver", lambda store, title, body: sent.append(title) or True)
+    # Codex gives "resets in N s": each reading's reset lands a few seconds apart
+    for i, drift in enumerate((0.0, 7.4, 13.9, 61.0)):
+        hit = router.Skip("codex", "line", "", hit=quota.Hit("five_hour", 0.8, NOW + 3600 + drift))
+        ledger.notice_skips(store, (hit,), now=NOW + i * 60)
+    assert len(sent) == 1
+    # Five hours on, a new window notifies again
+    nxt = router.Skip("codex", "line", "", hit=quota.Hit("five_hour", 0.8, NOW + 3600 + 5 * 3600))
+    assert ledger.notice_skips(store, (nxt,), now=NOW + 3700) == 1

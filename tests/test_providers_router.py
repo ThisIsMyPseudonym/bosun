@@ -170,16 +170,57 @@ def test_background_work_skips_a_login_at_75_percent_and_a_click_does_not():
 
 def test_the_owners_override_lets_background_work_past_the_line_until_the_reset():
     readings = {"claude": (R("five_hour", "allowed", 0.80, NOW + 600, NOW),)}
-    override = (quota.Override("claude", NOW + 600),)
+    override = (quota.Override("claude", NOW + 600, "five_hour"),)
     lifted = router.plan("summarize", ctx(readings=readings, overrides=override, now=NOW))
     assert lifted.candidates[0].bucket == "claude"
-    expired = router.plan("summarize", ctx(readings=readings, overrides=override, now=NOW + 599))
-    assert expired.candidates[0].bucket == "claude"
-    gone = router.plan("summarize", ctx(readings={"claude": (R("five_hour", "allowed", 0.80, NOW + 1200, NOW),)},
-                                        overrides=override, now=NOW + 600))
-    assert "claude" not in [c.bucket for c in gone.candidates]
+    still = router.plan("summarize", ctx(readings=readings, overrides=override, now=NOW + 599))
+    assert still.candidates[0].bucket == "claude"
+    # The same reading, at and after the override's end: the line is back
+    later = {"claude": (R("five_hour", "allowed", 0.80, NOW + 1200, NOW + 590),)}
+    for when in (NOW + 600, NOW + 601):
+        ended = router.plan("summarize", ctx(readings=later, overrides=override, now=when))
+        assert "claude" not in [c.bucket for c in ended.candidates]
     forged = router.plan("summarize", ctx(readings=readings, overrides=(quota.Override("claude", NOW + 1e9),), now=NOW))
     assert "claude" not in [c.bucket for c in forged.candidates]
+
+
+def test_an_override_lifts_only_its_own_window_and_never_past_that_windows_horizon():
+    weekly_over = (quota.Override("claude", NOW + 3 * 86400, "seven_day"),)
+    both = {"claude": (R("seven_day", "allowed", 0.80, NOW + 3 * 86400, NOW),
+                       R("five_hour", "allowed", 0.90, NOW + 3600, NOW))}
+    route = router.plan("summarize", ctx(readings=both, overrides=weekly_over))
+    assert "claude" not in [c.bucket for c in route.candidates]
+    skip = next(s for s in route.skipped if s.bucket == "claude")
+    assert skip.reason == "line" and skip.hit is not None and skip.hit.window == "five_hour"
+    # A 5-hour override that claims to last 3 days is longer than the window could: it lifts nothing
+    long_five = (quota.Override("claude", NOW + 3 * 86400, "five_hour"),)
+    five = {"claude": (R("five_hour", "allowed", 0.90, NOW + 3600, NOW),)}
+    assert "claude" not in [c.bucket for c in router.plan("summarize", ctx(readings=five, overrides=long_five)).candidates]
+
+
+def test_a_cooldown_that_cannot_be_read_keeps_the_login_out():
+    for until in (float("inf"), float("nan")):
+        route = router.plan("summarize", ctx(cooldowns={"claude": until}))
+        assert "claude" not in [c.bucket for c in route.candidates]
+        assert next(s for s in route.skipped if s.bucket == "claude").reason == "cooldown"
+
+
+def test_a_nan_pace_never_ranks_first():
+    lg = {c: _login(c) for c in ("claude", "codex", "gemini")}
+    cands = [router.Candidate("claude", "claude", lg["claude"], float("nan")),
+             router.Candidate("codex", "codex", lg["codex"], 0.4),
+             router.Candidate("gemini", "gemini", lg["gemini"], None)]
+    ranked = [c.bucket for c in router._balance_order(cands)]
+    assert ranked[-1] == "claude" and ranked[0] == "codex"
+
+
+def test_a_per_job_mode_wins_over_a_pin():
+    rs = dataclasses.replace(router.RoutingSettings.default(), job_modes={"fix": "pinned:claude@work"})
+    route = router.plan("fix", ctx(settings=rs), clicked=True)
+    assert [c.bucket for c in route.candidates] == ["claude@work"] and route.mode == "pinned"
+    rs_bal = dataclasses.replace(router.RoutingSettings.default(), job_modes={"fix": "balance"})
+    bal = router.plan("fix", ctx(settings=rs_bal), clicked=True)
+    assert bal.mode == "balance" and [c.bucket for c in bal.candidates] == ["claude", "claude@work"]
 
 
 # --- Task 3.5: default mode ordering and fallback ----------------------------------------------------------------

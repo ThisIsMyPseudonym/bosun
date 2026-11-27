@@ -197,11 +197,14 @@ def test_routing_and_the_override_are_the_owners_alone(app, client, agent_client
     ledger.save(app.store, "claude", (windows.Reading("five_hour", "allowed", 0.82, reset, now),), now=now)
     ov = client.post("/api/ai/override", json={"bucket": "claude", "on": True}, headers=H)
     assert ov.status_code == 200 and ov.json()["on"] is True and ov.json()["until"] == pytest.approx(reset, abs=1.0)
+    # Nothing held back on codex (no window at the line): refused, never a blanket 24 h
+    assert client.post("/api/ai/override", json={"bucket": "codex", "on": True}, headers=H).status_code == 400
+    ledger.save(app.store, "codex", (windows.Reading("five_hour", "allowed", 0.9, None, now),), now=now)
     undated = client.post("/api/ai/override", json={"bucket": "codex", "on": True}, headers=H)
     assert undated.status_code == 200 and undated.json()["until"] == pytest.approx(now + 86400, abs=5.0)
     assert len(client.get("/api/ai/routing").json()["overrides"]) == 2
     cleared = client.post("/api/ai/override", json={"bucket": "claude", "on": False}, headers=H)
-    assert cleared.status_code == 200 and cleared.json() == {"bucket": "claude", "on": False, "until": None}
+    assert cleared.status_code == 200 and cleared.json() == {"bucket": "claude", "on": False, "until": None, "windows": {}}
     assert [o["bucket"] for o in client.get("/api/ai/routing").json()["overrides"]] == ["codex"]
 
 
@@ -219,19 +222,23 @@ def test_routing_and_override_writes_refuse_read_only_store(tmp_path):
     from bosun.providers import routing
 
     db_path = tmp_path / "db.sqlite"
+    from bosun.registry import Conflict
+
+    now = 1_800_000_000.0
     with Store(db_path) as rw:
         routing.update(rw, mode="balance")
-        routing.set_override(rw, "claude", True, now=1_800_000_000.0)
+        ledger.save(rw, "claude", (windows.Reading("five_hour", "allowed", 0.8, now + 3600, now),), now=now)
+        routing.set_override(rw, "claude", True, now=now)
     with Store(db_path, read_only=True) as ro:
-        assert routing.overview(ro, now=1_800_000_000.0)["mode"] == "balance"
-        assert len(routing.overrides(ro, now=1_800_000_000.0)) == 1
-        with pytest.raises(RuntimeError, match="read-only"):
+        assert routing.overview(ro, now=now)["mode"] == "balance"
+        assert len(routing.overrides(ro, now=now)) == 1
+        with pytest.raises(Conflict, match="read-only"):
             routing.update(ro, mode="default")
-        with pytest.raises(RuntimeError, match="read-only"):
-            routing.set_override(ro, "claude", False, now=1_800_000_000.0)
+        with pytest.raises(Conflict, match="read-only"):
+            routing.set_override(ro, "claude", False, now=now)
 
 
-def test_malformed_or_far_future_overrides_are_dropped_and_multi_window_uses_latest(tmp_path):
+def test_malformed_or_far_future_overrides_are_dropped_and_each_window_ends_at_its_own_reset(tmp_path):
     import json
 
     from bosun.providers import routing
@@ -239,19 +246,24 @@ def test_malformed_or_far_future_overrides_are_dropped_and_multi_window_uses_lat
     now = 1_800_000_000.0
     with Store(tmp_path / "db.sqlite") as s:
         s.set_setting(routing.OVERRIDES_SETTING, json.dumps({
-            "claude": now + 1e9,       # far future: dropped
-            "codex": True,             # bool: dropped
-            "gemini": now - 10,        # expired: dropped
-            "../x": now + 3600,        # bad bucket: dropped
-            "grok": now + 3600,        # valid
+            "claude": {"five_hour": now + 1e9},     # far future: dropped
+            "claude@work": {"five_hour": now + 25 * 86400},  # longer than a 5-hour window could last: dropped
+            "codex": {"five_hour": True},           # bool: dropped
+            "gemini": {"five_hour": now - 10},      # expired: dropped
+            "../x": {"five_hour": now + 3600},      # bad bucket: dropped
+            "muse": now + 3600,                     # old shape with no window: dropped
+            "grok": {"five_hour": now + 3600, "bad window!": now + 60},  # valid window kept, bad one dropped
         }))
-        assert [o.bucket for o in routing.overrides(s, now=now)] == ["grok"]
+        assert [(o.bucket, o.window) for o in routing.overrides(s, now=now)] == [("grok", "five_hour")]
         s.set_setting(routing.OVERRIDES_SETTING, "{not json")
         assert routing.overrides(s, now=now) == ()
-        # Multiple hit windows -> override ends at the latest hit window's reset
         ledger.save(s, "claude", (
             windows.Reading("five_hour", "allowed", 0.80, now + 3600, now),
             windows.Reading("seven_day", "allowed", 0.78, now + 3 * 86400, now),
+            windows.Reading("seven_day_opus", "allowed", 0.10, now + 3 * 86400, now),  # under the line: not lifted
         ), now=now)
         res = routing.set_override(s, "claude", True, now=now)
         assert res["until"] == now + 3 * 86400
+        assert res["windows"] == {"five_hour": now + 3600, "seven_day": now + 3 * 86400}
+        assert sorted((o.window, o.until) for o in routing.overrides(s, now=now)) == [
+            ("five_hour", now + 3600), ("seven_day", now + 3 * 86400)]

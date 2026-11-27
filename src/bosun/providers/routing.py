@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from ..registry import Invalid
+from ..registry import Conflict, Invalid
 from . import accounts, catalog, ledger, quota, router, windows
 
 if TYPE_CHECKING:
@@ -33,8 +33,25 @@ def _finite(value: object) -> float | None:
     return f if math.isfinite(f) else None
 
 
+def _override_entries(bucket: str, raw: object, when: float) -> list[quota.Override]:
+    """One login's stored `{window: until}`; an old bare `until` (no window), a bad window name or an `until`
+    past what that window could last is dropped, so the line comes back rather than staying lifted."""
+    if not isinstance(raw, dict):
+        return []
+    kept: list[quota.Override] = []
+    for window, raw_until in raw.items():
+        if not isinstance(window, str) or not ledger.valid_window(window):
+            continue
+        until = _finite(raw_until)
+        o = quota.Override(bucket, until, window) if until is not None else None
+        if o is not None and quota.lifted(o, bucket, when):
+            kept.append(o)
+    return kept
+
+
 def overrides(store: Store, now: float | None = None) -> tuple[quota.Override, ...]:
-    """Active 75%-line overrides from the store; malformed, expired or far-future entries are dropped."""
+    """Active 75%-line overrides from the store, one per login and window; malformed, expired or far-future
+    entries are dropped."""
     raw = store.setting(OVERRIDES_SETTING)
     if not raw or len(raw) > router.MAX_SETTING_CHARS:
         return ()
@@ -46,29 +63,19 @@ def overrides(store: Store, now: float | None = None) -> tuple[quota.Override, .
         return ()
     when = time.time() if now is None else now
     kept: list[quota.Override] = []
-    for bucket, raw_until in parsed.items():
-        if not isinstance(bucket, str):
-            continue
-        try:
-            ledger.split(bucket)
-        except ValueError:
-            continue
-        until = _finite(raw_until)
-        if until is not None and when < until <= when + windows.MAX_RESET_S:
-            kept.append(quota.Override(bucket, until))
+    for bucket, entry in parsed.items():
+        if isinstance(bucket, str) and router._valid_bucket(bucket) is not None:
+            kept.extend(_override_entries(bucket, entry, when))
     return tuple(kept)
 
 
-def _override_expiry(store: Store, bucket: str, when: float) -> float:
-    """When an override on `bucket` ends: the latest hit window's reset, or 24 h when undated or no hit exists."""
-    hits: list[quota.Hit] = []
-    for r in quota.current(ledger.readings(store, bucket), when):
-        used = quota.share(r)
-        if used is not None and (used >= quota.LINE or r.status == "rejected"):
-            hits.append(quota.Hit(r.window, used, windows.valid_reset(r.window, r.resets_at, r.at)))
-    if not hits:
-        return when + quota.OVERRIDE_UNDATED_S
-    return max(quota.override_until(h, when) for h in hits)
+def _override_windows(store: Store, bucket: str, when: float) -> dict[str, float]:
+    """Each window now at or past the line, with when an override on it ends: that window's reset, or a day when
+    undated. Empty when nothing is held back."""
+    hits = (quota.Hit(r.window, used, windows.valid_reset(r.window, r.resets_at, r.at))
+            for r in quota.current(ledger.readings(store, bucket), when)
+            if (used := quota.share(r)) is not None and (used >= quota.LINE or r.status == "rejected"))
+    return {h.window: quota.override_until(h, when) for h in hits}
 
 
 def _require_bucket(bucket: str, known: set[str]) -> str:
@@ -77,24 +84,37 @@ def _require_bucket(bucket: str, known: set[str]) -> str:
     return bucket
 
 
-def set_override(store: Store, bucket: str, on: bool, now: float | None = None) -> dict[str, Any]:
-    """Turn the 75%-line override on (until the hit window's reset, or 24 h) or off for one login."""
+def _require_writable(store: Store) -> None:
     if store.read_only:
-        raise RuntimeError("Store is read-only")
-    known = {lg.bucket for lg in accounts.logins(store)}
-    _require_bucket(bucket, known)
+        raise Conflict("Bosun's data is open read-only here (Store is read-only); change this from the dashboard")
+
+
+def _saved_overrides(store: Store, when: float) -> dict[str, dict[str, float]]:
+    saved: dict[str, dict[str, float]] = {}
+    for o in overrides(store, now=when):
+        if o.window is not None:
+            saved.setdefault(o.bucket, {})[o.window] = o.until
+    return saved
+
+
+def set_override(store: Store, bucket: str, on: bool, now: float | None = None) -> dict[str, Any]:
+    """Turn the 75%-line override on or off for one login. On lifts the line only for the windows at or past it
+    now, each until its own reset (a day when undated); with no window at the line it is refused."""
+    _require_writable(store)
+    _require_bucket(bucket, {lg.bucket for lg in accounts.logins(store)})
     when = time.time() if now is None else now
     with _writing:
-        active = {o.bucket: o.until for o in overrides(store, now=when)}
-        until: float | None = None
+        active = _saved_overrides(store, when)
+        lifted: dict[str, float] = {}
         if on:
-            expiry = _override_expiry(store, bucket, when)
-            active[bucket] = expiry
-            until = expiry
+            lifted = _override_windows(store, bucket, when)
+            if not lifted:
+                raise Invalid(f"Nothing is held back on {bucket}: no usage window is at 75%")
+            active[bucket] = lifted
         else:
             active.pop(bucket, None)
         store.set_setting(OVERRIDES_SETTING, json.dumps(active))
-    return {"bucket": bucket, "on": on, "until": until}
+    return {"bucket": bucket, "on": on, "until": max(lifted.values()) if lifted else None, "windows": lifted}
 
 
 def _validate_pins(pins: Mapping[str, str | None], known: set[str]) -> None:
@@ -121,8 +141,7 @@ def update(store: Store, *, mode: str | None = None, order: list[str] | None = N
            pins: Mapping[str, str | None] | None = None,
            job_modes: Mapping[str, str | None] | None = None) -> dict[str, Any]:
     """Validate and save routing changes; omitted fields keep their stored values."""
-    if store.read_only:
-        raise RuntimeError("Store is read-only")
+    _require_writable(store)
     known = {lg.bucket for lg in accounts.logins(store)}
     if mode is not None and mode not in router.MODES:
         raise Invalid(f"Unknown routing mode: {mode}")
@@ -138,15 +157,16 @@ def update(store: Store, *, mode: str | None = None, order: list[str] | None = N
         new_mode: str = rs.mode if mode is None else mode
         new_order = list(rs.order) if order is None else list(dict.fromkeys(order))
         new_pins: dict[str, str | None] = dict(rs.pins)
+        new_job_modes = dict(rs.job_modes)
         for job, target in (pins or {}).items():
             if target is None or target == "":
                 new_pins.pop(job, None)
             else:
                 new_pins[job] = target
+                new_job_modes.pop(job, None)  # a new pin is the latest choice; a per-job mode would outrank it
         for default_job in router.DEFAULT_PINS:
             if default_job not in new_pins:
                 new_pins[default_job] = None  # preserve explicit unpin against DEFAULT_PINS
-        new_job_modes = dict(rs.job_modes)
         for job, val in (job_modes or {}).items():
             if val is None or val == "":
                 new_job_modes.pop(job, None)
@@ -166,5 +186,5 @@ def overview(store: Store, now: float | None = None) -> dict[str, Any]:
         "order": list(rs.order),
         "pins": dict(rs.pins),
         "job_modes": dict(rs.job_modes),
-        "overrides": [{"bucket": o.bucket, "until": o.until} for o in active],
+        "overrides": [{"bucket": o.bucket, "window": o.window, "until": o.until} for o in active],
     }

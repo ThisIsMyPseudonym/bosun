@@ -255,6 +255,7 @@ def seed_from_coho(store: Store, bucket: str, path: Path | None = None, now: flo
 # --- background-skip notices -------------------------------------------------------------------------------------
 
 NOTICE_PREFIX = "ai_notice:"
+NOTICE_SAME_RESET_S = 900  # "resets in N s" drifts per reading; resets this close are one window, noticed once
 DEFAULT_DASHBOARD_URL = "http://127.0.0.1:8787/"
 
 
@@ -264,7 +265,8 @@ class _SkipLike(Protocol):
     hit: Hit | None
 
 
-def _win_label(window: str) -> str:
+def window_label(window: str) -> str:
+    """A window as people read it: "5-hour limit", "weekly limit"."""
     if window == "five_hour":
         return "5-hour limit"
     if window == "seven_day":
@@ -279,16 +281,20 @@ def _win_label(window: str) -> str:
 def _notice_text(bucket: str, hit: Hit) -> tuple[str, str]:
     provider, account = split(bucket)
     who = CATALOG[provider].label if account == DEFAULT else f"{CATALOG[provider].label} ({account})"
-    label, pct = _win_label(hit.window), f"{round(hit.used * 100)}%"
+    label, pct = window_label(hit.window), f"{round(hit.used * 100)}%"
     title = f"Bosun paused background AI work on {who}: {label} at {pct}"
     if hit.resets_at is not None:
-        when = datetime.fromtimestamp(hit.resets_at).astimezone().strftime("%a %I:%M %p").replace(" 0", " ")
-        reset_part = f"resets {when}"
+        reset_part = f"resets {format_reset(hit.resets_at)}"
     else:
         reset_part = "reset time unknown"
     body = (f"{who} {label} is at {pct} ({reset_part}). Open the Usage page and click "
             "Let background work go past 75% until it resets.")
     return title, body
+
+
+def format_reset(resets_at: float) -> str:
+    """A reset in local time, as "Tue 4:05 PM"."""
+    return datetime.fromtimestamp(resets_at).astimezone().strftime("%a %I:%M %p").replace(" 0", " ")
 
 
 def _parse_notice(raw: str) -> dict[str, Any] | None:
@@ -339,6 +345,21 @@ def _prepare_notice(skip: _SkipLike, when: float) -> tuple[str, dict[str, Any]] 
     return key, payload
 
 
+def _noticed_resets(live: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str], list[float | None]]:
+    seen: dict[tuple[str, str], list[float | None]] = {}
+    for item in live:
+        resets = item.get("resets_at")
+        seen.setdefault((str(item.get("bucket")), str(item.get("window"))), []).append(
+            None if resets is None else float(resets))
+    return seen
+
+
+def _already_noticed(seen: Mapping[tuple[str, str], list[float | None]], payload: Mapping[str, Any]) -> bool:
+    r = payload["resets_at"]
+    return any((p is None) == (r is None) and (p is None or abs(p - r) <= NOTICE_SAME_RESET_S)
+               for p in seen.get((payload["bucket"], payload["window"]), ()))
+
+
 def notice_skips(store: Store, skips: Iterable[_SkipLike], now: float | None = None) -> int:
     """Record and deliver one notice per (bucket, window, reset) for background 75%-line skips, pruning old keys."""
     if store.read_only:
@@ -348,11 +369,16 @@ def notice_skips(store: Store, skips: Iterable[_SkipLike], now: float | None = N
     to_send: list[tuple[str, str]] = []
     with store._tx(write=True) as db:
         rows = db.execute("SELECT key, value FROM settings WHERE key LIKE ?", (f"{NOTICE_PREFIX}%",)).fetchall()
-        expired = [(row["key"],) for row in rows
-                   if (item := _parse_notice(row["value"])) is None or _notice_expired(item, when)]
+        parsed = [(row["key"], _parse_notice(row["value"])) for row in rows]
+        live = [item for _, item in parsed if item is not None and not _notice_expired(item, when)]
+        expired = [(key,) for key, item in parsed if item is None or _notice_expired(item, when)]
         if expired:
             db.executemany("DELETE FROM settings WHERE key = ?", expired)
+        seen = _noticed_resets(live)
         for key, payload in prepared:
+            if _already_noticed(seen, payload):
+                continue
+            seen.setdefault((payload["bucket"], payload["window"]), []).append(payload["resets_at"])
             cur = db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, json.dumps(payload)))
             if cur.rowcount == 1:
                 to_send.append((str(payload["title"]), str(payload["body"])))

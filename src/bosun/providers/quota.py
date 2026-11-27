@@ -99,10 +99,12 @@ class Hit:
 
 @dataclass(frozen=True)
 class Override:
-    """The owner's "let background work go past 75% until it resets", for one login."""
+    """The owner's "let background work go past 75% until it resets", for one login's window (None: every window).
+    It ends at that window's reset, so it never covers the next window or another one that crosses the line later."""
 
     bucket: str
     until: float
+    window: str | None = None
 
 
 def line_hit(readings: Iterable[Reading], now: float, line: float = LINE) -> Hit | None:
@@ -123,6 +125,19 @@ def stop_at(bucket: str, overrides: Iterable[Override], now: float) -> float:
     override ending further out than any window could reset (a forged or corrupt `until`) lifts nothing."""
     lifted = any(o.bucket == bucket and now < o.until <= now + MAX_RESET_S for o in overrides)
     return 1.0 if lifted else LINE
+
+
+def override_horizon(window: str | None) -> float:
+    """The longest an override on this window can honestly last: the window's own horizon, or a day when undated."""
+    if window is None:
+        return MAX_RESET_S
+    return min(MAX_RESET_S, max(reset_horizon(window), OVERRIDE_UNDATED_S))
+
+
+def lifted(o: Override, bucket: str, now: float) -> bool:
+    """Whether this override lifts the line on `bucket` now; one that claims to last longer than its window could
+    (a forged or corrupt `until`) lifts nothing."""
+    return o.bucket == bucket and now < o.until <= now + override_horizon(o.window)
 
 
 def override_until(hit: Hit, now: float) -> float:
