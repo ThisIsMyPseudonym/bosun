@@ -41,12 +41,16 @@ def scan_new(
 ) -> tuple[int, int, int]:
     """Scan v_failures after cursor; apply rules/cache now and queue unplaced eligible failures."""
     since = tsettings.cursor(store)
-    records = tqueue.scan_failures(store, since)
+    records = tqueue.scan_failures_with_ts(store, since)
     cfg = tsettings.read(store)
     max_ts = since
     fast_n = queued_n = skipped_n = 0
-    for rec in records:
-        max_ts = max(max_ts, rec.ts)
+    seen_failures: set[str] = set()
+    for rec, event_ts in records:
+        max_ts = max(max_ts, event_ts)
+        if rec.failure in seen_failures:
+            continue
+        seen_failures.add(rec.failure)
         if not eligible_rules(rec) or tstore.get(store, rec.failure) is not None:
             continue
         if eval_fast(rec, when) is not None:

@@ -164,3 +164,58 @@ def test_create_app_starts_triage_thread_only_when_not_demo(tmp_path, monkeypatc
     demo_s = type(s)(**{**s.__dict__, "demo": True, "self_update": False, "data_dir": tmp_path})
     create_app(demo_s, Store(tmp_path / "demo.db"), "t" * 32)
     assert "triage" not in started
+
+
+def test_tick_cursor_does_not_skip_long_running_refresh_that_finishes_after_later_job(tmp_path, monkeypatch):
+    """A refresh starting at T0 and ending partial at T0+300 must still be triaged after a job fails at T0+60."""
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([item_to_dict(Item(Source.BREW, "jq", "jq", "1.7", "1.7.1"))], [])
+    monkeypatch.setattr(accounts, "installed", lambda: {"codex": "/test/bin/codex"})
+    fake = FakeCli(monkeypatch)
+    fake.reply("codex", fake.codex_ok(_valid_verdict_payload("Job failed due to mirror.")))
+    fake.reply("codex", fake.codex_ok(_valid_verdict_payload("Refresh collector parse error.")))
+
+    t0 = time.time() - 600.0
+    refresh_tid = "ref11111111111111111111111111111"
+    job_tid = "job22222222222222222222222222222"
+    with st._tx(write=True) as db:
+        # Refresh starts at T0 and is still running during tick 1
+        db.execute(
+            "INSERT INTO runs (trace_id, kind, subject, actor, status, started, finished, error, process) "
+            "VALUES (?, 'refresh', 'everything', 'schedule', 'running', ?, NULL, '', 'serve')",
+            (refresh_tid, t0),
+        )
+        # Job fails at T0 + 60
+        db.execute(
+            "INSERT INTO runs (trace_id, kind, subject, actor, status, started, finished, error, process) "
+            "VALUES (?, 'upgrade', 'brew:jq', 'autopilot', 'failed', ?, ?, 'upstream mirror returned 503', 'serve')",
+            (job_tid, t0 + 60.0, t0 + 60.0),
+        )
+        db.execute(
+            "INSERT INTO jobs (item_key, argv, status, output, started, finished, trace_id, actor) "
+            "VALUES ('brew:jq', '[\"brew\",\"upgrade\",\"jq\"]', 'failed', 'upstream mirror returned 503', ?, ?, ?, 'autopilot')",
+            (t0 + 60.0, t0 + 60.0, job_tid),
+        )
+
+    triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+    rep1 = triager.tick(now=t0 + 70.0)
+    assert rep1.model_ran == 1
+    assert tstore.get_by_trace(st, job_tid)["status"] == "done"
+
+    # Refresh finishes partial at T0 + 300 (its runs.started is still T0 < T0 + 60)
+    with st._tx(write=True) as db:
+        db.execute(
+            "UPDATE runs SET status = 'partial', finished = ?, error = 'upstream mirror returned 503 on brew collector' "
+            "WHERE trace_id = ?",
+            (t0 + 300.0, refresh_tid),
+        )
+
+    rep2 = triager.tick(now=t0 + 310.0)
+    assert rep2.model_ran == 1
+    assert tstore.get_by_trace(st, refresh_tid) is not None
+    assert tstore.get_by_trace(st, refresh_tid)["status"] == "done"
+    assert len(fake.calls) == 2
+
+    # Third tick reprocesses neither
+    rep3 = triager.tick(now=t0 + 340.0)
+    assert rep3.model_ran == 0 and len(fake.calls) == 2

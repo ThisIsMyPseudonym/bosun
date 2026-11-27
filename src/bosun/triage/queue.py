@@ -13,13 +13,31 @@ from bosun.triage import store as tstore
 from bosun.triage.schema import FailureRecord, Verdict
 
 UNDATED_RETRY_S = 3600.0
+SCAN_LOOKBACK_S = 3600.0
+
+
+def scan_failures_with_ts(
+    store: Store,
+    since: float,
+    *,
+    lookback_s: float = SCAN_LOOKBACK_S,
+) -> list[tuple[FailureRecord, float]]:
+    """Read v_failures rows with finish time >= since - lookback_s, oldest finish first."""
+    cutoff = max(0.0, since - max(0.0, lookback_s))
+    with store._tx() as db:
+        rows = db.execute(
+            "SELECT v.*, MAX(COALESCE(v.ts, 0.0), COALESCE(r.finished, v.ts, 0.0)) AS event_ts "
+            "FROM v_failures v LEFT JOIN runs r ON r.trace_id = v.trace_id "
+            "WHERE MAX(COALESCE(v.ts, 0.0), COALESCE(r.finished, v.ts, 0.0)) >= ? "
+            "ORDER BY event_ts ASC, v.ts ASC",
+            (cutoff,),
+        ).fetchall()
+        return [(tstore.record_from_row(db, row), float(row["event_ts"] or 0.0)) for row in rows]
 
 
 def scan_failures(store: Store, since: float) -> list[FailureRecord]:
-    """Read and normalize all v_failures rows with ts >= since, oldest first."""
-    with store._tx() as db:
-        rows = db.execute("SELECT * FROM v_failures WHERE ts >= ? ORDER BY ts ASC", (since,)).fetchall()
-        return [tstore.record_from_row(db, row) for row in rows]
+    """Read and normalize all v_failures rows finishing within the scan window, oldest first."""
+    return [rec for rec, _ in scan_failures_with_ts(store, since)]
 
 
 def rows_by_status(store: Store, status: str) -> list[dict[str, Any]]:
