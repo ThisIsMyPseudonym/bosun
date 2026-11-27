@@ -468,6 +468,33 @@ CREATE TABLE IF NOT EXISTS quota_windows (
 );
 """
 
+AI_SPEND = """
+CREATE INDEX IF NOT EXISTS llm_calls_by_job ON llm_calls (job, ts);
+CREATE VIEW IF NOT EXISTS v_ai_spend AS
+SELECT date(ts, 'unixepoch', 'localtime') AS day, provider, account, job, model,
+       SUM(outcome NOT IN ('cached', 'skipped')) AS calls, SUM(outcome = 'cached') AS cached,
+       SUM(outcome = 'skipped') AS skipped,
+       SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS tokens,
+       SUM(window_draw) AS window_draw, SUM(estimated) AS estimated, ROUND(SUM(cost_usd), 6) AS cost_usd
+FROM llm_calls GROUP BY day, provider, account, job, model;
+"""
+
+
+def _llm_calls_providers(db: sqlite3.Connection) -> None:
+    cols = _columns(db, "llm_calls")
+    for col, col_def in (
+        ("provider", "TEXT NOT NULL DEFAULT ''"),        # which CLI: claude, codex, gemini, grok, antigravity, muse
+        ("account", "TEXT NOT NULL DEFAULT ''"),         # which login: default or an added one's id
+        ("job", "TEXT NOT NULL DEFAULT ''"),             # summarize, explain, triage, fix, assistant, computer_use
+        ("window_draw", "REAL"),                         # the largest rise in a usage window this call caused, 0 to 1; NULL = unknown
+        ("estimated", "INTEGER NOT NULL DEFAULT 0"),     # 1 = the CLI reports no windows: use counted from calls and tokens
+    ):
+        if col not in cols:
+            db.execute(f"ALTER TABLE llm_calls ADD COLUMN {col} {col_def}")
+    db.execute("UPDATE llm_calls SET provider = 'claude', account = 'default', job = purpose WHERE provider = ''")
+    for stmt in statements(AI_SPEND):
+        db.execute(stmt)
+
 def _withhold_http_addresses(db: sqlite3.Connection) -> None:
     """Snapshots saved before v8 kept a plain-http MCP server's address as the URL's netloc, which carries any
     user:password in it (and, when a password has an unencoded / ? or #, part of one with no "@" to see). Every
@@ -581,6 +608,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(7, "offers", sql=OFFERS),
     Migration(8, "withhold_http_addresses", fn=_withhold_http_addresses, after=_vacuum),
     Migration(9, "quota_windows", sql=QUOTA_WINDOWS),
+    Migration(10, "llm_calls_providers", fn=_llm_calls_providers),
 )
 
 

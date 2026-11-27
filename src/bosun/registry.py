@@ -181,7 +181,7 @@ class BudgetIn(_In):
 class QueryIn(_In):
     sql: str = Field(min_length=1, max_length=4000,
                      description="One SELECT over the views and tables in docs/data-model.md (start with v_current_items, "
-                                 "v_item_history, v_open_vulns, v_failures, v_llm_spend, v_actions)")
+                                 "v_item_history, v_open_vulns, v_failures, v_llm_spend, v_ai_spend, v_actions)")
     limit: int = Field(500, ge=1, le=5000, description="Most rows to return")
 
 

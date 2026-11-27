@@ -215,7 +215,7 @@ def test_v9_adds_quota_windows_and_an_older_database_keeps_its_rows(tmp_path):
     db = sqlite3.connect(path)
     cols = {r[1] for r in db.execute("PRAGMA table_info(quota_windows)")}
     assert cols == {"bucket", "provider", "account", "window", "status", "used", "resets_at", "at", "source"}
-    assert migrations.current_version(db) == 9 and list(tmp_path.glob("bosun.db.bak-v8"))
+    assert migrations.current_version(db) == migrations.latest_version() and list(tmp_path.glob("bosun.db.bak-v8"))
     assert db.execute("SELECT value FROM settings WHERE key='kept'").fetchone() == ("yes",)
     keys = [r[5] for r in db.execute("PRAGMA table_info(quota_windows)") if r[5]]
     assert keys == [1, 2]  # one row per login and window
@@ -223,12 +223,42 @@ def test_v9_adds_quota_windows_and_an_older_database_keeps_its_rows(tmp_path):
 
 def test_v9_migration_is_idempotent_on_rerun(tmp_path):
     path = tmp_path / "bosun.db"
-    Store(path)
     db = sqlite3.connect(path)
+    migrate(db, path, migrations.MIGRATIONS[:9])
     db.execute("INSERT INTO quota_windows VALUES ('claude', 'claude', 'default', 'five_hour', 'allowed', 0.4, NULL, 100.0, 'output')")
     db.execute("DELETE FROM schema_migrations WHERE version = 9")
     db.commit()
-    assert migrate(db, path) == [9]
+    assert migrate(db, path, migrations.MIGRATIONS[:9]) == [9]
     assert migrations.current_version(db) == 9
     row = db.execute("SELECT bucket, window, used FROM quota_windows").fetchone()
     assert row == ("claude", "five_hour", 0.4)
+
+
+def test_v10_tags_every_old_call_as_claude_and_its_purpose_as_its_job(tmp_path):
+    path = tmp_path / "bosun.db"
+    db = sqlite3.connect(path)
+    migrate(db, path, migrations.MIGRATIONS[:9])
+    db.execute("INSERT INTO llm_calls (ts, purpose, outcome, input_tokens, output_tokens) VALUES (1, 'summarize', 'ok', 100, 20)")
+    db.commit()
+    db.close()
+    Store(path)
+    after = sqlite3.connect(path)
+    row = after.execute("SELECT provider, account, job, window_draw, estimated FROM llm_calls").fetchone()
+    assert row == ("claude", "default", "summarize", None, 0)
+    assert after.execute("SELECT provider, account, job, calls, tokens FROM v_ai_spend").fetchone() == (
+        "claude", "default", "summarize", 1, 120)
+    assert migrations.current_version(after) == migrations.latest_version() and list(tmp_path.glob("bosun.db.bak-v9"))
+
+
+def test_v10_migration_is_idempotent_on_rerun(tmp_path):
+    path = tmp_path / "bosun.db"
+    db = sqlite3.connect(path)
+    migrate(db, path, migrations.MIGRATIONS[:10])
+    db.execute("INSERT INTO llm_calls (ts, purpose, outcome, provider, account, job, window_draw, estimated) "
+               "VALUES (1, 'summarize', 'ok', 'codex', 'work', 'summarize', 0.05, 1)")
+    db.execute("DELETE FROM schema_migrations WHERE version = 10")
+    db.commit()
+    assert migrate(db, path, migrations.MIGRATIONS[:10]) == [10]
+    assert migrations.current_version(db) == 10
+    row = db.execute("SELECT provider, account, job, window_draw, estimated FROM llm_calls").fetchone()
+    assert row == ("codex", "work", "summarize", 0.05, 1)
