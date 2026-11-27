@@ -17,10 +17,12 @@ GOOD = {"headline": "h", "security_fixes": [], "notable_features": [], "breaking
 
 @pytest.fixture
 def store(tmp_path):
-    st = Store(tmp_path / "bosun.db")
-    trace.configure(st.path)
-    yield st
-    trace.configure(None)
+    with Store(tmp_path / "bosun.db") as st:
+        trace.configure(st.path)
+        try:
+            yield st
+        finally:
+            trace.configure(None)
 
 
 @pytest.fixture
@@ -120,13 +122,13 @@ def test_with_every_login_out_summaries_use_built_in_rules_and_say_so_once(store
     assert fake.calls == []
 
     # Case 2: every login hits a limit at call time on the first item -> second item spawns no CLI
-    st2 = Store(store.path.parent / "db2.sqlite")
-    fake.reply("claude", fake.limit("claude", "2h"))
-    fake.reply("codex", fake.limit("codex", "1h"))
-    fake.reply("gemini", fake.limit("gemini", "30m"))
-    sm2 = Summarizer(st2, "sonnet", store.path.parent / "sb2", routine_model="haiku")
-    assert sm2.summarize(a, "notes").generated_by == "heuristic"
-    calls_after_first = len(fake.calls)
-    assert calls_after_first == 3 and sm2.problem and not sm2.enabled
-    assert sm2.summarize(b, "notes").generated_by == "heuristic"
-    assert len(fake.calls) == calls_after_first  # no CLI spawned for the second item
+    with Store(store.path.parent / "db2.sqlite") as st2:
+        fake.reply("claude", fake.limit("claude", "2h"))
+        fake.reply("codex", fake.limit("codex", "1h"))
+        fake.reply("gemini", fake.limit("gemini", "30m"))
+        sm2 = Summarizer(st2, "sonnet", store.path.parent / "sb2", routine_model="haiku")
+        assert sm2.summarize(a, "notes").generated_by == "heuristic"
+        calls_after_first = len(fake.calls)
+        assert calls_after_first == 3 and sm2.problem and not sm2.enabled
+        assert sm2.summarize(b, "notes").generated_by == "heuristic"
+        assert len(fake.calls) == calls_after_first  # no CLI spawned for the second item

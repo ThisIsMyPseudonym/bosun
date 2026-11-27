@@ -17,10 +17,12 @@ class Answer(BaseModel):
 
 @pytest.fixture
 def store(tmp_path):
-    st = Store(tmp_path / "bosun.db")
-    trace.configure(st.path)
-    yield st
-    trace.configure(None)
+    with Store(tmp_path / "bosun.db") as st:
+        trace.configure(st.path)
+        try:
+            yield st
+        finally:
+            trace.configure(None)
 
 
 @pytest.fixture
