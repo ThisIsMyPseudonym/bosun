@@ -10,12 +10,13 @@ from __future__ import annotations
 import json
 import math
 import statistics
-from collections.abc import Mapping, Set as AbstractSet
+from collections.abc import Callable, Mapping, Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from .. import trace
 from . import accounts, catalog, contract, ledger, quota, windows
 
 if TYPE_CHECKING:
@@ -334,3 +335,58 @@ def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
         candidates = _balance_order(candidates)
     fell_back = _fell_back_from(entries, candidates, skipped, frozenset(ctx.settings.order)) if mode == "default" else None
     return Route(job, tuple(candidates), tuple(skipped), mode, fell_back)
+
+
+# --- failover attempts -------------------------------------------------------------------------------------------
+
+FAILOVER: frozenset[str] = frozenset({"usage_limit", "rate_limit", "empty", "schema_error", "not_logged_in"})
+MAX_ATTEMPTS = 3
+
+
+@dataclass(frozen=True)
+class Outcome:
+    outcome: str
+    value: Any = None
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome == "ok"
+
+
+@dataclass(frozen=True)
+class Attempt:
+    candidate: Candidate
+    outcome: str
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class Attempted:
+    attempts: tuple[Attempt, ...]
+    result: Outcome | None
+
+    @property
+    def ok(self) -> bool:
+        return self.result is not None and self.result.ok
+
+    @property
+    def candidate(self) -> Candidate | None:
+        return self.attempts[-1].candidate if self.attempts else None
+
+
+def attempt(route: Route, call: Callable[[Candidate], Outcome]) -> Attempted:
+    """Try up to MAX_ATTEMPTS candidates, failing over only on outcomes in FAILOVER; each try is one trace span."""
+    attempts: list[Attempt] = []
+    last: Outcome | None = None
+    for cand in route.candidates[:MAX_ATTEMPTS]:
+        with trace.span("llm_attempt", cand.bucket, job=route.job, provider=cand.provider, mode=route.mode) as sp:
+            res = call(cand)
+            sp.set(outcome=res.outcome)
+            if not res.ok:
+                sp.fail(res.error or res.outcome)
+        attempts.append(Attempt(cand, res.outcome, res.error))
+        last = res
+        if res.ok or res.outcome not in FAILOVER:
+            break
+    return Attempted(tuple(attempts), last)

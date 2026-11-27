@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from bosun import trace
 from bosun.providers import accounts, catalog, contract, quota, router, windows
 from bosun.store import Store
 
@@ -304,3 +305,69 @@ def test_a_pinned_job_runs_only_there_and_says_why_when_it_cannot():
     assert router.plan("fix", ctx(settings=rs_incap), clicked=True).skipped[0].reason == "capability"
     rs_missing = dataclasses.replace(router.RoutingSettings.default(), pins={"summarize": "codex"})
     assert router.plan("summarize", ctx(logins=(_login("claude"),), settings=rs_missing)).skipped[0].reason == "not_installed"
+
+
+# --- Task 3.8: attempt and failover ------------------------------------------------------------------------------
+
+
+def _route_of(*buckets: str) -> router.Route:
+    by_b = {lg.bucket: lg for lg in LOGINS}
+    cands = tuple(router.Candidate(by_b[b].provider, b, by_b[b]) for b in buckets)
+    return router.Route("summarize", cands, (), "default")
+
+
+def test_failover_on_limit_rate_limit_empty_or_schema_failure_up_to_three(store):
+    trace.configure(store.path)
+    try:
+        tried: list[str] = []
+
+        def call(c: router.Candidate) -> router.Outcome:
+            tried.append(c.bucket)
+            outcome = {"claude": "usage_limit", "claude@work": "schema_error", "codex": "empty", "gemini": "ok"}[c.bucket]
+            return router.Outcome(outcome)
+
+        with trace.run("refresh") as run:
+            done = router.attempt(_route_of("claude", "claude@work", "codex", "gemini"), call)
+        assert tried == ["claude", "claude@work", "codex"] and not done.ok
+        assert [a.outcome for a in done.attempts] == ["usage_limit", "schema_error", "empty"]
+        spans = [s for s in store.trace(run.trace_id)["spans"] if s["kind"] == "llm_attempt"]
+        assert [s["name"] for s in spans] == ["claude", "claude@work", "codex"]
+    finally:
+        trace.configure(None)
+
+
+def test_failover_succeeds_after_rate_limit_and_not_logged_in():
+    tried: list[str] = []
+
+    def call(c: router.Candidate) -> router.Outcome:
+        tried.append(c.bucket)
+        if c.bucket == "claude":
+            return router.Outcome("rate_limit")
+        if c.bucket == "claude@work":
+            return router.Outcome("not_logged_in")
+        return router.Outcome("ok", value={"headline": "ok"})
+
+    done = router.attempt(_route_of("claude", "claude@work", "codex"), call)
+    assert tried == ["claude", "claude@work", "codex"] and done.ok
+    assert done.result is not None and done.result.value == {"headline": "ok"}
+    assert done.candidate is not None and done.candidate.bucket == "codex"
+
+
+@pytest.mark.parametrize("outcome", ["error", "timeout"])
+def test_an_error_or_timeout_does_not_fail_over(outcome):
+    tried: list[str] = []
+
+    def call(c: router.Candidate) -> router.Outcome:
+        tried.append(c.bucket)
+        return router.Outcome(outcome, error="boom")
+
+    done = router.attempt(_route_of("claude", "codex", "gemini"), call)
+    assert tried == ["claude"] and not done.ok
+    assert done.result == router.Outcome(outcome, error="boom")
+    assert len(done.attempts) == 1 and done.attempts[0].outcome == outcome
+
+
+def test_empty_route_attempts_nothing():
+    called: list[str] = []
+    done = router.attempt(_route_of(), lambda c: called.append(c.bucket) or router.Outcome("ok"))
+    assert called == [] and not done.ok and done.attempts == () and done.result is None and done.candidate is None
