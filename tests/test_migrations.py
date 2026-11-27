@@ -262,3 +262,51 @@ def test_v10_migration_is_idempotent_on_rerun(tmp_path):
     assert migrations.current_version(db) == 10
     row = db.execute("SELECT provider, account, job, window_draw, estimated FROM llm_calls").fetchone()
     assert row == ("codex", "work", "summarize", 0.05, 1)
+
+
+def test_v11_retires_stored_budgets_and_keeps_the_old_rows(tmp_path):
+    import json
+
+    path = tmp_path / "bosun.db"
+    db = sqlite3.connect(path)
+    migrate(db, path, migrations.MIGRATIONS[:10])
+    db.execute("INSERT INTO settings (key, value) VALUES ('llm_daily_budget_usd', '4')")
+    db.execute("INSERT INTO settings (key, value) VALUES ('llm_refresh_budget_usd', '1.5')")
+    db.execute("INSERT INTO settings (key, value) VALUES ('llm_assistant_budget_usd', '3')")
+    db.commit()
+    db.close()
+
+    Store(path).close()
+    after = sqlite3.connect(path)
+    rows = dict(after.execute("SELECT key, value FROM settings").fetchall())
+    assert migrations.current_version(after) == 11
+    assert rows["llm_daily_budget_usd"] == "4"
+    assert rows["llm_refresh_budget_usd"] == "1.5"
+    assert rows["llm_assistant_budget_usd"] == "3"
+    assert rows["ai_budgets_notice"] == "pending"
+    retired = json.loads(rows["ai_budgets_retired"])
+    assert retired["daily_usd"] == 4.0 and retired["refresh_usd"] == 1.5 and retired["assistant_usd"] == 3.0
+    assert isinstance(retired["at"], float) and retired["at"] > 0
+    after.close()
+
+
+def test_v11_skips_notice_when_no_budgets_were_stored_and_is_idempotent(tmp_path):
+    path = tmp_path / "bosun.db"
+    db = sqlite3.connect(path)
+    migrate(db, path, migrations.MIGRATIONS[:10])
+    db.commit()
+    assert migrate(db, path, migrations.MIGRATIONS[:11]) == [11]
+    rows = dict(db.execute("SELECT key, value FROM settings").fetchall())
+    assert "ai_budgets_retired" not in rows and "ai_budgets_notice" not in rows
+
+    # re-running v11 never overwrites an already dismissed notice or existing record
+    db.execute("INSERT INTO settings (key, value) VALUES ('llm_daily_budget_usd', '7')")
+    db.execute("INSERT INTO settings (key, value) VALUES ('ai_budgets_retired', '{\"daily_usd\": 4.0}')")
+    db.execute("INSERT INTO settings (key, value) VALUES ('ai_budgets_notice', 'shown')")
+    db.execute("DELETE FROM schema_migrations WHERE version = 11")
+    db.commit()
+    assert migrate(db, path, migrations.MIGRATIONS[:11]) == [11]
+    rows = dict(db.execute("SELECT key, value FROM settings").fetchall())
+    assert rows["ai_budgets_notice"] == "shown"
+    assert rows["ai_budgets_retired"] == '{"daily_usd": 4.0}'
+    db.close()
