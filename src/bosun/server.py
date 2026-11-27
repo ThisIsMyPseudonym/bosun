@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff, icons, kinds, listprefs, lock, machine, mcp_pin, notify, ptyrun, query, recipes,
+from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff, icons, kinds, listprefs, lock, machine, mcp_pin, mcp_server, notify, ptyrun, query, recipes,
                registry, relaunch, selfupdate, status as status_mod, takeover, terminal, trace)
 from . import appguard, goback  # noqa: E402
 from . import approvals as approving
@@ -47,11 +47,12 @@ from .config import Settings
 from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
-                       NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+                       NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn,
+                       TraceIn, TriageFeedbackIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
+from .triage import store as tstore
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -130,6 +131,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     interrupted = store.mark_interrupted_runs("serve")
     if interrupted:
         log.info("marked %d runs from a previous dashboard as interrupted", interrupted)
+    reset = tstore.reset_running(store)
+    if reset:
+        log.info("returned %d interrupted triage rows to queued", reset)
     fixer = Fixer(store, s)
     explainer = Explainer(store, s.model, s.claude_sandbox)
     allowed_hosts = {f"127.0.0.1:{s.port}", f"localhost:{s.port}"}
@@ -939,7 +943,12 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         found = store.trace(body.trace_id)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
-        return {**found, "tree": diagnose.span_tree(found["spans"]), "failures": diagnose.failures(found["spans"])}
+        return {
+            **found,
+            "tree": diagnose.span_tree(found["spans"]),
+            "failures": diagnose.failures(found["spans"]),
+            "triage": tstore.get_by_trace(store, found["run"]["trace_id"]),
+        }
 
     @actions.bind("diagnose")
     def diagnose_run(ctx: ActionContext, body: DiagnoseIn):
@@ -947,6 +956,32 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
         return found
+
+    @actions.bind("get_triage")
+    def get_triage(ctx: ActionContext, body: TraceIn):
+        found = store.trace(body.trace_id)
+        if found is None:
+            raise NotFound("No run with that id (or the prefix matches more than one)")
+        tid = found["run"]["trace_id"]
+        return tstore.get_by_trace(store, tid) or {"trace_id": tid, "status": None, "verdict": None}
+
+    @actions.bind("triage_feedback")
+    def triage_feedback(ctx: ActionContext, body: TriageFeedbackIn):
+        found = store.trace(body.trace_id)
+        if found is None:
+            raise NotFound("No run with that id (or the prefix matches more than one)")
+        row = tstore.get_by_trace(store, found["run"]["trace_id"])
+        if row is None:
+            raise NotFound("No triage verdict recorded for this run")
+        return tstore.set_feedback(store, row["failure"], body.feedback)
+
+    @actions.bind("get_runbook")
+    def get_runbook(ctx: ActionContext, body: RunbookIn):
+        found = mcp_server.resources().get(f"{mcp_server.SCHEME}runbook/{body.topic}")
+        if found is None:
+            raise NotFound(f"No runbook named {body.topic!r}")
+        _, title, path = found
+        return {"topic": body.topic, "title": title, "markdown": path.read_text(encoding="utf-8")}
 
     @actions.bind("llm_usage")
     def usage(ctx: ActionContext, body: UsageIn):

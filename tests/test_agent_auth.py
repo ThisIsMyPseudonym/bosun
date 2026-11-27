@@ -29,7 +29,8 @@ USER_ONLY = {"set_autopilot": {"on": True},
              "set_ai_login": {"provider": "claude", "id": "default", "excluded": True},
              "set_ai_routing": {"mode": "balance"},
              "set_quota_override": {"bucket": "claude", "on": True},
-             "dismiss_ai_notice": {}}
+             "dismiss_ai_notice": {},
+             "triage_feedback": {"trace_id": "abcdef01", "feedback": "helpful"}}
 YOURS_ALONE = {"restore_app"}  # not a limit: it replaces an app with an older copy, which only a person decides
 PANEL = {n for n, sp in SPECS.items() if sp.panel}  # the Ask Bosun panel's own actions: tests/test_assistant.py
 
@@ -179,6 +180,15 @@ def test_nobody_but_the_user_loosens_a_limit(app, agent, user, name):
         from bosun.providers import ledger, windows
         now = time.time()
         ledger.save(app.store, "claude", (windows.Reading("five_hour", "allowed", 0.8, now + 3600, now),), now=now)
+    if name == "triage_feedback":  # feedback needs an existing run and triage row
+        from bosun.triage import store as tstore
+        from bosun.triage.schema import NextStep, Verdict
+        tid = USER_ONLY[name]["trace_id"]
+        with trace.run("upgrade", subject="brew:jq", trace_id=tid) as r_tr:
+            r_tr.fail("boom")
+        tstore.save_verdict(app.store, f"run:{tid}", tid, "sig-auth", "rules", Verdict(
+            category="unknown", cause="boom", confidence="low", evidence=[],
+            next_step=NextStep(kind="none", why="ok"), needs_person=False, transient=False))
     assert user.post(path, json=USER_ONLY[name], headers=USER).status_code == 200
 
 

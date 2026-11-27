@@ -168,6 +168,14 @@ class TraceIn(_In):
                           description="A trace id, or a unique prefix of one (the log shows the first 8 characters)")
 
 
+class TriageFeedbackIn(TraceIn):
+    feedback: Literal["helpful", "wrong"] = Field(description="Whether Bosun's triage verdict was helpful or wrong")
+
+
+class RunbookIn(_In):
+    topic: str = Field(pattern=r"^[a-z0-9-]{1,60}$", description="A runbook topic name under docs/runbooks/")
+
+
 class UsageIn(_In):
     days: float = Field(30, gt=0, le=366, description="How far back to look")
 
@@ -339,6 +347,12 @@ SPECS: dict[str, ActionSpec] = _specs(
     ActionSpec("diagnose", "A redacted troubleshooting bundle for one run: failed steps first, timeline, log "
                "lines, related failures, machine and tool versions", Risk.READ, DiagnoseIn, "GET",
                "/api/runs/{trace_id}/diagnose"),
+    ActionSpec("get_triage", "Error triage verdict for one run, if one has been recorded",
+               Risk.READ, TraceIn, "GET", "/api/runs/{trace_id}/triage"),
+    ActionSpec("triage_feedback", "Mark a triage verdict as helpful or wrong (removes wrong verdicts from the cache)",
+               Risk.LOCAL, TriageFeedbackIn, "POST", "/api/runs/{trace_id}/triage/feedback", user_only=True),
+    ActionSpec("get_runbook", "Read one Bosun troubleshooting runbook by topic name",
+               Risk.READ, RunbookIn, "GET", "/api/runbooks/{topic}"),
     ActionSpec("llm_usage", "AI plan usage windows, pace, Bosun's share, top jobs, notices, and token detail",
                Risk.READ, UsageIn, "GET", "/api/usage"),
     ActionSpec("query", "Ask the database a question: one read-only SELECT over the documented views and tables "
