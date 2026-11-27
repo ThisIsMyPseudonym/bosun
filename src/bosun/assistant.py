@@ -163,8 +163,33 @@ class Assistant:
             found = self.store.trace(page.run)
             if found:
                 run = found["run"]
-                out["run"] = {k: run[k] for k in ("trace_id", "kind", "subject", "status")}
+                run_ctx: dict[str, Any] = {k: run[k] for k in ("trace_id", "kind", "subject", "status")}
+                tri = self._triage_summary(run["trace_id"])
+                if tri is not None:
+                    run_ctx["triage"] = tri
+                out["run"] = run_ctx
         return out
+
+    def _triage_summary(self, trace_id: str) -> dict[str, Any] | None:
+        from .triage import store as tstore
+
+        tri = tstore.get_by_trace(self.store, trace_id)
+        if tri is None:
+            return None
+        if tri.get("status") == "fixed_since":
+            return {"status": "fixed_since"}
+        v = tri.get("verdict")
+        if tri.get("status") not in ("done", "disputed") or not isinstance(v, dict):
+            return None
+        summary: dict[str, Any] = redact.value({
+            "status": tri["status"],
+            "source": tri["source"],
+            "category": v.get("category"),
+            "cause": v.get("cause"),
+            "confidence": v.get("confidence"),
+            "next_step": v.get("next_step"),
+        })
+        return summary
 
     # --- engines & routing -----------------------------------------------------------------------------------------
     def _sdk_engine(self, model: str, login: accounts.Login | None = None) -> ClaudeSdkEngine:

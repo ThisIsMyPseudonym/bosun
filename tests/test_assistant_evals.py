@@ -54,6 +54,37 @@ def test_a_failed_upgrade_is_diagnosed_from_the_run_and_its_output(panel):
     assert not panel.audit("upgrade")  # and nothing was changed
 
 
+def test_assistant_reads_triage_verdict_and_starts_from_context_verdict(panel):
+    from bosun.triage import store as tstore
+    from bosun.triage.schema import NextStep, Verdict
+
+    trace_id = failed_upgrade(panel.store)
+    tstore.save_verdict(
+        panel.store, f"run:{trace_id}", trace_id, "sig-perm", "rules",
+        Verdict(
+            category="permissions", cause="Homebrew cannot write to its folder.", confidence="high", evidence=[],
+            next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Fix folder ownership."),
+            needs_person=True, transient=False,
+        ),
+    )
+
+    async def script(model):
+        tri = await model.call("get_triage", {"trace_id": trace_id})
+        diag = await model.call("diagnose", {"trace_id": trace_id, "facts": False})
+        assert tri["ok"] and tri["result"]["verdict"]["category"] == "permissions"
+        assert diag["ok"] and diag["result"]["triage"]["verdict"]["cause"] == "Homebrew cannot write to its folder."
+        await model.say("Bosun's triage points to Homebrew permissions.")
+
+    panel.script(script)
+    asked = panel.ask("Why did this fail?", context={"page": "runs", "run": trace_id})
+    events = panel.wait(asked["conversation_id"])
+    assert events[-1][1]["status"] == "ok"
+    assert not [k for k, _ in events if k == "approval"]
+    prompt = panel.fakes[0].model.prompt
+    ctx = json.loads(prompt.splitlines()[1])
+    assert ctx["run"]["triage"]["cause"] == "Homebrew cannot write to its folder."
+
+
 # --- approvals ---------------------------------------------------------------------------------------------------------
 def test_an_approved_action_runs_exactly_as_shown_and_the_audit_says_who_approved(panel):
     async def script(model):

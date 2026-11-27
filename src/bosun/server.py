@@ -954,6 +954,22 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         except RuntimeError as exc:
             raise Conflict(str(exc))
 
+    def _fix_verdicts_for(items: list) -> dict[str, dict]:
+        want = {i.key for i in items}
+        found: dict[str, dict] = {}
+        for fx in store.fixes():
+            if fx.get("status") not in ("failed", "partial", "needs_human") or not fx.get("trace_id"):
+                continue
+            keys = (fx.get("result") or {}).get("keys") if isinstance(fx.get("result"), dict) else None
+            matched = [k for k in (keys or [fx.get("item_key")]) if k in want and k not in found]
+            if not matched:
+                continue
+            tri = tstore.get_by_trace(store, str(fx["trace_id"]))
+            if tri and tri.get("status") == "done" and isinstance(tri.get("verdict"), dict):
+                for k in matched:
+                    found[k] = tri["verdict"]
+        return found
+
     @actions.bind("agent_prompt")
     def agent_prompt(ctx: ActionContext, body: FixIn):
         """A prompt for the user's own coding agent: Bosun's diagnosis, the agent does the work."""
@@ -963,8 +979,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             raise NotFound("Unknown item; refresh and try again")
         items = [item_from_dict(known[k]) for k in body.keys]
         assessments = {i.key: a for i in items if (a := explainer.cached(i))}
+        verdicts = _fix_verdicts_for(items)
         try:
-            return {"prompt": handoff.prompt(items, assessments), "count": len(items)}
+            return {"prompt": handoff.prompt(items, assessments, verdicts=verdicts), "count": len(items)}
         except ValueError as exc:
             raise Invalid(str(exc))
 

@@ -703,6 +703,12 @@ def test_triage_buttons_look_deeper_disabled_provenance_and_related_seen():
       throw new Error("failed Look deeper must keep rules verdict and note failure: " + errCard.textContent);
     }}
 
+    // 6. Copy for an agent appends Bosun's triage (may be wrong) as quoted data
+    const handoffText = H.agentText({{ ...baseTrace, triage: rulesTriage }});
+    if (!handoffText.includes("Bosun's triage (may be wrong") || !handoffText.includes('"Not writable."')) {{
+      throw new Error("agentText missing quoted triage verdict: " + handoffText);
+    }}
+
     (async () => {{
       for (const fn of triBtn.listeners.click || []) await fn();
       for (const fn of lookBtn.listeners.click || []) await fn();
