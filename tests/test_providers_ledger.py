@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from bosun.providers import ledger, windows
+from bosun import notify
+from bosun.providers import ledger, quota, router, windows
 from bosun.store import Store
 
 R = windows.Reading
@@ -234,3 +235,47 @@ def test_a_slightly_future_row_cannot_hide_a_refusal_that_follows(store):
     ledger.save(store, "claude", [Reading("five_hour", "rejected", None, now + 3600, now + 10, "output")], now=now)
     (got,) = ledger.readings(store, "claude")
     assert got.status == "rejected"
+
+
+# --- notices (Task 3.9) ------------------------------------------------------------------------------------------
+
+
+def test_the_first_skip_in_a_window_raises_one_notice(store, monkeypatch):
+    sent: list[str] = []
+    monkeypatch.setattr(ledger, "deliver", lambda store, title, body: sent.append(title) or True)
+    hit = router.Skip("claude", "line", "", hit=quota.Hit("seven_day", 0.78, NOW + 86400))
+    other = router.Skip("codex", "contract", "dropped flag")  # non-line skips do not raise notices
+    assert ledger.notice_skips(store, (hit, other), now=NOW) == 1
+    assert ledger.notice_skips(store, (hit,), now=NOW + 60) == 0  # same window & reset: never twice
+    assert sent == ["Bosun paused background AI work on Claude Code: weekly limit at 78%"]
+    active = ledger.notices(store, now=NOW + 60)
+    assert len(active) == 1
+    assert "resets" in active[0]["body"] and "Let background work go past 75%" in active[0]["body"]
+
+    # Once the reset passes, old keys are pruned and a new window notifies once again
+    assert ledger.notices(store, now=NOW + 86401) == []
+    next_hit = router.Skip("claude", "line", "", hit=quota.Hit("seven_day", 0.82, NOW + 2 * 86400))
+    assert ledger.notice_skips(store, (next_hit,), now=NOW + 86401) == 1
+    assert len(sent) == 2
+    keys = [r[0] for r in store._db.execute("SELECT key FROM settings WHERE key LIKE 'ai_notice:%'").fetchall()]
+    assert len(keys) == 1 and str(int(NOW + 2 * 86400)) in keys[0]
+
+
+def test_notice_delivery_respects_notify_setting_and_read_only_store(tmp_path, monkeypatch):
+    delivered: list[tuple[str, str]] = []
+    monkeypatch.setattr(notify, "deliver", lambda note, url: delivered.append((note.title, url)) or True)
+    db_path = tmp_path / "db.sqlite"
+    hit = router.Skip("claude@work", "line", "", hit=quota.Hit("five_hour", 0.76, None))
+    with Store(db_path) as rw:
+        notify.set_on(rw, False)
+        assert ledger.notice_skips(rw, (hit,), now=NOW) == 1
+        assert delivered == []  # notifications off -> stored for usage page, not pushed to desktop
+        assert len(ledger.notices(rw, now=NOW)) == 1
+        notify.set_on(rw, True)
+        hit2 = router.Skip("codex", "line", "", hit=quota.Hit("five_hour", 0.80, NOW + 3600))
+        assert ledger.notice_skips(rw, (hit2,), now=NOW) == 1
+        assert len(delivered) == 1 and "Codex" in delivered[0][0]
+    with Store(db_path, read_only=True) as ro:
+        assert len(ledger.notices(ro, now=NOW)) == 2
+        with pytest.raises(RuntimeError, match="read-only"):
+            ledger.notice_skips(ro, (hit2,), now=NOW)

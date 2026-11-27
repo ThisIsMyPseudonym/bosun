@@ -17,13 +17,15 @@ import sqlite3
 import sys
 import time
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from itertools import groupby
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
+from bosun import notify
 from bosun.providers.accounts import DEFAULT, ID
 from bosun.providers.catalog import CATALOG
-from bosun.providers.quota import stale
+from bosun.providers.quota import UNDATED_STALE_S, Hit, stale
 from bosun.providers.windows import NAME, SOURCES, Reading, Source, epoch, fraction, status_of, worse
 from bosun.store import Store
 
@@ -248,3 +250,122 @@ def seed_from_coho(store: Store, bucket: str, path: Path | None = None, now: flo
     seeds = _newest_per_window(valid, max_at, max_at - MAX_FUTURE_AT_S)
     save(store, bucket, seeds, now=when)
     return len(seeds)
+
+
+# --- background-skip notices -------------------------------------------------------------------------------------
+
+NOTICE_PREFIX = "ai_notice:"
+DEFAULT_DASHBOARD_URL = "http://127.0.0.1:8787/"
+
+
+class _SkipLike(Protocol):
+    bucket: str
+    reason: str
+    hit: Hit | None
+
+
+def _win_label(window: str) -> str:
+    if window == "five_hour":
+        return "5-hour limit"
+    if window == "seven_day":
+        return "weekly limit"
+    if window.startswith("seven_day_"):
+        return f"weekly ({window.removeprefix('seven_day_')}) limit"
+    if window == "one_day":
+        return "daily limit"
+    return f"{window.removeprefix('quota:')} quota" if window.startswith("quota:") else f"{window} limit"
+
+
+def _notice_text(bucket: str, hit: Hit) -> tuple[str, str]:
+    provider, account = split(bucket)
+    who = CATALOG[provider].label if account == DEFAULT else f"{CATALOG[provider].label} ({account})"
+    label, pct = _win_label(hit.window), f"{round(hit.used * 100)}%"
+    title = f"Bosun paused background AI work on {who}: {label} at {pct}"
+    if hit.resets_at is not None:
+        when = datetime.fromtimestamp(hit.resets_at).astimezone().strftime("%a %I:%M %p").replace(" 0", " ")
+        reset_part = f"resets {when}"
+    else:
+        reset_part = "reset time unknown"
+    body = (f"{who} {label} is at {pct} ({reset_part}). Open the Usage page and click "
+            "Let background work go past 75% until it resets.")
+    return title, body
+
+
+def _parse_notice(raw: str) -> dict[str, Any] | None:
+    try:
+        obj = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("title"), str) or not isinstance(obj.get("body"), str):
+        return None
+    at = _time(obj.get("at"))
+    resets = None if obj.get("resets_at") is None else _time(obj.get("resets_at"))
+    if at is None or (obj.get("resets_at") is not None and resets is None):
+        return None
+    return obj
+
+
+def _notice_expired(item: dict[str, Any], now: float) -> bool:
+    resets = item.get("resets_at")
+    if resets is not None:
+        return float(resets) <= now
+    return now - float(item["at"]) > UNDATED_STALE_S
+
+
+def deliver(store: Store, title: str, body: str, url: str = "") -> bool:
+    """Deliver a desktop notification through Bosun's existing notifier when notifications are on."""
+    if not notify.is_on(store):
+        return False
+    return notify.deliver(notify.Note(title, body), url or DEFAULT_DASHBOARD_URL)
+
+
+def _prepare_notice(skip: _SkipLike, when: float) -> tuple[str, dict[str, Any]] | None:
+    if skip.reason != "line" or skip.hit is None:
+        return None
+    try:
+        split(skip.bucket)
+    except ValueError:
+        return None
+    used = fraction(skip.hit.used)
+    resets = None if skip.hit.resets_at is None else _time(skip.hit.resets_at)
+    if not valid_window(skip.hit.window) or used is None or (resets is not None and resets <= when):
+        return None
+    clean_hit = Hit(skip.hit.window, used, resets)
+    title, body = _notice_text(skip.bucket, clean_hit)
+    tag = str(int(resets)) if resets is not None else "undated"
+    key = f"{NOTICE_PREFIX}{skip.bucket}:{clean_hit.window}:{tag}"
+    payload = {"bucket": skip.bucket, "window": clean_hit.window, "used": used, "resets_at": resets,
+               "at": when, "title": title, "body": body}
+    return key, payload
+
+
+def notice_skips(store: Store, skips: Iterable[_SkipLike], now: float | None = None) -> int:
+    """Record and deliver one notice per (bucket, window, reset) for background 75%-line skips, pruning old keys."""
+    if store.read_only:
+        raise RuntimeError("Store is read-only")
+    when = time.time() if now is None else now
+    prepared = [p for s in skips if (p := _prepare_notice(s, when)) is not None]
+    to_send: list[tuple[str, str]] = []
+    with store._tx(write=True) as db:
+        rows = db.execute("SELECT key, value FROM settings WHERE key LIKE ?", (f"{NOTICE_PREFIX}%",)).fetchall()
+        expired = [(row["key"],) for row in rows
+                   if (item := _parse_notice(row["value"])) is None or _notice_expired(item, when)]
+        if expired:
+            db.executemany("DELETE FROM settings WHERE key = ?", expired)
+        for key, payload in prepared:
+            cur = db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, json.dumps(payload)))
+            if cur.rowcount == 1:
+                to_send.append((str(payload["title"]), str(payload["body"])))
+    for title, body in to_send:
+        deliver(store, title, body)
+    return len(to_send)
+
+
+def notices(store: Store, now: float | None = None) -> list[dict[str, Any]]:
+    """Active background-skip notices for the usage page (read-only)."""
+    when = time.time() if now is None else now
+    with store._tx() as db:
+        rows = db.execute("SELECT value FROM settings WHERE key LIKE ?", (f"{NOTICE_PREFIX}%",)).fetchall()
+    active = [item for row in rows
+              if (item := _parse_notice(row["value"])) is not None and not _notice_expired(item, when)]
+    return sorted(active, key=lambda n: (-float(n["at"]), str(n.get("bucket", "")), str(n.get("window", ""))))
