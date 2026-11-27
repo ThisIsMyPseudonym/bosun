@@ -76,3 +76,50 @@ def test_normalize_line_strips_timestamps_hashes_versions_numbers_and_item_name(
     # Regular English words made of hex letters (e.g. "feedback") are not clobbered
     assert "feedback" in normalize_line("User feedback required")
 
+
+def test_different_error_exit_hresult_and_http_codes_give_different_signatures():
+    def wg(output: str) -> FailureRecord:
+        return FailureRecord(
+            failure="job:1", what="job", what_id="1", kind="upgrade", subject="winget:Foo.Bar",
+            item_source="winget", status="failed", ts=100.0, actor="autopilot", trace_id="t1",
+            error=output, command=("winget", "upgrade", "--id", "Foo.Bar"), exit_code=1, output=output,
+        )
+
+    # Different Windows HRESULTs must not collide
+    assert signature(wg("Installer failed with HRESULT 0x80070005")) != signature(
+        wg("Installer failed with HRESULT 0x80073d28")
+    )
+    assert signature(wg("0x80070005 : Installer failed")) != signature(
+        wg("0x80073d28 : Installer failed")
+    )
+    # Different installer exit codes must not collide
+    assert signature(wg("Installer failed with exit code: 1618")) != signature(
+        wg("Installer failed with exit code: 1603")
+    )
+    assert signature(wg("Installer failed with exit code: 1641")) != signature(
+        wg("Installer failed with exit code: 3010")
+    )
+    # Different HTTP status codes must not collide
+    assert signature(_rec("brew-cask:foo", "foo", 1, "HTTP 404 from registry")) != signature(
+        _rec("brew-cask:foo", "foo", 1, "HTTP 503 from registry")
+    )
+    assert signature(_rec("brew-cask:foo", "foo", 1, "HTTP/1.1 404 Not Found")) != signature(
+        _rec("brew-cask:foo", "foo", 1, "HTTP/1.1 503 Not Found")
+    )
+    assert signature(_rec("brew-cask:foo", "foo", 1, "request failed with status 404")) != signature(
+        _rec("brew-cask:foo", "foo", 1, "request failed with status 503")
+    )
+    assert signature(
+        _rec("brew-cask:foo", "foo", 1, "GET https://registry.npmjs.org/foo/-/foo-1.0.0.tgz 404")
+    ) != signature(
+        _rec("brew-cask:foo", "foo", 1, "GET https://registry.npmjs.org/foo/-/foo-1.0.0.tgz 503")
+    )
+    # Same error code with volatile PID/temp name/path/hash still matches
+    assert signature(
+        wg("2026-11-27T10:00:00Z Installer failed (pid 1234, tmpAbCdEf12) with exit code: 1618")
+    ) == signature(
+        wg("2026-11-28T11:00:00Z Installer failed (pid 9876, tmpXyZaBc99) with exit code: 1618")
+    )
+    # Same HRESULT regardless of hex case matches
+    assert signature(wg("HRESULT 0x80073D28 failed")) == signature(wg("HRESULT 0x80073d28 failed"))
+

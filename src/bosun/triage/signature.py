@@ -29,6 +29,50 @@ _HEX_RE = re.compile(r"\b(?:0x[0-9a-fA-F]{4,}|(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{7,}|
 _TMP_NAME_RE = re.compile(r"\btmp[A-Za-z0-9_-]{6,}\b")
 _NUM_RE = re.compile(r"\b\d+\b")
 _WS_RE = re.compile(r"\s+")
+_CODE_PRESERVE_RE = re.compile(
+    r"(?:"
+    r"(?P<p_exit>\b(?:exit\s+code|exit\s+status|return\s*code|returncode|error\s+code|errno)\b[:=\s(\[]*)"
+    r"(?P<c_exit>-?\d+|0x[0-9a-fA-F]{4,8})\b"
+    r"|"
+    r"(?P<p_hex>\b(?:hresult|ntstatus|win32|error|err|status|code|failed\s+with)\b[:=\s(\[]*)"
+    r"(?P<c_hex>0x[0-9a-fA-F]{4,8})\b"
+    r"|"
+    r"(?P<c_hresult>\b0x[8cC][0-9a-fA-F]{7}\b)"
+    r"|"
+    r"(?P<p_http>(?:\bHTTP(?:/(?:<ver>|\d(?:\.\d)?))?|\bstatus(?:\s+code)?|<url>)[:=\s]+)"
+    r"(?P<c_http>[1-5]\d{2})\b"
+    r"|"
+    r"(?P<p_neg>\berror\b[:=\s(\[]*)(?P<c_neg>-\d+)\b"
+    r")",
+    re.I,
+)
+_SENTINEL_ALPHA = "ghjklmnpqrstvwxz"
+
+
+def _sentinel(index: int) -> str:
+    chars: list[str] = []
+    n = index
+    while True:
+        chars.append(_SENTINEL_ALPHA[n % len(_SENTINEL_ALPHA)])
+        n //= len(_SENTINEL_ALPHA)
+        if n == 0:
+            break
+    return f"\x00z{''.join(chars)}\x00"
+
+
+def _protect_codes(text: str) -> tuple[str, list[tuple[str, str]]]:
+    kept: list[tuple[str, str]] = []
+
+    def _sub(m: re.Match[str]) -> str:
+        prefix = m.group("p_exit") or m.group("p_hex") or m.group("p_http") or m.group("p_neg") or ""
+        code = m.group("c_exit") or m.group("c_hex") or m.group("c_hresult") or m.group("c_http") or m.group("c_neg") or ""
+        if code.lower().startswith("0x"):
+            code = code.lower()
+        token = _sentinel(len(kept))
+        kept.append((token, code))
+        return f"{prefix}{token}"
+
+    return _CODE_PRESERVE_RE.sub(_sub, text), kept
 
 
 def _basename(token: str) -> str:
@@ -103,9 +147,12 @@ def normalize_line(line: str, item_name: str = "") -> str:
     if len(item_name) >= 2:
         text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(item_name)}(?![A-Za-z0-9_])", "<item>", text, flags=re.I)
     text = _SEMVER_RE.sub("<ver>", text)
+    text, kept = _protect_codes(text)
     text = _HEX_RE.sub("<hex>", text)
     text = _TMP_NAME_RE.sub("<tmp>", text)
     text = _NUM_RE.sub("<num>", text)
+    for token, code in kept:
+        text = text.replace(token, code)
     return _WS_RE.sub(" ", text).strip()
 
 
