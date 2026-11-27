@@ -104,29 +104,38 @@ def test_added_login_folders_are_normalized_and_unsafe_or_duplicate_folders_reje
 
     fake_home = tmp_path / "home"
     default_claude = fake_home / ".claude"
+    default_codex = fake_home / ".codex"
     work = fake_home / ".claude-work"
     symlink_to_work = fake_home / "work-link"
     default_claude.mkdir(parents=True)
+    default_codex.mkdir()
     work.mkdir()
     symlink_to_work.symlink_to(work)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
 
     # Reject `..`, `/`, user's home itself, and the CLI's default folder
-    for bad_home, word in (
-        (f"{work}/../.claude-work", ".."),
-        ("/", "root"),
-        (str(fake_home), "home"),
-        (str(default_claude), "default"),
+    for provider, bad_home, word in (
+        ("claude", f"{work}/../.claude-work", ".."),
+        ("claude", "/", "root"),
+        ("claude", str(fake_home), "home"),
+        ("codex", str(default_codex), "default"),
     ):
-        r = client.post("/api/ai/logins", json={"provider": "claude", "id": "bad", "label": "Bad", "home": bad_home},
+        r = client.post("/api/ai/logins", json={"provider": provider, "id": "bad", "label": "Bad", "home": bad_home},
                         headers=H)
         assert r.status_code == 400 and word in r.json()["detail"].lower(), (bad_home, r.status_code, r.text)
 
-    # Adding through a symlink normalizes to realpath in storage
+    # Claude ties a login to the exact CLAUDE_CONFIG_DIR string: set to its own default folder, it is a second login
+    # beside the unset default (this Mac's account 2), so that one folder is allowed for Claude.
+    r = client.post("/api/ai/logins", json={"provider": "claude", "id": "two", "label": "Two",
+                                            "home": f"{default_claude}/"}, headers=H)
+    assert r.status_code == 200, r.text
+    assert accounts.stored(app.store)[0].home == str(default_claude)  # trailing slash gone, the string otherwise kept
+
+    # Adding through a symlink keeps the folder as written (the login is tied to that string), checked by realpath
     r = client.post("/api/ai/logins", json={"provider": "claude", "id": "work", "label": "Work",
                                             "home": str(symlink_to_work)}, headers=H)
     assert r.status_code == 200
-    assert accounts.stored(app.store)[0].home == os.path.realpath(work)
+    assert accounts.stored(app.store)[1].home == str(symlink_to_work) != os.path.realpath(work)
 
     # Duplicate folder (direct path matching previously symlinked login) is rejected
     dup = client.post("/api/ai/logins", json={"provider": "claude", "id": "work2", "label": "Work2",

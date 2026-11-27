@@ -96,9 +96,11 @@ def test_every_login_drops_override_keys_and_added_logins_point_at_their_folder(
     env, unset = accounts.login_env(work)
     assert env == {"CLAUDE_CONFIG_DIR": "/Users/me/.claude-work"}
     assert set(unset) == set(spec("claude").override_env)
-    # Default logins also drop override_env so a subscription bucket never silently bills an API key
-    assert accounts.login_env(accounts.default("claude", "claude")) == ({}, spec("claude").override_env)
-    assert accounts.login_env(accounts.default("codex", "codex")) == ({}, spec("codex").override_env)
+    # Default logins also drop override_env so a subscription bucket never silently bills an API key, and the
+    # folder variable, so the default login is the CLI's own whatever the dashboard itself was started with
+    assert accounts.login_env(accounts.default("claude", "claude")) == (
+        {}, (*spec("claude").override_env, "CLAUDE_CONFIG_DIR"))
+    assert accounts.login_env(accounts.default("codex", "codex")) == ({}, (*spec("codex").override_env, "CODEX_HOME"))
     assert accounts.login_env(accounts.default("muse", "muse")) == ({}, ("META_API_KEY",))
     assert accounts.login_env(accounts.Login("muse", "x1", "X", "/m", False, "muse")) == ({}, ("META_API_KEY",))
     assert accounts.login_env(accounts.default("antigravity", "agy")) == ({}, ())
@@ -116,6 +118,13 @@ def test_an_added_grok_login_gets_a_short_per_login_leader_socket():
     assert got[1] != got_other[1]  # distinct per login
     # Must stay comfortably under the 104-byte Unix domain socket limit (even with Grok's `.daemon` suffix)
     assert len((got[1] + ".daemon").encode()) < 104
+    # ...and in a folder only this user can use, never a guessable name in the shared /tmp
+    import os
+    import stat
+    folder = os.path.dirname(got[1])
+    assert not folder.rstrip("/") == "/tmp" and not folder.startswith("/tmp/bosun-grok")
+    st = os.stat(folder)
+    assert st.st_uid == os.getuid() and not stat.S_IMODE(st.st_mode) & 0o077
     assert accounts.login_args(work, ("--version",)) == ("--version",)  # only a prompt call starts a leader
     assert accounts.login_args(work, ("usage", "--json")) == ("usage", "--json")
     assert accounts.login_args(accounts.default("grok", "grok"), prompt_call) == prompt_call
@@ -213,3 +222,22 @@ def test_overview_end_to_end_surfaces_a_failing_contract_verdict(store, monkeypa
     assert got["claude"]["contract"] == {"ok": False, "finding": "Claude Code 2.1.332 dropped `--strict-mcp-config`"}
     assert got["grok"]["version"] == "1.0.70"
     assert got["grok"]["contract"] == {"ok": False, "finding": "Grok 1.0.70 dropped `--no-memory`"}
+
+
+def test_a_long_or_shared_temp_folder_falls_back_to_a_private_tmp_folder(monkeypatch, tmp_path):
+    import os
+    import stat
+
+    if os.name == "nt":
+        return
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(accounts.tempfile, "gettempdir", lambda: "/var/folders/" + "x" * 80 + "/T")
+    folder = accounts._socket_dir()
+    assert folder == f"/tmp/bosun-{os.getuid()}"
+    st = os.lstat(folder)
+    assert stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not stat.S_IMODE(st.st_mode) & 0o077
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o777)
+    os.chmod(shared, 0o777)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(shared))  # world-writable: never used
+    assert accounts._socket_dir() == folder

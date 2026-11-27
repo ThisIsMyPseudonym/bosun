@@ -17,6 +17,8 @@ import json
 import os
 import re
 import shutil
+import stat
+import sys
 import tempfile
 import threading
 from dataclasses import asdict, dataclass
@@ -162,8 +164,10 @@ def login_env(login: Login) -> tuple[dict[str, str], tuple[str, ...]]:
     folder in the CLI's variable, and on every login (default included) the keys and endpoint overrides that would
     bill an API key or route away from the subscription. Pass both to `proc.run(env=..., unset=...)`."""
     s = CATALOG[login.provider]
-    env = {s.home_env: login.home} if login.id != DEFAULT and login.home and s.home_env is not None else {}
-    return env, s.override_env
+    if login.id != DEFAULT and login.home and s.home_env is not None:
+        return {s.home_env: login.home}, s.override_env
+    # the default login is the CLI's own folder, whatever folder variable the dashboard itself was started with
+    return {}, (*s.override_env, s.home_env) if s.home_env is not None else s.override_env
 
 
 # Grok subcommands and flags that start no leader process, so take no --leader-socket.
@@ -171,12 +175,41 @@ GROK_NO_LEADER = frozenset({"--version", "-V", "--help", "-h", "models", "login"
                             "leader", "help"})
 
 
+SOCKET_DIR_MAX = 60  # leaves room for the socket's name and Grok's `.daemon` within sun_path's 104 bytes
+
+
+def _private_dir(path: str) -> bool:
+    """A real folder (not a link) that only this user owns and can use."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not stat.S_IMODE(st.st_mode) & 0o077
+
+
+def _socket_dir() -> str:
+    """A short folder only this user can use, for Unix sockets: never a guessable name in the shared /tmp, where
+    another local user could create the path first and pose as the leader."""
+    if os.name == "nt":
+        return tempfile.gettempdir()
+    for candidate in (os.environ.get("XDG_RUNTIME_DIR", ""),
+                      tempfile.gettempdir() if sys.platform == "darwin" else ""):  # macOS: the per-user /var/folders/.../T
+        if candidate and len(candidate) <= SOCKET_DIR_MAX and _private_dir(candidate):
+            return candidate
+    own = f"/tmp/bosun-{os.getuid()}"
+    try:
+        os.mkdir(own, 0o700)
+    except FileExistsError:
+        pass
+    if not _private_dir(own):
+        raise RuntimeError(f"{own} is not a private folder of this user; remove it and try again")
+    return own
+
+
 def _grok_socket(login: Login) -> str:
     """Short per-login Unix socket path (well under the ~104-byte sun_path limit, even with Grok's `.daemon`)."""
     digest = hashlib.sha256(f"{login.id}\0{login.home}".encode()).hexdigest()[:12]
-    uid = os.getuid() if hasattr(os, "getuid") else 0
-    base = "/tmp" if os.name != "nt" else tempfile.gettempdir()
-    return os.path.join(base, f"bosun-grok-{uid}-{digest}.sock")
+    return os.path.join(_socket_dir(), f"bosun-grok-{digest}.sock")
 
 
 def login_args(login: Login, args: tuple[str, ...]) -> tuple[str, ...]:
@@ -204,7 +237,8 @@ def _spec_for(provider: str, missing: type[Exception] = Invalid) -> ProviderSpec
 
 
 def _validate_home(s: ProviderSpec, raw_home: str, entries: list[Stored]) -> str:
-    """Normalize an added login's folder with realpath and reject unsafe or duplicate targets."""
+    """An added login's folder, as the user wrote it (a CLI may tie its login to that exact string), tidied of
+    repeated and trailing slashes. Where it really points (realpath) decides whether it is unsafe or a duplicate."""
     home = raw_home.strip()
     if not _absolute(home):
         raise Invalid("The login folder must be an absolute path")
@@ -212,16 +246,16 @@ def _validate_home(s: ProviderSpec, raw_home: str, entries: list[Stored]) -> str
         raise Invalid("The login folder must not contain `..` segments")
     if not os.path.isdir(home):  # a stat, not a read: Bosun never opens a file in a login folder
         raise Invalid(f"No folder at {home}; sign in with {s.home_env} set to it first")
-    real = os.path.realpath(home)
+    home, real = os.path.normpath(home), os.path.realpath(home)
     if _is_root(real):
         raise Invalid("The login folder cannot be the filesystem root")
     if real in {str(Path.home()), os.path.realpath(Path.home())}:
         raise Invalid("The login folder cannot be your home folder itself")
-    if _default_home(s) == real:
+    if _default_home(s) == real and not s.home_string_is_login:
         raise Invalid(f"That folder is already {s.label}'s default login folder")
-    if any(e.home is not None and os.path.realpath(e.home) == real for e in entries):
+    if any(e.home is not None and os.path.realpath(e.home) == real for e in entries if e.provider == s.id):
         raise Invalid("Another login already uses that folder")
-    return real
+    return home
 
 
 def add(store: Store, provider: str, login_id: str, label: str, home: str) -> dict[str, Any]:

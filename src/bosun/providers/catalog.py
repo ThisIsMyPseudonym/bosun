@@ -68,6 +68,9 @@ class ProviderSpec:
     features_args: tuple[str, ...] = ()  # e.g. ("features", "list", ...) to verify feature flags exist
     lockdown_features: tuple[str, ...] = ()  # feature names passed to --disable; a version lacking one fails closed
     fixer_flags: tuple[str, ...] = ()  # flags used only by the fixer, kept separate so one-shots aren't blocked
+    # The login is tied to the exact home_env string, so home_env set to the default folder is a second login beside
+    # the unset default (Claude Code: this Mac's two accounts share ~/.claude that way).
+    home_string_is_login: bool = False
 
 
 CLAUDE_FLAGS = ("--tools", "--disallowedTools", "--strict-mcp-config", "--setting-sources", "--no-session-persistence",
@@ -105,7 +108,8 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
                  HELP, CLAUDE_FLAGS, "CLAUDE_CONFIG_DIR",
                  ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
                   "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"), "~/.claude",
-                 "haiku", "sonnet", "output", ("api.anthropic.com",), fixer_flags=CLAUDE_FIXER_FLAGS),
+                 "haiku", "sonnet", "output", ("api.anthropic.com",), fixer_flags=CLAUDE_FIXER_FLAGS,
+                 home_string_is_login=True),
     ProviderSpec("codex", "Codex", "codex", frozenset({C.TEXT, C.JSON, C.VISION}), EXEC_HELP, CODEX_FLAGS,
                  "CODEX_HOME", ("CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"), "~/.codex",
                  "gpt-5.6-luna", "gpt-5.6-terra", "output", ("chatgpt.com", "api.openai.com"),
@@ -113,7 +117,8 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
                  lockdown_features=CODEX_DISABLED_FEATURES),
     ProviderSpec("gemini", "Gemini CLI", "gemini", ONE_SHOT, HELP, GEMINI_FLAGS, "GEMINI_CLI_HOME",
                  ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI",
-                  "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT"), "~/.gemini", "gemini-3.8-flash",
+                  "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+                  "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL"), "~/.gemini", "gemini-3.8-flash",
                  "gemini-3.1-pro", "estimated",
                  ("generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com", "oauth2.googleapis.com")),
     # Grok's --tools and --disallowed-tools cover built-in tools only: MCP servers in GROK_HOME still load, so it
