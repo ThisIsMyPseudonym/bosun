@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
 from collections.abc import Mapping, Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime
@@ -295,12 +296,30 @@ def _evaluate(job: catalog.Job, capable: frozenset[str], entries: list[tuple[str
     return candidates, skipped
 
 
+UNKNOWN_PACE = 0.5
+
+
+def _balance_order(candidates: list[Candidate]) -> list[Candidate]:
+    """Rank candidates by lowest pace; unknown pace uses the median of known paces (0.5 if none); ties stay in
+    owner's order (Python's sort is stable)."""
+    known = [c.pace for c in candidates if c.pace is not None and math.isfinite(c.pace)]
+    fallback = statistics.median(known) if known else UNKNOWN_PACE
+    return sorted(candidates, key=lambda c: fallback if c.pace is None else c.pace)
+
+
+def _job_mode(job: str, rs: RoutingSettings) -> str:
+    override = rs.job_modes.get(job)
+    return override if override in MODES else rs.mode
+
+
 def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
     """Filter and order candidates for `job` from pure `ctx` (no store, no clock)."""
     capable = frozenset(catalog.capable(job))
     job_spec = catalog.JOBS[job]
     entries = _ordered_entries(ctx)
     candidates, skipped = _evaluate(job_spec, capable, entries, ctx, clicked=clicked)
-    mode = ctx.settings.mode
+    mode = _job_mode(job, ctx.settings)
+    if mode == "balance":
+        candidates = _balance_order(candidates)
     fell_back = _fell_back_from(entries, candidates, skipped, frozenset(ctx.settings.order)) if mode == "default" else None
     return Route(job, tuple(candidates), tuple(skipped), mode, fell_back)

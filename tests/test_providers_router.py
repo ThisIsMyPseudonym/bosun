@@ -216,3 +216,53 @@ def test_default_mode_runs_your_choice_then_your_preference_order():
     # All candidates skipped -> fell_back_from is None
     all_out = router.plan("summarize", ctx(logins=(_login("claude"),), readings=at_limit))
     assert all_out.candidates == () and all_out.fell_back_from is None
+
+
+# --- Task 3.6: balance by pace -----------------------------------------------------------------------------------
+
+
+def test_balance_picks_the_login_furthest_behind_its_pace_and_an_unread_one_ranks_in_the_middle():
+    # Clicked job: claude at 90% (pace 1.125), codex at 10% (pace 0.125), unread -> median 0.625
+    readings = {
+        "claude": (R("five_hour", "allowed", 0.9, NOW + 3600, NOW),),
+        "codex": (R("five_hour", "allowed", 0.1, NOW + 3600, NOW),),
+    }
+    rs = dataclasses.replace(router.RoutingSettings.default(), mode="balance")
+    route = router.plan("explain", ctx(readings=readings, settings=rs), clicked=True)
+    order = [c.bucket for c in route.candidates]
+    assert route.mode == "balance" and route.fell_back_from is None
+    assert order[0] == "codex" and order.index("gemini") < order.index("claude")
+    assert next(c for c in route.candidates if c.bucket == "gemini").pace is None
+
+    # Background job: claude at 72% (below 75% line, pace 0.9), codex at 10% (pace 0.125), unread -> median 0.5125
+    bg_readings = {
+        "claude": (R("five_hour", "allowed", 0.72, NOW + 3600, NOW),),
+        "codex": (R("five_hour", "allowed", 0.1, NOW + 3600, NOW),),
+    }
+    bg_order = [c.bucket for c in router.plan("summarize", ctx(readings=bg_readings, settings=rs)).candidates]
+    assert bg_order[0] == "codex" and bg_order.index("gemini") < bg_order.index("claude")
+
+
+def test_balance_breaks_ties_by_owners_order_and_uses_0_5_when_all_unknown():
+    rs = dataclasses.replace(router.RoutingSettings.default(), mode="balance", order=("gemini", "codex"))
+    # No readings at all -> all 0.5 -> owner's order wins
+    none_known = [c.bucket for c in router.plan("summarize", ctx(settings=rs)).candidates]
+    assert none_known == ["gemini", "codex", "claude", "claude@work"]
+
+    # Equal paces: claude and codex both 0.5; owner prefers codex over claude
+    same = {
+        "claude": (R("five_hour", "allowed", 0.4, NOW + 3600, NOW),),  # pace 0.5
+        "codex": (R("five_hour", "allowed", 0.4, NOW + 3600, NOW),),   # pace 0.5
+    }
+    tied = [c.bucket for c in router.plan("summarize", ctx(readings=same, settings=rs)).candidates]
+    assert tied == ["gemini", "codex", "claude", "claude@work"]
+
+    # Per-job mode overrides global mode
+    per_job = dataclasses.replace(router.RoutingSettings.default(), mode="default", order=("claude", "codex"),
+                                  job_modes={"summarize": "balance"})
+    bg_readings = {
+        "claude": (R("five_hour", "allowed", 0.72, NOW + 3600, NOW),),
+        "codex": (R("five_hour", "allowed", 0.10, NOW + 3600, NOW),),
+    }
+    assert router.plan("summarize", ctx(readings=bg_readings, settings=per_job)).candidates[0].bucket == "codex"
+    assert router.plan("explain", ctx(readings=bg_readings, settings=per_job)).candidates[0].bucket == "claude"
