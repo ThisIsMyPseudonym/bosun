@@ -81,9 +81,9 @@ async def main():
             await session.initialize()
             listed = await session.list_tools()
             names = {{t.name for t in listed.tools}}
-            assert "diagnose" in names and "status" in names and "read_guide" in names
-            for forbidden in ("upgrade", "start_fix", "set_ai_routing", "triage", "wait_run", "assistant_ask"):
-                assert forbidden not in names, f"write tool exposed to triage: {{forbidden}}"
+            assert "diagnose" in names and "get_trace" in names and "get_triage" in names and "get_runbook" in names and "read_guide" in names
+            for forbidden in ("upgrade", "start_fix", "set_ai_routing", "triage", "wait_run", "assistant_ask", "query", "ai_logins", "status", "list_runs"):
+                assert forbidden not in names, f"disallowed tool exposed to triage: {{forbidden}}"
 
             diag = await session.call_tool("diagnose", {{"trace_id": trace_id, "facts": False}})
             diag_body = json.loads(diag.content[0].text)

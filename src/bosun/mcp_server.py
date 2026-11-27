@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from . import auth, launcher
 from .config import PROJECT_ROOT, Settings
-from .registry import AGENT_TIER_SETTINGS, SPECS, ActionError, ActionSpec, Risk, TraceIn
+from .registry import AGENT_TIER_SETTINGS, SPECS, TRIAGE_ALLOWED_ACTIONS, ActionError, ActionSpec, Risk, TraceIn
 
 log = logging.getLogger(__name__)
 
@@ -117,8 +117,11 @@ def tool_specs() -> dict[str, ActionSpec]:
 
 
 def triage_tool_specs() -> dict[str, ActionSpec]:
-    """Read-only non-panel, non-user-only actions exposed to `bosun mcp --as triage`."""
-    return {name: sp for name, sp in SPECS.items() if sp.risk == Risk.READ and not sp.panel and not sp.user_only}
+    """Read-only actions scoped to this run and runbooks, exposed to `bosun mcp --as triage`."""
+    return {
+        name: sp for name, sp in SPECS.items()
+        if sp.risk == Risk.READ and not sp.panel and not sp.user_only and name in TRIAGE_ALLOWED_ACTIONS
+    }
 
 
 def tools(helpers: dict[str, tuple[type[BaseModel], str]] | None = None,

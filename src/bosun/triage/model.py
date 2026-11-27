@@ -218,14 +218,14 @@ def _validate_verdict(payload: Any) -> tuple[Verdict | None, str]:
 
 def _invoke_candidate(
     cand: router.Candidate, chosen_model: str, settings: Settings, bundle: Mapping[str, Any],
-    offered: Sequence[Mapping[str, Any]], tokens: auth.TriageTokens, triage_trace: str, timeout: float,
+    offered: Sequence[Mapping[str, Any]], tokens: auth.TriageTokens, target_trace: str, timeout: float,
 ) -> tuple[proc.Result, float, int]:
     schema_dict = Verdict.model_json_schema()
     schema_dict["additionalProperties"] = False
     acct_env, unset = accounts.login_env(cand.login)
     use_mcp = cand.provider in argv.TRIAGE_MCP_BUILDERS
     call_prompt = tprompt.build_prompt(bundle, offered, with_mcp=use_mcp)
-    tok = tokens.issue(triage_trace) if use_mcp else ""
+    tok = tokens.issue(target_trace) if use_mcp else ""
     try:
         with tempfile.TemporaryDirectory(prefix="bosun-triage-") as tmp:
             if use_mcp:
@@ -264,7 +264,7 @@ def _run_one(
     before = {r.window: r for r in ledger.readings(store, cand.bucket)}
     chosen_model = catalog.models_for(cand.provider, tier, settings=settings)
     res, took_ms, prompt_chars = _invoke_candidate(
-        cand, chosen_model, settings, bundle, offered, tokens, triage_trace, remaining,
+        cand, chosen_model, settings, bundle, offered, tokens, rec.trace_id, remaining,
     )
     at = now()
     rep = replies.parse(cand.provider, res, at)

@@ -251,12 +251,14 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             return JSONResponse({"error": "triage can only call read-only actions"}, status_code=403)
         if path.startswith(("/api/assistant", "/api/icon", "/api/terminal")):
             return JSONResponse({"error": "this panel route is not open to triage"}, status_code=403)
-        if triage_tokens.consume_call(triage_token) is None:
+        grant = triage_tokens.consume_call(triage_token)
+        if grant is None:
             return JSONResponse(
                 {"error": "Triage tool-call limit reached. Stop calling tools and emit your JSON verdict now."},
                 status_code=429,
             )
         request.state.actor, request.state.surface = registry.TRIAGE, "triage"
+        request.state.triage_grant = grant
         return None
 
     @app.middleware("http")
@@ -979,12 +981,22 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             log.exception("triage availability check failed")
             return False, "Model triage availability could not be checked"
 
+    def _check_triage_trace(ctx: ActionContext, requested: str) -> None:
+        if ctx.actor == registry.TRIAGE and (not ctx.triage_trace_id or not ctx.triage_trace_id.startswith(requested)):
+            raise registry.Forbidden("triage token is bound to a different run")
+
+    def _verify_triage_trace(ctx: ActionContext, resolved: str) -> None:
+        if ctx.actor == registry.TRIAGE and resolved != ctx.triage_trace_id:
+            raise registry.Forbidden("triage token is bound to a different run")
+
     @actions.bind("get_trace")
     def get_trace(ctx: ActionContext, body: TraceIn):
+        _check_triage_trace(ctx, body.trace_id)
         found = store.trace(body.trace_id)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
         tid = found["run"]["trace_id"]
+        _verify_triage_trace(ctx, tid)
         avail, reason = _triage_availability()
         return {
             **found,
@@ -998,17 +1010,22 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
 
     @actions.bind("diagnose")
     def diagnose_run(ctx: ActionContext, body: DiagnoseIn):
-        found = diagnose.bundle(store, s, body.trace_id, facts=body.facts)
+        _check_triage_trace(ctx, body.trace_id)
+        facts = False if ctx.actor == registry.TRIAGE else body.facts
+        found = diagnose.bundle(store, s, body.trace_id, facts=facts)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
+        _verify_triage_trace(ctx, str((found.get("run") or {}).get("trace_id") or ""))
         return found
 
     @actions.bind("get_triage")
     def get_triage(ctx: ActionContext, body: TraceIn):
+        _check_triage_trace(ctx, body.trace_id)
         found = store.trace(body.trace_id)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
         tid = found["run"]["trace_id"]
+        _verify_triage_trace(ctx, tid)
         avail, reason = _triage_availability()
         base = _triage_or_none(tid) or {"trace_id": tid, "status": None, "verdict": None}
         return {**base, "triage_available": avail, "triage_unavailable_reason": reason}
@@ -1158,7 +1175,12 @@ def _endpoint(actions: Actions, spec: ActionSpec, assistant: Assistant | None = 
             headers = {TRACE_HEADER: tid} if tid else None
             return JSONResponse(jsonable_encoder(result), status_code=spec.status_code, headers=headers)
         # the guard (create_app's _refuse_agent) names an agent; anyone else it let through is you, in the browser
-        ctx = ActionContext(actor=getattr(request.state, "actor", "user"), surface=getattr(request.state, "surface", "http"))
+        triage_grant = getattr(request.state, "triage_grant", None)
+        ctx = ActionContext(
+            actor=getattr(request.state, "actor", "user"),
+            surface=getattr(request.state, "surface", "http"),
+            triage_trace_id=triage_grant.trace_id if triage_grant is not None else None,
+        )
         # an action that changes something is a run: say which, so whoever asked can follow it (wait_run, the Runs page)
         headers = {TRACE_HEADER: ctx.trace_id} if spec.risk != Risk.READ else None
         try:  # handlers block (subprocesses, Claude): keep them off the event loop, as plain `def` routes were

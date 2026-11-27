@@ -27,7 +27,7 @@ def test_actor_triage_may_call_read_actions_and_nothing_else_even_with_approval(
 
     for name, spec in SPECS.items():
         ctx = ActionContext(actor=registry.TRIAGE, surface="triage", approval=asked.id)
-        if spec.risk == Risk.READ and not spec.user_only:
+        if spec.risk == Risk.READ and not spec.user_only and name in registry.TRIAGE_ALLOWED_ACTIONS:
             assert actions.permit(spec, ctx, Empty()) is None, name
         else:
             with pytest.raises(Forbidden):
