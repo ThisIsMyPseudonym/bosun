@@ -267,3 +267,26 @@ def test_malformed_or_far_future_overrides_are_dropped_and_each_window_ends_at_i
         assert res["windows"] == {"five_hour": now + 3600, "seven_day": now + 3 * 86400}
         assert sorted((o.window, o.until) for o in routing.overrides(s, now=now)) == [
             ("five_hour", now + 3600), ("seven_day", now + 3 * 86400)]
+
+
+def test_the_router_context_counts_background_calls_this_refresh_and_today(tmp_path, monkeypatch):
+    from bosun import llm, trace
+    from bosun.providers import routing
+
+    now = time.time()
+    with Store(tmp_path / "db.sqlite") as s:
+        trace.configure(s.path)
+        try:
+            monkeypatch.setattr(accounts, "logins", lambda *a, **k: (accounts.default("gemini", "/bin/gemini"),))
+            with trace.run("refresh"):
+                for _ in range(3):
+                    llm.record("summarize", outcome="ok", provider="gemini", job="summarize")
+                llm.record("explain", outcome="ok", provider="gemini", job="explain")  # clicked: not counted
+                llm.record("summarize", outcome="cached", provider="gemini", job="summarize")  # no call made
+                inside = routing.context(s, now=now).background_calls
+            with trace.run("refresh"):
+                llm.record("summarize", outcome="ok", provider="gemini", job="summarize")
+                later = routing.context(s, now=now).background_calls
+        finally:
+            trace.configure(None)
+    assert inside == {"gemini": (3, 3)} and later == {"gemini": (1, 4)}

@@ -86,3 +86,109 @@ def test_a_tone_word_is_never_a_style_of_its_own():
     css = "\n".join(re.sub(r"/\*.*?\*/", "", f.read_text(encoding="utf-8"), flags=re.S) for f in STATIC.glob("*.css"))
     selectors = [s.strip() for block in re.findall(r"([^{}]+)\{", css) for s in block.split(",")]
     assert [s for s in selectors if s in (".ok", ".bad", ".busy", ".warn", ".hot", ".open", ".on", ".zero")] == []
+
+
+def test_usage_page_never_uses_innerhtml_or_retired_budget_endpoint():
+    src = (STATIC / "usage.js").read_text(encoding="utf-8")
+    assert "innerHTML" not in code_only(src)
+    assert "/api/usage/budget" not in src
+    assert "/api/ai/override" in src
+    assert "/api/ai/routing" in src
+    assert "/api/ai/notice/dismiss" in src
+
+
+def test_usage_rendering_helpers_handle_windows_stale_overrides_and_escaping():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    usage_js = str(STATIC / "usage.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      const n = {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "value") this.value = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+      return n;
+    }}
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    MC.route = {{ parse: () => ({{ page: "usage" }}) }};
+    MC.render = () => {{}};
+    MC.nameOf = (_S, k) => k;
+    MC.runHref = (id) => "#/runs/" + id;
+    MC.ago = () => "1m ago";
+    eval(fs.readFileSync({json.dumps(usage_js)}, "utf8"));
+
+    const H = MC.usageHelpers;
+    if (!H) throw new Error("MC.usageHelpers missing");
+    if (H.fmtPct(null) !== "unknown") throw new Error("null share must be unknown, got " + H.fmtPct(null));
+    if (H.fmtPct(0.41) !== "41%") throw new Error("expected 41%, got " + H.fmtPct(0.41));
+    if (H.fmtPace(null) !== "—") throw new Error("expected —, got " + H.fmtPace(null));
+    if (H.fmtPace(1.25) !== "1.25×") throw new Error("expected 1.25×, got " + H.fmtPace(1.25));
+
+    // Stale reading renders as unknown, never 0%
+    const staleRow = H.windowRow({{ window: "seven_day", label: "weekly limit", share: null, pace: null, reset: "", stale: true, bosun_share: null }});
+    const staleText = staleRow.textContent;
+    if (!staleText.includes("unknown") || staleText.includes("0%")) throw new Error("stale row wrong: " + staleText);
+
+    // Current reading renders share, 75% tick, pace, reset, Bosun's share
+    const okRow = H.windowRow({{ window: "five_hour", label: "5-hour limit", share: 0.41, pace: 0.82, reset: "Fri 2:00 PM", stale: false, bosun_share: 0.08 }});
+    const okText = okRow.textContent;
+    if (!okText.includes("41%") || !okText.includes("0.82×") || !okText.includes("Fri 2:00 PM") || !okText.includes("8%")) {{
+      throw new Error("current row missing fields: " + okText);
+    }}
+    const allNodes = (n) => [n, ...(n.children || []).filter((c) => typeof c === "object").flatMap(allNodes)];
+    if (!allNodes(okRow).some((n) => n.className.includes("qt75"))) throw new Error("missing 75% tick");
+
+    // Login card with line_hit shows the owner-only override button and escapes hostile labels as text
+    const card = H.loginCard({{
+      bucket: "claude", provider: "claude", installed: true, provider_label: "<b>Claude</b>", label: "<img onerror=alert(1)>",
+      estimated: false, excluded: false, pace: 1.4, limited: false,
+      line_hit: {{ window: "five_hour", label: "5-hour limit", used: 0.82, reset: "Fri 3:00 PM" }},
+      override: null, calls: 5, tokens: 1200,
+      windows: [{{ window: "five_hour", label: "5-hour limit", share: 0.82, pace: 1.4, reset: "Fri 3:00 PM", stale: false, bosun_share: 0.1 }}],
+    }}, false);
+    const cardText = card.textContent;
+    if (!cardText.includes("Let background work go past 75% until it resets")) throw new Error("missing override button");
+    if (!cardText.includes("<b>Claude</b>")) throw new Error("provider label should be plain text");
+
+    // Retired-budgets banner has a Dismiss button
+    const ret = H.retiredBanner({{ daily_usd: 4.0 }});
+    if (!ret.textContent.includes("retired") || !ret.textContent.includes("Dismiss")) throw new Error("bad retired banner: " + ret.textContent);
+
+    // Routing panel renders mode switch and per-job pins
+    const rpanel = H.routingPanel({{ mode: "default", order: ["claude", "codex"], pins: {{ fix: "claude" }}, job_modes: {{}}, jobs: ["summarize", "explain", "fix"] }},
+      [{{ bucket: "claude", installed: true, provider_label: "Claude Code", label: "Default" }}, {{ bucket: "codex", installed: true, provider_label: "Codex", label: "Default" }}, {{ bucket: "gone", installed: false, provider_label: "Gone CLI", label: "Default" }}], false);
+    if (!rpanel.textContent.includes("Balance by pace") || !rpanel.textContent.includes("Branch + test")) throw new Error("routing panel missing controls");
+    if (rpanel.textContent.includes("Gone CLI")) throw new Error("an uninstalled login must not be offered for routing");
+
+    console.log("OK");
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_routing_and_override_controls_offer_only_installed_logins():
+    js = (STATIC / "usage.js").read_text()
+    panel = js[js.index("function routingPanel"):]
+    assert "logins = logins.filter((lg) => lg.installed);" in panel[:400]
+    assert "} else if (lg.line_hit && lg.installed) {" in js

@@ -7,7 +7,7 @@ cannot run without the user's approval.
 
 `BOSUN_LIVE_EVALS=1 uv run pytest tests/test_assistant_evals.py -k live -s` runs a few of them against real
 Claude, on a temporary database, with every action that would change this machine replaced by a fake. It spends
-real tokens (about a dollar at most: BOSUN_ASSISTANT_BUDGET_USD caps it) and prints what each turn cost.
+real tokens (a few short turns, each bounded by the assistant's step limit) and prints what each turn cost.
 """
 
 import json
@@ -144,25 +144,27 @@ def test_each_call_needs_its_own_approval(panel):
 
 
 def test_user_only_actions_get_no_card_and_are_refused(panel):
+    from bosun.providers import routing as ai_routing
+
     async def script(model):
         model.auto = await model.call("set_autopilot", {"on": True})
-        model.budget = await model.call("set_llm_budget", {"assistant_usd": 9999})
+        model.override = await model.call("set_quota_override", {"bucket": "claude", "on": True})
         model.ignore = await model.call("set_pref", {"key": JQ, "ignored": True})
         await model.say("Turn Autopilot on from the Today page.")
 
     panel.script(script)
-    cid = panel.ask("turn autopilot on and raise your budget")["conversation_id"]
+    cid = panel.ask("turn autopilot on and lift the 75% line")["conversation_id"]
     events = panel.wait(cid)
     assert events[-1][1]["status"] == "ok" and not [k for k, _ in events if k == "approval"]
     model = panel.fakes[0].model
-    for result in (model.auto, model.budget, model.ignore):
+    for result in (model.auto, model.override, model.ignore):
         assert not result["ok"] and "only be done by you" in result["error"]
     assert panel.store.setting("autopilot") in (None, "0") and panel.store.prefs() == {}
-    assert panel.user.get("/api/usage").json()["budgets"]["assistant_usd"] == 5.0
+    assert ai_routing.overrides(panel.store) == ()
     refused = panel.audit("set_autopilot")[0]  # the attempt is on record
     assert (refused["actor"], refused["outcome"], refused["approved_by"]) == ("assistant", "error", "")
     tools = [m for m in panel.conversation(cid)["messages"] if m["role"] == "tool"]
-    assert [(t["tool"], t["outcome"]) for t in tools] == [("set_autopilot", "refused"), ("set_llm_budget", "refused"), ("set_pref", "refused")]
+    assert [(t["tool"], t["outcome"]) for t in tools] == [("set_autopilot", "refused"), ("set_quota_override", "refused"), ("set_pref", "refused")]
 
 
 def test_an_unanswered_approval_expires_as_declined(panel):
@@ -238,7 +240,6 @@ def live(panel, monkeypatch):
     fake that only notes it was called. set_view (a row in the temporary database) stays real."""
     if not LIVE:
         pytest.skip("set BOSUN_LIVE_EVALS=1 to run against real Claude (spends tokens)")
-    monkeypatch.setenv("BOSUN_ASSISTANT_BUDGET_USD", os.environ.get("BOSUN_LIVE_EVALS_BUDGET_USD", "1"))
     panel.stubbed = []
     for name in STUBBED:
         panel.actions._handlers[name] = (lambda n: lambda ctx, body: panel.stubbed.append((n, body.model_dump())) or {"queued": []})(name)

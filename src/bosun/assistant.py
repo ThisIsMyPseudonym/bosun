@@ -106,8 +106,9 @@ approve. So call the tool once, with exactly the input you mean; do not ask "sha
 declines, accept it and do not call it again unless they ask.
 - A tool that changed something answers with a trace_id. Call `wait_run` with it, then say how it ended. If it \
 failed, `diagnose` it.
-- Some actions are the user's alone: ignoring an item, Autopilot, notifications, budgets, what agents may do. You \
-cannot run them. Say where in the dashboard to do it (the item's details, Today, the bell, AI usage).
+- Some actions are the user's alone: ignoring an item, Autopilot, notifications, AI logins, AI routing, \
+letting background AI work past 75%, what agents may do. You cannot run them. Say where in the dashboard to do it \
+(the item's details, Today, the bell, AI usage).
 - An update that needs the user's password, or a run that failed: call `list_recipes` with the item's key or the \
 run's trace_id. If it lists recipes, the panel shows each as a button under your answer, and pressing one runs that \
 command in Bosun's own terminal where the user can type their password. Say what the button does. You cannot press \
@@ -193,6 +194,7 @@ class Assistant:
                  connect: Connect | None = None):
         self.store, self.settings, self.actions, self.approvals = store, settings, actions, approvals
         self.model = settings.assistant_model or settings.model
+        self.login = "claude"  # current engine's login bucket (phase 6 routes across MCP-capable logins)
         self.connect: Connect = connect or ClaudeSDKClient  # tests put a scripted model here
         self._turns: dict[str, Turn] = {}
         self._lock = threading.Lock()
@@ -203,10 +205,6 @@ class Assistant:
     # --- what the panel calls (through the registry's assistant_* actions) -----------------------------------------
     def ask(self, body: AskIn) -> dict[str, Any]:
         """Accept a question and start answering it. Returns at once; the events stream carries the answer."""
-        reason = llm.over_budget(self.store, "assistant")
-        if reason:
-            llm.record("assistant", outcome="budget", model=self.model, error=reason)
-            raise Conflict(f"Ask Bosun is paused: {reason}. Raise it under AI usage, Budgets, or ask again later")
         with self._lock:
             cid = body.conversation_id
             if cid:
@@ -306,7 +304,6 @@ class Assistant:
             return await self._call_tool(turn, name, arguments)
 
         self.settings.claude_sandbox.mkdir(parents=True, exist_ok=True)
-        left = llm.assistant_left(self.store)
         server = mcp_server.tool_server(call, helpers(), tiers=mcp_server.TIER_PLAIN)
         return ClaudeAgentOptions(
             tools=[],  # no built-in tool at all: no Bash, Read, Write, WebFetch, Agent
@@ -320,7 +317,7 @@ class Assistant:
             cli_path=shutil.which("claude"),  # the CLI Bosun already uses; the SDK's bundled copy if there is none
             model=self.model,
             max_turns=MAX_STEPS,
-            max_budget_usd=None if left is None else max(0.05, round(left, 2)),  # a turn can't run past the day's cap
+            max_budget_usd=None,
             include_partial_messages=True,  # text as it is written
             verbatim_prompts=True,  # the prompt is sent as written: no @file expansion, no slash commands
             extra_args={"no-session-persistence": None,  # nothing in Claude Code's session history
@@ -412,7 +409,7 @@ class Assistant:
                     log.warning("assistant turn %s: claude said: %s", turn.trace_id[:8], " | ".join(stderr[-5:])[:1000])
         status = {"ok": "ok", "cancelled": "stopped", "budget": "budget"}.get(outcome, "error")
         if status == "budget":
-            error = "This answer reached the assistant's budget for today and was cut short"
+            error = "This answer hit a cost limit and was cut short"
         return status, "" if status == "ok" else error, usage.cost_usd
 
     async def _interrupt(self, turn: Turn) -> None:

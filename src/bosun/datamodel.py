@@ -66,7 +66,7 @@ VIEWS: dict[str, tuple[str, dict[str, str], str]] = {
          "model": "What Bosun asked for (an alias like haiku, or a full id).",
          "calls": "Calls that reached Claude (or tried to).",
          "cached": "Calls Bosun's own cache made unnecessary.",
-         "skipped": "Calls not made: a budget was spent, or there was nothing to summarize."},
+         "skipped": "Calls not made: nothing to summarize (older rows: a retired dollar budget was spent)."},
         "SELECT day, purpose, SUM(calls) AS calls, ROUND(SUM(cost_usd), 2) AS usd FROM v_llm_spend "
         "GROUP BY day, purpose ORDER BY day DESC"),
     "v_ai_spend": (

@@ -153,7 +153,7 @@ def test_merge_reports_worst_status_wins():
     assert m.status == "partial" and m.files_changed == ["x"] and m.follow_ups == ["do y"] and m.tests_passed is None
 
 
-def test_fixer_refuses_unsandboxed_old_cli_and_over_budget(tmp_path, monkeypatch):
+def test_fixer_refuses_unsandboxed_or_old_cli_and_keeps_runaway_guard(tmp_path, monkeypatch):
     import pytest
     from bosun import fixer as fixer_mod
     from bosun import llm, trace
@@ -177,11 +177,14 @@ def test_fixer_refuses_unsandboxed_old_cli_and_over_budget(tmp_path, monkeypatch
         with pytest.raises(ValueError, match="too old"):
             f.start(item)
 
+        # Retired daily dollar budget no longer blocks fixes; per-run --max-budget-usd runaway guard stays.
         monkeypatch.setattr("bosun.fixer.proc.run", lambda argv, **kw: proc.Result(tuple(argv), 0, "2.1.328 (Claude Code)", ""))
-        store.set_setting(llm.SETTING_DAILY, "0.5")
-        llm.record("fix", outcome="ok", usage=llm.Usage(cost_usd=0.6))
-        with pytest.raises(RuntimeError, match="24-hour budget"):
-            f.start(item)
+        store.set_setting("llm_daily_budget_usd", "0.5")
+        llm.record("fix", outcome="ok", usage=llm.Usage(cost_usd=50.0))
+        argv = fixer_mod.claude_fix_argv("claude", [item], "sonnet", f.budget, None)
+        assert "--max-budget-usd" in argv and argv[argv.index("--max-budget-usd") + 1] == "3.00"
+        monkeypatch.setattr(fixer_mod.Fixer, "_drain", lambda self: None)
+        assert f.start(item) > 0
     finally:
         trace.configure(None)
 

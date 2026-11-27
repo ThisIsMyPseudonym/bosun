@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -495,6 +496,43 @@ def _llm_calls_providers(db: sqlite3.Connection) -> None:
     for stmt in statements(AI_SPEND):
         db.execute(stmt)
 
+
+RETIRED_BUDGET_KEYS = (
+    ("llm_refresh_budget_usd", "refresh_usd"),
+    ("llm_daily_budget_usd", "daily_usd"),
+    ("llm_assistant_budget_usd", "assistant_usd"),
+)
+
+
+def _budget_number(raw: object) -> float | None:
+    """A stored cap that was really enforced: a finite amount above 0 (0 meant no cap, and text was ignored)."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        val = float(raw)
+    except ValueError:
+        return None
+    return val if math.isfinite(val) and val > 0 else None
+
+
+def _retire_budgets(db: sqlite3.Connection) -> None:
+    """Record any stored dollar-budget settings once and raise a one-time notice; old rows stay for rollback."""
+    rows = dict(db.execute(
+        "SELECT key, value FROM settings WHERE key IN (?, ?, ?)",
+        tuple(k for k, _ in RETIRED_BUDGET_KEYS),
+    ).fetchall())
+    retired: dict[str, object] = {}
+    for key, field in RETIRED_BUDGET_KEYS:
+        if key in rows:
+            parsed = _budget_number(rows[key])
+            if parsed is not None:
+                retired[field] = parsed
+    if not retired:
+        return
+    retired["at"] = time.time()
+    db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("ai_budgets_retired", json.dumps(retired)))
+    db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("ai_budgets_notice", "pending"))
+
 def _withhold_http_addresses(db: sqlite3.Connection) -> None:
     """Snapshots saved before v8 kept a plain-http MCP server's address as the URL's netloc, which carries any
     user:password in it (and, when a password has an unencoded / ? or #, part of one with no "@" to see). Every
@@ -609,6 +647,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(8, "withhold_http_addresses", fn=_withhold_http_addresses, after=_vacuum),
     Migration(9, "quota_windows", sql=QUOTA_WINDOWS),
     Migration(10, "llm_calls_providers", fn=_llm_calls_providers),
+    Migration(11, "retire_budgets", fn=_retire_budgets),
 )
 
 

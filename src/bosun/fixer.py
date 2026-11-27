@@ -340,10 +340,6 @@ class Fixer:
         ver_err = claude_version_error(self.claude)
         if ver_err:
             raise ValueError(ver_err)
-        reason = llm.over_budget(self.store, "fix")
-        if reason:
-            llm.record("fix", outcome="budget", project=items[0].project or "", error=reason)
-            raise RuntimeError(f"Fix stopped: {reason}")
         with self._lock:
             busy = [i.name for i in items if self.store.active_fix_for(i.key)]
             if busy:
@@ -424,11 +420,6 @@ class Fixer:
         remaining = self.budget
         try:
             for rel, group in by_dir.items():
-                over = llm.over_budget(self.store, "fix")
-                if over:
-                    llm.record("fix", outcome="budget", project=first.project or "", fix=fix_id, subdir=rel, error=over)
-                    errors.append(f"[{rel or '.'}] {over}")
-                    break
                 if remaining <= 0:
                     errors.append(f"[{rel or '.'}] per-fix budget (${self.budget:.2f}) is used up")
                     break

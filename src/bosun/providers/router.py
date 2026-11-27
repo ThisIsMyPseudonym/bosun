@@ -24,7 +24,8 @@ if TYPE_CHECKING:
 SETTING = "ai_routing"
 Mode = Literal["default", "balance"]
 MODES: tuple[Mode, ...] = ("default", "balance")
-SkipReason = Literal["capability", "not_installed", "excluded", "contract", "limit", "cooldown", "line"]
+SkipReason = Literal["capability", "not_installed", "excluded", "contract", "limit", "cooldown", "line", "cap"]
+UNMEASURED_REFRESH_CAP, UNMEASURED_DAILY_CAP = quota.UNMEASURED_REFRESH_CAP, quota.UNMEASURED_DAILY_CAP
 DEFAULT_PINS: Mapping[str, str] = MappingProxyType({"fix": "claude"})
 MAX_SETTING_CHARS = 1 << 16  # cap JSON size before parsing
 
@@ -122,6 +123,7 @@ class Context:
     overrides: tuple[quota.Override, ...]
     now: float
     settings: RoutingSettings
+    background_calls: Mapping[str, tuple[int, int]] = MappingProxyType({})  # bucket -> (this refresh, last 24 h)
 
 
 @dataclass(frozen=True)
@@ -220,8 +222,13 @@ def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Logi
     if (cool := _cooldown_skip(login.bucket, ctx.cooldowns, ctx.now)) is not None:
         return cool
     if job.background and not clicked:
-        return _line_skip(login.bucket, curr, ctx)
+        return _line_skip(login.bucket, curr, ctx) or _cap_skip(login.bucket, curr, ctx)
     return None
+
+
+def _cap_skip(bucket: str, curr: tuple[windows.Reading, ...], ctx: Context) -> Skip | None:
+    detail = quota.call_cap(curr, *ctx.background_calls.get(bucket, (0, 0)))
+    return Skip(bucket, "cap", detail) if detail else None
 
 
 _CATALOG_INDEX: Mapping[str, int] = MappingProxyType({p: i for i, p in enumerate(catalog.CATALOG)})

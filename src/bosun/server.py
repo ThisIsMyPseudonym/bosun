@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import secrets
 import shutil
 import subprocess
@@ -35,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff, icons, kinds, listprefs, llm, lock, machine, mcp_pin, notify, ptyrun, query, recipes,
+from . import (appwatch, askpass, attention, auth, autopilot, diagnose, handoff, icons, kinds, listprefs, lock, machine, mcp_pin, notify, ptyrun, query, recipes,
                registry, relaunch, selfupdate, status as status_mod, takeover, terminal, trace)
 from . import appguard, goback  # noqa: E402
 from . import approvals as approving
@@ -49,10 +48,10 @@ from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
                        NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TypeIn, ViewIn, UsageIn, BudgetIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+                       TraceIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
-from .providers import accounts as ai_accounts, routing as ai_routing
+from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -286,8 +285,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                 "history": store.history(), "autopilot": _autopilot(snap), "relaunch": _pending_relaunch(),
                 "notify": {"on": notify.is_on(store)},
                 "agents": registry.agent_policy(store),
-                "assistant": {"model": assistant.model if assistant else s.model, "budget_usd": llm.budgets(store)["assistant_usd"],
-                              "left_usd": llm.assistant_left(store)},
+                "assistant": {"model": assistant.model if assistant else s.model,
+                              "login": assistant.login if assistant else "claude"},
                 "terminal": _terminal_now(), "watches": appwatch.view(store),
                 "view": store.setting("view") or "auto", "list_prefs": listprefs.read(store)}
         if snap:
@@ -919,10 +918,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
 
     @actions.bind("llm_usage")
     def usage(ctx: ActionContext, body: UsageIn):
-        return {**store.llm_usage(days=body.days), "budgets": llm.budgets(store),
-                "today_usd": store.llm_spent(since=time.time() - 86400, purposes=llm.BUDGETED),
-                "assistant_today_usd": store.llm_spent(since=time.time() - 86400, purpose="assistant"),
-                "env_overrides": [k for k in llm.BUDGET_ENV.values() if os.environ.get(k)]}
+        return ai_usage.report(store, days=body.days, demo=s.demo)
 
     @actions.bind("query")
     def run_query(ctx: ActionContext, body: QueryIn):
@@ -931,16 +927,6 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             return query.run(store.path, body.sql, limit=body.limit)
         except query.QueryError as exc:
             raise Invalid(str(exc))
-
-    @actions.bind("set_llm_budget")
-    def set_budget(ctx: ActionContext, body: BudgetIn):
-        if body.refresh_usd is not None:
-            store.set_setting(llm.SETTING_REFRESH, str(body.refresh_usd))
-        if body.daily_usd is not None:
-            store.set_setting(llm.SETTING_DAILY, str(body.daily_usd))
-        if body.assistant_usd is not None:
-            store.set_setting(llm.SETTING_ASSISTANT, str(body.assistant_usd))
-        return llm.budgets(store)
 
     @actions.bind("ai_logins")
     def ai_logins(ctx: ActionContext, body: Empty):
@@ -965,6 +951,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     @actions.bind("set_quota_override")
     def set_quota_override(ctx: ActionContext, body: AiOverrideIn):
         return ai_routing.set_override(store, body.bucket, body.on)
+
+    @actions.bind("dismiss_ai_notice")
+    def dismiss_ai_notice(ctx: ActionContext, body: Empty):
+        return ai_usage.dismiss_notice(store)
 
     @actions.bind("set_pref")
     def prefs(ctx: ActionContext, body: PrefIn):

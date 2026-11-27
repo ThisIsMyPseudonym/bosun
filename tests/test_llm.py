@@ -98,38 +98,54 @@ def test_a_reply_that_fails_its_schema_is_a_schema_error(store, monkeypatch):
     assert call.outcome == "schema_error" and calls(store)[0]["cost_usd"] > 0
 
 
-def test_summarizer_records_calls_and_stops_at_the_refresh_budget(store, monkeypatch):
-    run = fake_run(envelope(cost=0.6))
+def test_summarizer_records_calls_and_stops_at_the_75_percent_line(store, monkeypatch):
+    from bosun.providers import contract, ledger, quota
+
+    resets_at = time.time() + 7200
+    rate_limit_line = json.dumps({
+        "type": "rate_limit_event",
+        "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.8, "resetsAt": resets_at},
+    })
+    reply = rate_limit_line + "\n" + json.dumps(envelope(cost=0.6))
+    run = fake_run(reply)
     monkeypatch.setattr(proc, "run", run)
-    store.set_setting(llm.SETTING_REFRESH, "1.0")
+    monkeypatch.setattr(contract, "check", lambda st, p, b, **kw: contract.ContractStatus(p, "2.1.332", True, (), ""))
+    monkeypatch.setattr(ledger, "deliver", lambda *a, **kw: False)
+    store.set_setting("llm_refresh_budget_usd", "0.01")  # retired dollar budget has no effect
     sm = Summarizer(store, "sonnet", store.path.parent / "sb", claude="claude")
     items = [Item(Source.BREW, n, n, "1.0", "1.1") for n in "abcd"]
     with trace.run("refresh"):
         out = [sm.summarize(i, "notes") for i in items]
-    assert [o.generated_by for o in out] == ["claude-code:sonnet", "claude-code:sonnet", "heuristic", "heuristic"]
-    assert len(run.seen) == 2 and "summary budget ($1.00) is used up" in sm.problem
-    assert [c["outcome"] for c in calls(store)] == ["ok", "ok", "budget"]  # then it stopped asking
-    with trace.run("refresh"):  # a new refresh starts a new allowance
-        assert Summarizer(store, "sonnet", store.path.parent / "sb", claude="claude").summarize(
-            Item(Source.BREW, "e", "e", "1", "2"), "n").generated_by == "claude-code:sonnet"
+    # First call succeeds and reports 80%; subsequent background summaries skip past the 75% line.
+    assert [o.generated_by for o in out] == ["claude-code:sonnet", "heuristic", "heuristic", "heuristic"]
+    assert len(run.seen) == 1 and "80%" in sm.problem
+    assert [c["outcome"] for c in calls(store)] == ["ok"]
+    assert quota.line_hit(ledger.readings(store, "claude"), time.time()) is not None
 
 
-def test_the_daily_budget_covers_explanations_too(store, monkeypatch):
-    monkeypatch.setattr(proc, "run", fake_run(envelope(cost=0.5, structured={"x": 1})))
-    store.set_setting(llm.SETTING_DAILY, "0.4")
-    llm.record("summarize", outcome="ok", usage=llm.Usage(cost_usd=0.45))
-    with pytest.raises(RuntimeError, match="24-hour budget"):
-        Explainer(store, "sonnet", store.path.parent / "sb", claude="claude").explain(Item(Source.BREW, "jq", "jq", "1", "2"))
-    assert calls(store)[-1]["outcome"] == "budget" and calls(store)[-1]["purpose"] == "explain"
-    store.set_setting(llm.SETTING_DAILY, "0")  # 0 = no cap
-    assert llm.over_budget(store, "explain") == ""
-    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "0.1")  # the environment wins
-    assert "24-hour" in llm.over_budget(store, "explain")
-    assert "24-hour" in llm.over_budget(store, "fix")  # fixes share the 24-hour cap too
-    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "nan")
-    assert llm.budgets(store)["daily_usd"] == llm.DEFAULT_DAILY_BUDGET_USD
-    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "inf")
-    assert llm.budgets(store)["daily_usd"] == llm.DEFAULT_DAILY_BUDGET_USD
+def test_the_75_percent_line_skips_background_summaries_but_clicked_explanations_run(store, monkeypatch):
+    from bosun.providers import contract, ledger, windows
+
+    now = time.time()
+    for removed in ("BUDGETED", "over_budget", "assistant_left", "budgets", "SETTING_DAILY", "BUDGET_ENV"):
+        assert not hasattr(llm, removed)
+    explain_good = {"exposure": "local_only", "answer": "a", "attack_story": "s", "preconditions": [],
+                    "worst_case": "w", "urgency": "optional", "break_risk": [], "before_upgrading": []}
+    run = fake_run(envelope(cost=0.5, structured=explain_good))
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setattr(contract, "check", lambda st, p, b, **kw: contract.ContractStatus(p, "2.1.332", True, (), ""))
+    monkeypatch.setattr(ledger, "deliver", lambda *a, **kw: False)
+    store.set_setting("llm_daily_budget_usd", "0.01")
+    monkeypatch.setenv("BOSUN_DAILY_BUDGET_USD", "0.01")
+    llm.record("summarize", outcome="ok", usage=llm.Usage(cost_usd=50.0))
+    ledger.save(store, "claude", (windows.Reading("five_hour", "allowed", 0.8, now + 7200, now),), now=now)
+
+    sm = Summarizer(store, "sonnet", store.path.parent / "sb", claude="claude")
+    assert sm.summarize(Item(Source.BREW, "jq", "jq", "1", "2"), "notes").generated_by == "heuristic"
+    assert len(run.seen) == 0 and "80%" in sm.problem
+
+    got = Explainer(store, "sonnet", store.path.parent / "sb", claude="claude").explain(Item(Source.BREW, "jq", "jq", "1", "2"))
+    assert got["answer"] == "a" and len(run.seen) == 1
 
 
 def test_ok_reply_mentioning_not_logged_in_is_not_misclassified(store, monkeypatch):
@@ -162,20 +178,84 @@ def test_usage_report_adds_up(store):
     assert [o["item_key"] for o in u["outliers"]] == ["brew:mise"]  # 7× the summary median; the fix isn't compared to summaries
     assert u["cache"] == {"summaries_from_cache": 2, "summaries_asked": 7, "hit_rate": round(2 / 7, 3)}
     assert u["by_model"][0]["model"] == "claude-sonnet-5-5" and u["by_model"][0]["calls"] == 7
-    assert store.llm_spent(since=now - 86400, purposes=llm.BUDGETED) == pytest.approx(1.357)
+    assert store.llm_spent(since=now - 86400, purposes=("summarize", "explain", "fix")) == pytest.approx(1.357)
+    # llm_draw aggregates window_draw, calls and tokens by job and by login
+    llm.record("summarize", outcome="ok", provider="claude", account="default", job="summarize",
+               window_draw=0.04, usage=llm.Usage(input_tokens=500, output_tokens=100))
+    llm.record("explain", outcome="ok", provider="claude", account="default", job="explain",
+               window_draw=0.07, usage=llm.Usage(input_tokens=800, output_tokens=200))
+    llm.record("summarize", outcome="ok", provider="gemini", account="default", job="summarize",
+               window_draw=None, estimated=True, usage=llm.Usage(input_tokens=300, output_tokens=50))
+    draw = store.llm_draw(since=now - 3600)
+    assert draw["window_draw"] == pytest.approx(0.11) and draw["draw_calls"] == 2
+    assert [j["job"] for j in draw["by_job"][:2]] == ["explain", "summarize"]
+    assert draw["by_job"][0]["window_draw"] == pytest.approx(0.07)
+    claude_draw = store.llm_draw(since=now - 3600, provider="claude", account="default")
+    assert claude_draw["window_draw"] == pytest.approx(0.11)
+    gemini_draw = store.llm_draw(since=now - 3600, provider="gemini", account="default")
+    assert gemini_draw["window_draw"] is None and gemini_draw["calls"] == 1 and gemini_draw["tokens"] == 350
 
 
-def test_usage_endpoints(store, tmp_path):
+def test_usage_endpoints(store, tmp_path, monkeypatch):
+    from bosun.providers import accounts, ledger, router, windows
+
+    now = time.time()
     s = load_settings()
     store.save_snapshot([item_to_dict(Item(Source.BREW, "jq", "jq", "1", "2"))], [])
-    llm.record("summarize", outcome="ok", item_key="brew:jq", usage=llm.Usage(cost_usd=0.02))
+    monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/bin/claude", "gemini": "/bin/gemini"})
+    monkeypatch.setattr(ledger, "deliver", lambda *a, **kw: False)
+
+    # Current window (41%), stale window (past reset), and unknown-share window (used=None)
+    ledger.save(store, "claude", (
+        windows.Reading("five_hour", "allowed", 0.41, now + 3 * 3600, now - 60, "output"),
+        windows.Reading("seven_day", "allowed", 0.50, now - 60, now - 3600, "output"),  # stale!
+        windows.Reading("one_day", "allowed", None, now + 12 * 3600, now - 30, "output"),  # unknown share
+    ), now=now)
+    # Two calls inside Claude's 5-hour window (started 2h ago) and one older call before it
+    llm.record("summarize", outcome="ok", item_key="brew:jq", provider="claude", account="default",
+               job="summarize", window_draw=0.05, usage=llm.Usage(input_tokens=400, output_tokens=100, cost_usd=0.02))
+    llm.record("explain", outcome="ok", item_key="brew:jq", provider="claude", account="default",
+               job="explain", window_draw=0.03, usage=llm.Usage(input_tokens=600, output_tokens=150, cost_usd=0.04))
+    with store._db:
+        store._db.execute(
+            "INSERT INTO llm_calls (ts, purpose, outcome, provider, account, job, window_draw) VALUES (?, 'summarize', 'ok', 'claude', 'default', 'summarize', 0.25)",
+            (now - 6 * 3600,),
+        )
+    # Estimated login call
+    llm.record("summarize", outcome="ok", item_key="brew:jq", provider="gemini", account="default",
+               job="summarize", window_draw=None, estimated=True, usage=llm.Usage(input_tokens=200, output_tokens=50))
+    # One active 75%-line skip notice and a pending retired-budgets notice
+    ledger.notice_skips(store, (router.Skip("claude", "line", "5-hour at 80%",
+                                            hit=router.quota.Hit("five_hour", 0.8, now + 3600)),), now=now)
+    store.set_setting("ai_budgets_retired", json.dumps({"daily_usd": 4.0, "at": now - 10}))
+    store.set_setting("ai_budgets_notice", "pending")
+
     c = TestClient(create_app(s, store, "t" * 32), base_url=f"http://127.0.0.1:{s.port}", cookies=signed_in(s.port))
     h = {"x-bosun-token": "t" * 32}
     got = c.get("/api/usage", params={"days": 7}).json()
-    assert got["totals"]["calls"] == 1 and got["budgets"] == {"refresh_usd": 2.0, "daily_usd": 10.0, "assistant_usd": 5.0}
-    assert c.post("/api/usage/budget", json={"refresh_usd": 0.5}, headers=h).json() == {"refresh_usd": 0.5, "daily_usd": 10.0, "assistant_usd": 5.0}
-    assert c.post("/api/usage/budget", json={"daily_usd": -1}, headers=h).status_code == 422
-    assert c.post("/api/usage/budget", json={"daily_usd": 3}).status_code == 403
+    assert got["detail"]["totals"]["calls"] == 4
+    by_bucket = {lg["bucket"]: lg for lg in got["logins"]}
+    assert set(by_bucket) == {"claude", "gemini"}
+    wins = {w["window"]: w for w in by_bucket["claude"]["windows"]}
+    assert wins["five_hour"]["share"] == pytest.approx(0.41) and not wins["five_hour"]["stale"]
+    assert wins["five_hour"]["pace"] is not None and wins["five_hour"]["reset"]
+    assert wins["five_hour"]["bosun_share"] == pytest.approx(0.08)  # excludes the call from 6h ago
+    # Stale and unknown-share windows must report share=None, never 0
+    assert wins["seven_day"]["stale"] is True and wins["seven_day"]["share"] is None and wins["seven_day"]["pace"] is None
+    assert wins["one_day"]["stale"] is False and wins["one_day"]["share"] is None and wins["one_day"]["pace"] is None
+    assert got["bosun_share"]["claude"]["five_hour"] == pytest.approx(0.08)
+    assert got["top_jobs"][0]["job"] == "summarize" and got["top_jobs"][0]["window_draw"] == pytest.approx(0.30)
+    assert [e["bucket"] for e in got["estimated"]] == ["gemini"]
+    assert got["estimated"][0]["calls"] == 1 and got["estimated"][0]["tokens"] == 250
+    assert len(got["notices"]) == 1 and got["notices"][0]["bucket"] == "claude"
+    assert got["budgets_retired"]["daily_usd"] == 4.0
+    assert "routing" in got and got["routing"]["mode"] == "default"
+
+    # Dismissing the retired-budgets notice is user-only and hides it on subsequent reads
+    assert c.post("/api/ai/notice/dismiss").status_code == 403
+    assert c.post("/api/ai/notice/dismiss", headers=h).json() == {"dismissed": True}
+    assert c.get("/api/usage", params={"days": 7}).json()["budgets_retired"] is None
+    assert store.setting("ai_budgets_notice") == "shown"
     assert c.get("/api/usage", params={"days": 0}).status_code == 422
 
 

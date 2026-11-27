@@ -1,18 +1,13 @@
-"""Every Claude call Bosun makes goes through here, so each one is counted.
+"""Every AI call Bosun makes is counted here.
 
 `claude -p --output-format json` reports what a call used: tokens per model (plain input, cache reads, cache
 writes, output), the list-price cost, turns and timing. This wrapper runs the call, parses that report once,
 writes an llm_calls row tied to the current trace (purpose, item, model, tokens, cost, outcome), and gives the
-caller the parsed envelope. Calls Bosun *avoided* (its own cache answered, a budget stopped it) are recorded
-too, at zero cost, so the usage page can show what the cache and the budgets saved.
+caller the parsed envelope. Calls Bosun *avoided* (its own cache answered, nothing to summarize) are recorded
+too, at zero cost, so the usage page can show what the cache saved.
 
-The cost is what the CLI reports, at list price. On a Claude subscription nothing is billed per call, but the
-same number is a fair measure of how much of the plan's usage a feature takes.
-
-Budgets: a cap per refresh for release-note summaries, and a rolling 24-hour cap for everything Bosun starts
-on its own or on a click (summaries, "will this break?", and branch + test fixes, which also keep their own
-per-run cap via --max-budget-usd). The Ask Bosun assistant has a rolling 24-hour cap of its own: a long
-conversation never uses up the summaries' budget, and the other way round. 0 means no cap.
+The cost is what the CLI reports, at list price, kept as detail. On a subscription nothing is billed per call;
+Bosun measures use by each plan's own quota windows (`providers/quota.py`).
 
 The assistant runs through the Claude Agent SDK instead of `claude -p`; its final message carries the same
 report, and `record_report` writes the same row from it.
@@ -22,8 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
-import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -34,15 +27,6 @@ from . import proc, trace
 log = logging.getLogger(__name__)
 
 PURPOSES = ("summarize", "explain", "fix", "assistant")
-BUDGETED = ("summarize", "explain", "fix")  # what the daily cap covers
-DEFAULT_REFRESH_BUDGET_USD = 2.0
-DEFAULT_DAILY_BUDGET_USD = 10.0
-DEFAULT_ASSISTANT_BUDGET_USD = 5.0
-SETTING_REFRESH = "llm_refresh_budget_usd"
-SETTING_DAILY = "llm_daily_budget_usd"
-SETTING_ASSISTANT = "llm_assistant_budget_usd"
-BUDGET_ENV = {"refresh_usd": "BOSUN_REFRESH_BUDGET_USD", "daily_usd": "BOSUN_DAILY_BUDGET_USD",
-              "assistant_usd": "BOSUN_ASSISTANT_BUDGET_USD"}
 
 
 @dataclass
@@ -202,48 +186,3 @@ def structured(call: Call) -> Any:
     """The schema-checked payload of a --json-schema call (or its result text)."""
     env = call.envelope or {}
     return env.get("structured_output") if env.get("structured_output") is not None else env.get("result")
-
-
-# --- budgets -----------------------------------------------------------------------------------------------------
-def _setting(store: Any, key: str, env: str, default: float) -> float:
-    raw = os.environ.get(env) or (store.setting(key) if store is not None else None)
-    try:
-        val = float(raw) if raw not in (None, "") else default
-    except ValueError:
-        return default
-    return max(0.0, val) if math.isfinite(val) else default
-
-
-def budgets(store: Any) -> dict[str, float]:
-    return {"refresh_usd": _setting(store, SETTING_REFRESH, BUDGET_ENV["refresh_usd"], DEFAULT_REFRESH_BUDGET_USD),
-            "daily_usd": _setting(store, SETTING_DAILY, BUDGET_ENV["daily_usd"], DEFAULT_DAILY_BUDGET_USD),
-            "assistant_usd": _setting(store, SETTING_ASSISTANT, BUDGET_ENV["assistant_usd"], DEFAULT_ASSISTANT_BUDGET_USD)}
-
-
-def assistant_left(store: Any) -> float | None:
-    """What the assistant may still spend in this 24 hours (list price); None when there is no cap."""
-    cap = budgets(store)["assistant_usd"]
-    if not cap or store is None:
-        return None
-    return max(0.0, cap - store.llm_spent(since=time.time() - 86400, purpose="assistant"))
-
-
-def over_budget(store: Any, purpose: str) -> str:
-    """Why this call shouldn't run ('' if it may). Checked before each summarize/explain/fix call and assistant turn."""
-    if purpose == "assistant":
-        left = assistant_left(store)
-        if left is not None and left <= 0:
-            return f"the assistant's 24-hour budget (${budgets(store)['assistant_usd']:.2f}) is used up"
-        return ""
-    if purpose not in BUDGETED or store is None:
-        return ""
-    caps = budgets(store)
-    if purpose == "summarize" and caps["refresh_usd"] and trace.current_trace_id():
-        spent = store.llm_spent(trace_id=trace.current_trace_id(), purpose="summarize")
-        if spent >= caps["refresh_usd"]:
-            return f"this refresh's summary budget (${caps['refresh_usd']:.2f}) is used up"
-    if caps["daily_usd"]:
-        spent = store.llm_spent(since=time.time() - 86400, purposes=BUDGETED)
-        if spent >= caps["daily_usd"]:
-            return f"the 24-hour budget (${caps['daily_usd']:.2f}) is used up"
-    return ""

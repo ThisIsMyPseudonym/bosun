@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .. import llm, proc  # noqa: F401  (proc: tests patch proc.run through here)
+from .. import proc  # noqa: F401  (proc: tests patch proc.run through here)
 from ..models import Item, Source
 from ..providers import accounts, run as ai_run
 from ..store import Store
@@ -113,10 +113,6 @@ class Explainer:
             return hit
         if self.claude == "":
             raise RuntimeError("No AI CLI available")
-        reason = llm.over_budget(self.store, "explain")
-        if reason:
-            llm.record("explain", outcome="budget", item_key=item.key, error=reason)
-            raise RuntimeError(f"not asked: {reason} (Settings on the AI usage page)")
         out = ai_run.run(
             self.store, "explain", prompt=facts(item), system=SYSTEM, schema=Assessment,
             tier="strong", item_key=item.key, project=item.project or "", clicked=True,

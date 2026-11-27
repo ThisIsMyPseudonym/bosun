@@ -62,7 +62,7 @@ async function load() {
     S.notify = st.notify || S.notify; renderBell();
     S.claude = st.claude_enabled; S.view = st.view || "auto";
     S.agents = st.agents || S.agents;
-    MC.assistantInfo = st.assistant || null;  // the Ask Bosun panel's model and what is left of its budget
+    MC.assistantInfo = st.assistant || null;  // the Ask Bosun panel's model and login
     S.prefs = st.prefs; S.history = st.history || []; S.autopilot = st.autopilot || S.autopilot; S.relaunch = st.relaunch || [];
     if (st.machine) MC.MACHINE = st.machine;
     S.watches = st.watches || {}; announceWatches();

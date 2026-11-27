@@ -257,11 +257,12 @@ uv run bosun query --json "SELECT * FROM v_failures"     # columns and rows as J
 uv run bosun query --schema                                # what can be read
 ```
 
-Six views answer the usual questions: `v_current_items` (what is outdated or vulnerable now),
+Seven views answer the usual questions: `v_current_items` (what is outdated or vulnerable now),
 `v_item_history` (when an item appeared, changed lane, was fixed), `v_open_vulns` (each open CVE, what it
-touches, how long it has been open), `v_failures` (what failed, with the failing command), `v_llm_spend`
-(Claude cost per day, purpose, model and item) and `v_actions` (the audit trail: every action that changed
-something, who asked for it, and how it ended). [`data-model.md`](data-model.md) lists every view, table and column.
+touches, how long it has been open), `v_failures` (what failed, with the failing command), `v_ai_spend`
+(AI calls, tokens and window draw per day, provider, login and job), `v_llm_spend`
+(older per-purpose Claude spend view) and `v_actions` (the audit trail: every action that changed
+something, who asked for it, and how it ended). `quota_windows` holds the latest usage-window reading per login. [`data-model.md`](data-model.md) lists every view, table and column.
 
 Every refresh is stored twice: whole, for the dashboard (the last 60), and as one row per item and per
 vulnerability, kept for a year (after a month, only each day's last snapshot), so history survives after the whole copies are gone.
@@ -281,6 +282,30 @@ fetched from the release itself would not protect against a tampered release.) A
 with the Bosun commit that moves the pin. If a download fails, the working copy stays. Bosun never touches a
 Homebrew or `PATH` copy (it tracks a Homebrew one like any other formula). Set `BOSUN_OSV_AUTO_UPDATE=0` to
 manage `bin/` yourself, or `BOSUN_OSV_SCANNER` to point at another copy.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOSUN_DATA_DIR` | OS data folder | Where `bosun.db`, logs and the session key live. |
+| `BOSUN_PORT` | `8787` | Local port for the dashboard (`127.0.0.1`). |
+| `BOSUN_REPO_ROOTS` | your home folder | Folders to scan for git repos, separated by `:` (`;` on Windows). |
+| `BOSUN_REPO_DEPTH` | `3` | How many subfolders deep to look for git repos. |
+| `BOSUN_MODEL` | `sonnet` | Strong Claude model (explanations, fixes, major summaries). |
+| `BOSUN_MODEL_SUMMARIZE` | `haiku` | Light Claude model for routine release-note summaries. |
+| `BOSUN_MODEL_ASSISTANT` | `BOSUN_MODEL` | Model for Ask Bosun. |
+| `BOSUN_MODEL_<PROVIDER>_LIGHT` | per-CLI default | Light model for a provider (`CLAUDE`, `CODEX`, `GEMINI`, `GROK`, `ANTIGRAVITY`, `MUSE`). |
+| `BOSUN_MODEL_<PROVIDER>_STRONG` | per-CLI default | Strong model for a provider. |
+| `BOSUN_COHO_WINDOWS` | Coho's data folder | Optional read-only path to Coho's `cli-windows.json` for initial window readings. |
+| `BOSUN_FIX_ALLOW_HOSTS` | none | Extra host names, comma-separated, allowed inside the Branch + test sandbox beside the package registries. |
+| `BOSUN_OSV_SCANNER` | `bin/osv-scanner` | Path to a custom `osv-scanner` binary. |
+| `BOSUN_OSV_AUTO_UPDATE` | `1` | Set `0` to manage `osv-scanner` yourself. |
+| `BOSUN_SELF_UPDATE` | `1` | Set `0` to disable automatic self-updates. |
+| `BOSUN_UPDATE_CHANNEL` | `releases` | `releases` (signed tags) or `main`. |
+| `BOSUN_SELF_UPDATE_DELAY_HOURS` | `24` | Hours a signed release waits before automatic install (`0` turns off the wait). |
+| `BOSUN_PIP_LAUNCHER` | `python3` / `py -3` | Python launcher used to list global `pip` packages. |
+| `BOSUN_WSL_DISTRO` | `Ubuntu` | WSL distribution scanned on Windows. |
+| `BOSUN_REFRESH_BUDGET_USD`, `BOSUN_DAILY_BUDGET_USD`, `BOSUN_ASSISTANT_BUDGET_USD` | — | **Retired and ignored.** AI use is now measured by each plan's quota windows (`bosun doctor` warns if any are still set). |
 
 ## What Bosun does for itself (in full)
 

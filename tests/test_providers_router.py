@@ -412,3 +412,23 @@ def test_empty_route_attempts_nothing():
     called: list[str] = []
     done = router.attempt(_route_of(), lambda c: called.append(c.bucket) or router.Outcome("ok"))
     assert called == [] and not done.ok and done.attempts == () and done.result is None and done.candidate is None
+
+
+# --- a call cap where no window is measured ----------------------------------------------------------------------
+
+
+def test_background_work_on_a_login_with_no_window_reading_stops_at_a_call_cap():
+    caps = {"gemini": (router.UNMEASURED_REFRESH_CAP, 3), "codex": (2, router.UNMEASURED_DAILY_CAP)}
+    route = router.plan("summarize", ctx(background_calls=caps))
+    skips = {s.bucket: s for s in route.skipped}
+    assert skips["gemini"].reason == "cap" and "this refresh" in skips["gemini"].detail
+    assert skips["codex"].reason == "cap" and "today" in skips["codex"].detail
+    assert "claude" in [c.bucket for c in route.candidates]
+    # A clicked job is not background work: it runs
+    assert "gemini" in [c.bucket for c in router.plan("explain", ctx(background_calls=caps), clicked=True).candidates]
+    # A login whose windows are measured is held by the 75% line instead, however many calls it made
+    measured = {"gemini": (R("five_hour", "allowed", 0.10, NOW + 3600, NOW),)}
+    assert "gemini" in [c.bucket for c in router.plan("summarize", ctx(readings=measured, background_calls=caps)).candidates]
+    # Under the cap: still a candidate
+    under = {"gemini": (router.UNMEASURED_REFRESH_CAP - 1, router.UNMEASURED_DAILY_CAP - 1)}
+    assert "gemini" in [c.bucket for c in router.plan("summarize", ctx(background_calls=under)).candidates]

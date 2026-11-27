@@ -609,9 +609,54 @@ class Store:
             row = db.execute(f"SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE {' AND '.join(where)}", args).fetchone()
         return float(row[0])
 
+    def llm_draw(self, *, since: float | None = None, provider: str | None = None,
+                 account: str | None = None) -> dict[str, Any]:
+        """Window draw, calls and tokens from `llm_calls` (excluding cached/skipped), plus job and login totals."""
+        where, args = ["outcome NOT IN ('cached', 'skipped')"], []
+        if since is not None:
+            where.append("ts >= ?")
+            args.append(since)
+        if provider is not None:
+            where.append("COALESCE(NULLIF(provider, ''), 'claude') = ?")
+            args.append(provider)
+        if account is not None:
+            where.append("COALESCE(NULLIF(account, ''), 'default') = ?")
+            args.append(account)
+        cond = " AND ".join(where)
+        tok = "COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0)"
+        with self._tx() as db:
+            tot = dict(db.execute(
+                f"SELECT COUNT(*) AS calls, COUNT(window_draw) AS draw_calls, SUM(window_draw) AS window_draw, "
+                f"{tok} AS tokens FROM llm_calls WHERE {cond}", args).fetchone())
+            job_rows = [dict(r) for r in db.execute(
+                f"SELECT COALESCE(NULLIF(job, ''), purpose) AS job, COUNT(*) AS calls, "
+                f"COUNT(window_draw) AS draw_calls, SUM(window_draw) AS window_draw, {tok} AS tokens, "
+                f"ROUND(COALESCE(SUM(cost_usd), 0), 6) AS cost_usd FROM llm_calls WHERE {cond} "
+                f"GROUP BY 1 ORDER BY COALESCE(SUM(window_draw), -1) DESC, tokens DESC, calls DESC", args).fetchall()]
+            login_rows = [dict(r) for r in db.execute(
+                f"SELECT COALESCE(NULLIF(provider, ''), 'claude') AS provider, "
+                f"COALESCE(NULLIF(account, ''), 'default') AS account, COUNT(*) AS calls, "
+                f"COUNT(window_draw) AS draw_calls, SUM(window_draw) AS window_draw, {tok} AS tokens, "
+                f"MAX(estimated) AS estimated, ROUND(COALESCE(SUM(cost_usd), 0), 6) AS cost_usd "
+                f"FROM llm_calls WHERE {cond} GROUP BY 1, 2 "
+                f"ORDER BY COALESCE(SUM(window_draw), -1) DESC, tokens DESC", args).fetchall()]
+        draw_val = (float(tot["window_draw"]) if tot["draw_calls"] > 0
+                    else (0.0 if tot["calls"] == 0 else None))
+        by_job = [{"job": r["job"], "calls": r["calls"],
+                   "window_draw": round(float(r["window_draw"]), 6) if r["draw_calls"] > 0 else None,
+                   "tokens": int(r["tokens"]), "cost_usd": float(r["cost_usd"])} for r in job_rows]
+        by_login = [{"bucket": r["provider"] if r["account"] == "default" else f"{r['provider']}@{r['account']}",
+                     "provider": r["provider"], "account": r["account"], "calls": r["calls"],
+                     "window_draw": round(float(r["window_draw"]), 6) if r["draw_calls"] > 0 else None,
+                     "tokens": int(r["tokens"]), "estimated": bool(r["estimated"]),
+                     "cost_usd": float(r["cost_usd"])} for r in login_rows]
+        return {"calls": int(tot["calls"]), "draw_calls": int(tot["draw_calls"]),
+                "window_draw": round(draw_val, 6) if draw_val is not None else None,
+                "tokens": int(tot["tokens"]), "by_job": by_job, "by_login": by_login}
+
     def llm_usage(self, days: float = 30, now: float | None = None) -> dict:
         """Where the tokens went: totals, per day, per purpose, model, source and item, the costliest calls, outliers
-        against their purpose's median, and what Bosun's own cache and budgets avoided."""
+        against their purpose's median, and what Bosun's own cache avoided."""
         now = time.time() if now is None else now
         since = now - days * 86400
         spent = "outcome NOT IN ('cached', 'skipped')"  # rows that reached Claude (or tried to)

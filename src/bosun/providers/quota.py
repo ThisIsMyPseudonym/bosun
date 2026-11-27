@@ -147,6 +147,23 @@ def override_until(hit: Hit, now: float) -> float:
     return now + OVERRIDE_UNDATED_S
 
 
+# A login that reports no usage window has no 75% line to stop at: background work there stops at a call count.
+UNMEASURED_REFRESH_CAP = 40
+UNMEASURED_DAILY_CAP = 200
+
+
+def call_cap(current_readings: Iterable[Reading], refresh_calls: int, day_calls: int) -> str:
+    """Why background work stops on a login with no measured window ("" when it may go on). A login with any
+    current share is held by the 75% line instead."""
+    if any(share(r) is not None for r in current_readings):
+        return ""
+    if refresh_calls >= UNMEASURED_REFRESH_CAP:
+        return f"no usage window reported; {refresh_calls} background calls this refresh"
+    if day_calls >= UNMEASURED_DAILY_CAP:
+        return f"no usage window reported; {day_calls} background calls today"
+    return ""
+
+
 # --- a call's draw -----------------------------------------------------------------------------------------------
 
 SAME_RESET_S = 60  # resets this close apart are the same window; further apart, it reset in between
