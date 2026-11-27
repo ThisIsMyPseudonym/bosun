@@ -277,7 +277,7 @@ def run_jailed_fix(store: Store, login: accounts.Login, *, model: str, schema: t
         child_env = {**inv.env, **(dict(env) if env else {}), **px.env(), "TMPDIR": str(child_tmp), **acct_env}
         t0 = time.perf_counter()
         res = proc.run(wrapped, timeout=timeout, cwd=str(cwd), stdin=inv.stdin, env=child_env,
-                       unset=(*unset, "SSH_AUTH_SOCK"))
+                       unset=(*unset, "SSH_AUTH_SOCK", *jail.env_unset(child_env)))
         took_ms = round((time.perf_counter() - t0) * 1000, 1)
         blocked = tuple(f"network: {h}" for h in px.blocked)
     return _finish_fix(store, login, model, schema, prompt, res, took_ms, before, cd, now(),

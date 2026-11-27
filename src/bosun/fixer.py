@@ -355,9 +355,10 @@ class Fixer:
             if ver_err:
                 return None, ver_err
             return login, ""
-        if not jail.available():
+        if not jail.enabled(login.provider):
             label = catalog.CATALOG[login.provider].label
-            return None, f"Branch + test on {label} requires an OS jail (macOS sandbox-exec or Linux bwrap)"
+            return None, (f"Branch + test on {label} is experimental: it needs macOS and {jail.OPT_IN_ENV}="
+                          f"{login.provider}")
         return login, ""
 
     def _run_pass(self, login: accounts.Login, fix_id: int, first: Item, rel: str, group: list[Item],

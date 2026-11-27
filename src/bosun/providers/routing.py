@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from .. import trace
 from ..registry import Conflict, Invalid
-from . import accounts, catalog, contract, jail, ledger, limits, quota, router, windows
+from . import accounts, catalog, contract, ledger, limits, quota, router, windows
 
 if TYPE_CHECKING:
     from ..store import Store
@@ -214,7 +214,7 @@ def context(store: Store, *, cooldowns: limits.Cooldowns | None = None, now: flo
             if (until := cooldowns.until(lg.bucket)) is not None:
                 cool_map[lg.bucket] = until
     return router.Context(found, contracts, all_r, cool_map, overrides(store, now=when), when, router.settings(store),
-                          background_calls(store, when), jail_available=jail.available())
+                          background_calls(store, when))  # jail: per CLI, see catalog.effective_capabilities
 
 
 def background_calls(store: Store, now: float) -> dict[str, tuple[int, int]]:

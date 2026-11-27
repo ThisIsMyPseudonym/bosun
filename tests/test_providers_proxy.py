@@ -186,3 +186,40 @@ def test_allowed_hosts_for_combines_registries_provider_api_hosts_and_env(tmp_pa
             resp_no, sock_no = _connect_raw(px.port, b"CONNECT localhost:443 HTTP/1.1\r\n\r\n")
             sock_no.close()
             assert resp_no.startswith(b"HTTP/1.1 403 ")
+
+
+def test_a_port_in_non_ascii_digits_is_refused():
+    assert proxy.parse_target("pypi.org:\u00b2") is None and proxy.parse_target("pypi.org:\u0664\u0664\u0663") is None
+
+
+def test_headers_trickled_byte_by_byte_hit_an_overall_deadline():
+    with proxy.AllowListProxy(["api.openai.com"], header_timeout=0.5) as px:
+        sock = socket.create_connection(("127.0.0.1", px.port), timeout=3.0)
+        try:
+            for ch in b"CONNECT api.openai.com:443 ":  # one byte per 0.1 s: 2.7 s, far past the 0.5 s deadline
+                sock.sendall(bytes([ch]))
+                time.sleep(0.1)
+            sock.settimeout(0.05)  # still trickling a moment ago: only an overall deadline has closed it by now
+            got = sock.recv(4096)
+        except (ConnectionResetError, BrokenPipeError):
+            got = b""
+        except TimeoutError:
+            got = b"still open"
+        finally:
+            sock.close()
+        assert got == b"" or got.startswith(b"HTTP/1.1 4")
+
+
+def test_the_default_dial_never_reaches_loopback_private_or_link_local_addresses(monkeypatch):
+    dialled: list[object] = []
+    monkeypatch.setattr(socket, "create_connection", lambda addr, timeout=None: dialled.append(addr) or object())
+    for host, ip in (("localhost", "127.0.0.1"), ("metadata.example", "169.254.169.254"), ("intra.example", "10.0.0.1"),
+                     ("v6.example", "::1")):
+        fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        monkeypatch.setattr(socket, "getaddrinfo", lambda *a, _ip=ip, _f=fam, **k: [(_f, socket.SOCK_STREAM, 6, "", (_ip, 443))])
+        with pytest.raises(OSError):
+            proxy._default_dial(host, 443, 0.5)
+    assert dialled == []
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("104.18.0.1", 443))])
+    proxy._default_dial("pypi.org", 443, 0.5)
+    assert dialled == [("104.18.0.1", 443)]

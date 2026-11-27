@@ -151,7 +151,7 @@ def test_jail_available_depends_on_platform_binary(monkeypatch):
     monkeypatch.setattr(machine, "IS_MAC", False)
     monkeypatch.setattr(machine, "IS_LINUX", True)
     monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/bwrap" if n == "bwrap" else None)
-    assert jail.available() is True
+    assert jail.available() is False  # bwrap args confine files, not the network: not a jail yet
     monkeypatch.setattr(shutil, "which", lambda n: None)
     assert jail.available() is False
 
@@ -178,3 +178,23 @@ def test_login_folders_separates_active_login_from_other_logins(tmp_path):
         own2, others2 = jail.login_folders(store, added_codex, home=home)
         assert own2 == work_codex
         assert (home / ".codex") in others2 and work_claude in others2 and own2 not in others2
+
+
+def test_a_jailed_fix_runs_only_where_the_owner_opted_that_cli_in(monkeypatch):
+    from bosun.providers import catalog
+
+    monkeypatch.setattr(jail, "available", lambda: True)
+    monkeypatch.delenv(jail.OPT_IN_ENV, raising=False)
+    assert not jail.enabled("codex") and catalog.capable("fix") == ("claude",)
+    monkeypatch.setenv(jail.OPT_IN_ENV, "codex")
+    assert jail.enabled("codex") and catalog.capable("fix") == ("claude", "codex")
+    monkeypatch.setattr(jail, "available", lambda: False)
+    assert not jail.enabled("codex") and catalog.capable("fix") == ("claude",)
+
+
+def test_the_jailed_process_gets_only_the_environment_it_needs(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_canary")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "canary")
+    unset = jail.env_unset({"HTTPS_PROXY": "http://127.0.0.1:1", "CODEX_HOME": "/h"})
+    assert "GITHUB_TOKEN" in unset and "AWS_SECRET_ACCESS_KEY" in unset
+    assert "PATH" not in unset and "HOME" not in unset and "HTTPS_PROXY" not in unset and "CODEX_HOME" not in unset

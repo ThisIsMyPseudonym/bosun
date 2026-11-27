@@ -3,7 +3,13 @@
 The profile builders are pure functions that return text (`seatbelt_profile`) or an argv tuple (`bwrap_argv`).
 Writes are confined to the worktree, a throwaway cache folder and the active login's own CLI folder (so it can
 refresh its own login, R16). Reads of credentials (`SECRET_PATHS`), Bosun's `data_dir` and other logins' folders
-are denied. Network access is restricted to the local allow-list proxy on 127.0.0.1.
+are denied. On macOS, Seatbelt limits the network to the local allow-list proxy on 127.0.0.1. The bubblewrap args
+confine files only: without a network namespace bridged to the proxy, a process can ignore HTTP_PROXY, so Linux
+does not count as having a jail (`available()`) until that bridge exists.
+
+A jailed fix also runs only for a CLI the owner opted in (BOSUN_EXPERIMENTAL_JAILED_FIX=codex): the jail has not yet
+been checked against a real CLI run, its own sandbox may refuse to start inside Seatbelt, and the login folder is
+writable (R16), so a hostile run could leave settings that the next normal run of that CLI loads.
 """
 
 from __future__ import annotations
@@ -48,13 +54,27 @@ class JailSpec:
     proxy_port: int
 
 
+OPT_IN_ENV = "BOSUN_EXPERIMENTAL_JAILED_FIX"
+# What a jailed process may inherit from Bosun's environment; everything else (tokens, cloud keys, other providers'
+# API keys, BOSUN_* settings) is unset. The variables a fix sets itself (proxy, TMPDIR, the login's home) are kept.
+ENV_KEEP = frozenset({"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ"})
+
+
 def available() -> bool:
-    """Whether this machine can run a whole-process jail: macOS with `sandbox-exec`, or Linux with `bwrap`."""
-    if machine.IS_MAC:
-        return bool(shutil.which("sandbox-exec"))
-    if machine.IS_LINUX:
-        return bool(shutil.which("bwrap"))
-    return False
+    """Whether this machine can run a whole-process jail: macOS with `sandbox-exec`. Linux's bubblewrap args don't
+    isolate the network yet, so Linux has none."""
+    return bool(machine.IS_MAC and shutil.which("sandbox-exec"))
+
+
+def enabled(provider: str) -> bool:
+    """Whether a fix may run jailed on this CLI: a jail here, and the owner opted this CLI in."""
+    opted = {p.strip().lower() for p in os.environ.get(OPT_IN_ENV, "").split(",") if p.strip()}
+    return provider in opted and available()
+
+
+def env_unset(child_env: Mapping[str, str]) -> tuple[str, ...]:
+    """Every inherited variable a jailed process must not see: all but ENV_KEEP and what the fix set itself."""
+    return tuple(sorted(k for k in os.environ if k not in ENV_KEEP and k not in child_env))
 
 
 def _validate_port(port: int) -> int:

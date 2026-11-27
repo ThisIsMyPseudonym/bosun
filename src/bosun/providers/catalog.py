@@ -156,7 +156,7 @@ def effective_capabilities(s: ProviderSpec, *, jail_ok: bool | None = None) -> f
         if jail_ok is None:
             from . import jail
 
-            jail_ok = jail.available()
+            jail_ok = jail.enabled(s.id)
         if not jail_ok:
             return s.capabilities - {C.SANDBOXED_AGENT}
     return s.capabilities

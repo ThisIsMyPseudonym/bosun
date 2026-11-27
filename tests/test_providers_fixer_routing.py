@@ -38,6 +38,7 @@ def test_fix_stays_pinned_to_claude_by_default_even_when_global_order_prefers_co
     monkeypatch.setenv("BOSUN_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setattr("bosun.fixer.sandbox_available", lambda: True)
     monkeypatch.setattr(jail, "available", lambda: True)
+    monkeypatch.setenv(jail.OPT_IN_ENV, "codex")  # the owner opted Codex in
     real_run = proc.run
     seen_bins: list[str] = []
 
@@ -77,6 +78,7 @@ def test_pinning_fix_to_codex_runs_jailed_commits_and_never_pushes(tmp_path, mon
     monkeypatch.setattr(machine, "IS_MAC", True)
     monkeypatch.setattr(machine, "IS_LINUX", False)
     monkeypatch.setattr(jail, "available", lambda: True)
+    monkeypatch.setenv(jail.OPT_IN_ENV, "codex")  # the owner opted Codex in
     real_run = proc.run
     seen: dict[str, object] = {}
     codex_report = {"status": "fixed", "summary": "Bumped minimist via Codex.", "files_changed": ["package.json"],
@@ -140,8 +142,18 @@ def test_pinning_fix_to_codex_fails_closed_without_jail_or_with_failed_contract(
             fixer.start(_item(repo))
 
         monkeypatch.setattr(jail, "available", lambda: True)
+
+        monkeypatch.setenv(jail.OPT_IN_ENV, "codex")  # the owner opted Codex in
         bad = contract.ContractStatus("codex", "0.1", False, ("-C",), "Codex 0.1 dropped `-C`")
         monkeypatch.setattr(contract, "check", lambda st, p, b, now=None, include_fixer=False:
                             bad if p == "codex" and include_fixer else contract.ContractStatus(p, "1.0", True, (), ""))
         with pytest.raises(ValueError, match="dropped `-C`"):
             fixer.start(_item(repo))
+
+
+def test_without_the_owners_opt_in_a_codex_pin_is_refused_even_with_a_jail(monkeypatch):
+    from bosun.providers import catalog, jail
+
+    monkeypatch.setattr(jail, "available", lambda: True)
+    monkeypatch.delenv(jail.OPT_IN_ENV, raising=False)
+    assert "codex" not in catalog.capable("fix")

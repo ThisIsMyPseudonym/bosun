@@ -21,6 +21,7 @@ CODEX_FEATURES = (FIXTURES / "codex" / "0.172.0" / "features.txt").read_text()
 
 def test_codex_gains_sandboxed_agent_only_when_jail_is_available(monkeypatch):
     monkeypatch.setattr(jail, "available", lambda: True)
+    monkeypatch.setenv(jail.OPT_IN_ENV, "codex")  # the owner opted Codex in
     assert C.SANDBOXED_AGENT in catalog.effective_capabilities(spec("codex"))
     assert capable("fix") == ("claude", "codex")
 

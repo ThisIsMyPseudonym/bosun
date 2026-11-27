@@ -29,8 +29,20 @@ _NUMERIC_LABEL_RE = re.compile(r"^(?:\d+|0x[0-9a-f]+)$")
 _DialFn = Callable[[str, int, float], socket.socket]
 
 
+def _public(ip: str) -> bool:
+    addr = ipaddress.ip_address(ip.split("%", 1)[0])
+    return addr.is_global and not addr.is_multicast
+
+
 def _default_dial(host: str, port: int, timeout: float) -> socket.socket:
-    return socket.create_connection((host, port), timeout=timeout)
+    """Connect to an allowed name, but only at a public address: a name that resolves to loopback (the dashboard),
+    a private network or the cloud metadata address is refused, whatever it is called."""
+    for _fam, _type, _proto, _canon, addr in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        ip = str(addr[0])
+        if not _public(ip):
+            raise OSError(f"{host} resolves to {ip}, which is not a public address")
+        return socket.create_connection((ip, port), timeout=timeout)
+    raise OSError(f"{host} did not resolve")
 
 
 def normalize_host(raw: str) -> str | None:
@@ -60,7 +72,7 @@ def parse_target(target: str) -> tuple[str, int] | None:
     if target.count(":") != 1:
         return None
     raw_host, raw_port = target.split(":", 1)
-    if not raw_port.isdigit():
+    if not (raw_port.isascii() and raw_port.isdigit()):
         return None
     port = int(raw_port)
     if not (1 <= port <= 65535):
@@ -108,9 +120,14 @@ class _HeadersTooLarge(Exception):
 
 
 def _read_headers(conn: socket.socket, timeout: float) -> tuple[bytes, bytes]:
-    conn.settimeout(timeout)
+    """The request head, within `timeout` overall: a client trickling a byte at a time can't hold a worker."""
+    deadline = time.monotonic() + timeout
     buf = bytearray()
     while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("request headers took too long")
+        conn.settimeout(left)
         idx = buf.find(b"\r\n\r\n")
         if idx != -1:
             return bytes(buf[:idx]), bytes(buf[idx + 4:])
