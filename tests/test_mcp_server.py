@@ -119,11 +119,12 @@ def test_the_dashboard_decides_what_an_agent_may_do(app, dash):
         assert body["note"] == NOTE and len(body["trace_id"]) == 32  # the attempt is a run the user can see
     for name, args in (("set_autopilot", {"on": True}),
                        ("set_agent_policy", {"system": True, "external": True}),
-                       ("set_ai_routing", {"mode": "balance"}), ("set_quota_override", {"bucket": "claude", "on": True})):
+                       ("set_ai_routing", {"mode": "balance"}), ("set_quota_override", {"bucket": "claude", "on": True}),
+                       ("dismiss_ai_notice", {})):
         result, body = call(dash, name, args)
         assert result.is_error and "only be done by you" in body["error"], name
     assert app.store.setting("agents_allow_system") is None and app.store.setting("agents_allow_external") is None
-    assert [r["outcome"] for r in app.store.audit(limit=10)] == ["error"] * 7
+    assert [r["outcome"] for r in app.store.audit(limit=10)] == ["error"] * 8
     assert "set_llm_budget" not in {t.name for t in mcp_server.tools()}
 
 

@@ -373,6 +373,8 @@ SPECS: dict[str, ActionSpec] = _specs(
                Risk.LOCAL, AiRoutingIn, "POST", "/api/ai/routing", user_only=True),
     ActionSpec("set_quota_override", "Let background AI work go past the 75% line on one login until its window "
                "resets, or clear that override", Risk.LOCAL, AiOverrideIn, "POST", "/api/ai/override", user_only=True),
+    ActionSpec("dismiss_ai_notice", "Dismiss the one-time retired-budget notice on the AI usage page",
+               Risk.LOCAL, Empty, "POST", "/api/ai/notice/dismiss", user_only=True),
     ActionSpec("set_agent_policy", "Choose whether agents (Claude Code over MCP) may quit and reopen apps and open "
                "system updaters, and whether they may push branches and open pull requests",
                Risk.LOCAL, AgentPolicyIn, "POST", "/api/agents/policy", user_only=True),

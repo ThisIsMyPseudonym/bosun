@@ -51,7 +51,7 @@ from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPol
                        TraceIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
-from .providers import accounts as ai_accounts, routing as ai_routing
+from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -917,7 +917,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
 
     @actions.bind("llm_usage")
     def usage(ctx: ActionContext, body: UsageIn):
-        return store.llm_usage(days=body.days)
+        return ai_usage.report(store, days=body.days, demo=s.demo)
 
     @actions.bind("query")
     def run_query(ctx: ActionContext, body: QueryIn):
@@ -950,6 +950,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     @actions.bind("set_quota_override")
     def set_quota_override(ctx: ActionContext, body: AiOverrideIn):
         return ai_routing.set_override(store, body.bucket, body.on)
+
+    @actions.bind("dismiss_ai_notice")
+    def dismiss_ai_notice(ctx: ActionContext, body: Empty):
+        return ai_usage.dismiss_notice(store)
 
     @actions.bind("set_pref")
     def prefs(ctx: ActionContext, body: PrefIn):

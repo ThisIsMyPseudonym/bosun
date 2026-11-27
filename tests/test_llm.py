@@ -179,15 +179,83 @@ def test_usage_report_adds_up(store):
     assert u["cache"] == {"summaries_from_cache": 2, "summaries_asked": 7, "hit_rate": round(2 / 7, 3)}
     assert u["by_model"][0]["model"] == "claude-sonnet-5-5" and u["by_model"][0]["calls"] == 7
     assert store.llm_spent(since=now - 86400, purposes=("summarize", "explain", "fix")) == pytest.approx(1.357)
+    # llm_draw aggregates window_draw, calls and tokens by job and by login
+    llm.record("summarize", outcome="ok", provider="claude", account="default", job="summarize",
+               window_draw=0.04, usage=llm.Usage(input_tokens=500, output_tokens=100))
+    llm.record("explain", outcome="ok", provider="claude", account="default", job="explain",
+               window_draw=0.07, usage=llm.Usage(input_tokens=800, output_tokens=200))
+    llm.record("summarize", outcome="ok", provider="gemini", account="default", job="summarize",
+               window_draw=None, estimated=True, usage=llm.Usage(input_tokens=300, output_tokens=50))
+    draw = store.llm_draw(since=now - 3600)
+    assert draw["window_draw"] == pytest.approx(0.11) and draw["draw_calls"] == 2
+    assert [j["job"] for j in draw["by_job"][:2]] == ["explain", "summarize"]
+    assert draw["by_job"][0]["window_draw"] == pytest.approx(0.07)
+    claude_draw = store.llm_draw(since=now - 3600, provider="claude", account="default")
+    assert claude_draw["window_draw"] == pytest.approx(0.11)
+    gemini_draw = store.llm_draw(since=now - 3600, provider="gemini", account="default")
+    assert gemini_draw["window_draw"] is None and gemini_draw["calls"] == 1 and gemini_draw["tokens"] == 350
 
 
-def test_usage_endpoints(store, tmp_path):
+def test_usage_endpoints(store, tmp_path, monkeypatch):
+    from bosun.providers import accounts, ledger, router, windows
+
+    now = time.time()
     s = load_settings()
     store.save_snapshot([item_to_dict(Item(Source.BREW, "jq", "jq", "1", "2"))], [])
-    llm.record("summarize", outcome="ok", item_key="brew:jq", usage=llm.Usage(cost_usd=0.02))
+    monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/bin/claude", "gemini": "/bin/gemini"})
+    monkeypatch.setattr(ledger, "deliver", lambda *a, **kw: False)
+
+    # Current window (41%), stale window (past reset), and unknown-share window (used=None)
+    ledger.save(store, "claude", (
+        windows.Reading("five_hour", "allowed", 0.41, now + 3 * 3600, now - 60, "output"),
+        windows.Reading("seven_day", "allowed", 0.50, now - 60, now - 3600, "output"),  # stale!
+        windows.Reading("one_day", "allowed", None, now + 12 * 3600, now - 30, "output"),  # unknown share
+    ), now=now)
+    # Two calls inside Claude's 5-hour window (started 2h ago) and one older call before it
+    llm.record("summarize", outcome="ok", item_key="brew:jq", provider="claude", account="default",
+               job="summarize", window_draw=0.05, usage=llm.Usage(input_tokens=400, output_tokens=100, cost_usd=0.02))
+    llm.record("explain", outcome="ok", item_key="brew:jq", provider="claude", account="default",
+               job="explain", window_draw=0.03, usage=llm.Usage(input_tokens=600, output_tokens=150, cost_usd=0.04))
+    with store._db:
+        store._db.execute(
+            "INSERT INTO llm_calls (ts, purpose, outcome, provider, account, job, window_draw) VALUES (?, 'summarize', 'ok', 'claude', 'default', 'summarize', 0.25)",
+            (now - 6 * 3600,),
+        )
+    # Estimated login call
+    llm.record("summarize", outcome="ok", item_key="brew:jq", provider="gemini", account="default",
+               job="summarize", window_draw=None, estimated=True, usage=llm.Usage(input_tokens=200, output_tokens=50))
+    # One active 75%-line skip notice and a pending retired-budgets notice
+    ledger.notice_skips(store, (router.Skip("claude", "line", "5-hour at 80%",
+                                            hit=router.quota.Hit("five_hour", 0.8, now + 3600)),), now=now)
+    store.set_setting("ai_budgets_retired", json.dumps({"daily_usd": 4.0, "at": now - 10}))
+    store.set_setting("ai_budgets_notice", "pending")
+
     c = TestClient(create_app(s, store, "t" * 32), base_url=f"http://127.0.0.1:{s.port}", cookies=signed_in(s.port))
+    h = {"x-bosun-token": "t" * 32}
     got = c.get("/api/usage", params={"days": 7}).json()
-    assert got["totals"]["calls"] == 1
+    assert got["detail"]["totals"]["calls"] == 4
+    by_bucket = {lg["bucket"]: lg for lg in got["logins"]}
+    assert set(by_bucket) == {"claude", "gemini"}
+    wins = {w["window"]: w for w in by_bucket["claude"]["windows"]}
+    assert wins["five_hour"]["share"] == pytest.approx(0.41) and not wins["five_hour"]["stale"]
+    assert wins["five_hour"]["pace"] is not None and wins["five_hour"]["reset"]
+    assert wins["five_hour"]["bosun_share"] == pytest.approx(0.08)  # excludes the call from 6h ago
+    # Stale and unknown-share windows must report share=None, never 0
+    assert wins["seven_day"]["stale"] is True and wins["seven_day"]["share"] is None and wins["seven_day"]["pace"] is None
+    assert wins["one_day"]["stale"] is False and wins["one_day"]["share"] is None and wins["one_day"]["pace"] is None
+    assert got["bosun_share"]["claude"]["five_hour"] == pytest.approx(0.08)
+    assert got["top_jobs"][0]["job"] == "summarize" and got["top_jobs"][0]["window_draw"] == pytest.approx(0.30)
+    assert [e["bucket"] for e in got["estimated"]] == ["gemini"]
+    assert got["estimated"][0]["calls"] == 1 and got["estimated"][0]["tokens"] == 250
+    assert len(got["notices"]) == 1 and got["notices"][0]["bucket"] == "claude"
+    assert got["budgets_retired"]["daily_usd"] == 4.0
+    assert "routing" in got and got["routing"]["mode"] == "default"
+
+    # Dismissing the retired-budgets notice is user-only and hides it on subsequent reads
+    assert c.post("/api/ai/notice/dismiss").status_code == 403
+    assert c.post("/api/ai/notice/dismiss", headers=h).json() == {"dismissed": True}
+    assert c.get("/api/usage", params={"days": 7}).json()["budgets_retired"] is None
+    assert store.setting("ai_budgets_notice") == "shown"
     assert c.get("/api/usage", params={"days": 0}).status_code == 422
 
 
