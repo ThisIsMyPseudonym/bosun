@@ -209,7 +209,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         raw = request.scope.get("raw_path") or request.url.path.encode()
         target = raw.decode("ascii", "replace") + (f"?{request.scope['query_string'].decode('ascii', 'replace')}"
                                                    if request.scope.get("query_string") else "")
-        request.state.reply_proof = auth.assistant_reply_proof(assistant_token, request.method, target)
+        request.state.reply_proof = auth.assistant_reply_proof(assistant_tokens.reply_key(assistant_token),
+                                                               request.method, target)
         path = request.url.path
         if not path.startswith("/api/") or path == "/api/state":
             return JSONResponse({"error": "agents can only call actions"}, status_code=403)

@@ -160,12 +160,13 @@ class Dashboard:
     def __init__(self, s: Settings, agent: str = auth.DEFAULT_AGENT, http: httpx.Client | None = None,
                  up: Callable[[], bool] | None = None, start: Callable[[], str] = launcher.start_dashboard,
                  wait: float = launcher.START_WAIT_S, sleep: Callable[[float], None] = time.sleep,
-                 as_role: str = "agent", assistant_token: str | None = None):
+                 as_role: str = "agent", assistant_token: str | None = None, reply_key: str | None = None):
         self.s = s
         self.url = f"http://{s.host}:{s.port}"
         self.agent = agent
         self.as_role = as_role
         self._assistant_token = assistant_token
+        self._reply_key = reply_key
         timeout = ASSISTANT_HTTP_TIMEOUT if as_role == "assistant" else HTTP_TIMEOUT
         self._http = http or httpx.Client(base_url=self.url, timeout=timeout, follow_redirects=False,
                                           trust_env=False)  # loopback only: never through a proxy from the environment
@@ -177,6 +178,9 @@ class Dashboard:
         if self._assistant_token is not None:
             return self._assistant_token
         return os.environ.get(auth.ASSISTANT_TOKEN_ENV, "")
+
+    def _assistant_reply_key(self) -> str:
+        return self._reply_key if self._reply_key is not None else os.environ.get(auth.ASSISTANT_REPLY_KEY_ENV, "")
 
     def ensure_up(self) -> None:
         """Bosun answering on its port, started first if it wasn't."""
@@ -203,7 +207,7 @@ class Dashboard:
         tok = self._token()
         r = self._http.request(method, path, headers={auth.ASSISTANT_TOKEN_HEADER: tok}, **kwargs)
         if r.status_code != 401 and not auth.valid_assistant_reply(
-                tok, r.request.method, r.request.url.raw_path.decode("ascii"), r.headers.get(auth.REPLY_HEADER)):
+                self._assistant_reply_key(), r.request.method, r.request.url.raw_path.decode("ascii"), r.headers.get(auth.REPLY_HEADER)):
             raise DashboardDown(f"Something on port {self.s.port} answered, but couldn't show it is this machine's "
                                 "Bosun dashboard, so its answer was not used.")
         try:

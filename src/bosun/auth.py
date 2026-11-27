@@ -183,17 +183,21 @@ class Sessions:
 ASSISTANT_TOKEN_ENV = "BOSUN_ASSISTANT_TOKEN"
 ASSISTANT_TOKEN_HEADER = "x-bosun-assistant-token"
 ASSISTANT_TOKEN_PREFIX = "bsn_at_"
+ASSISTANT_REPLY_KEY_ENV = "BOSUN_ASSISTANT_REPLY_KEY"
+ASSISTANT_REPLY_KEY_PREFIX = "bsn_rk_"
 ASSISTANT_TOKEN_TTL_S = 3600.0
 
 
-def assistant_reply_proof(token: str, method: str, target: str) -> str:
-    """Dashboard proof for an assistant MCP call, bound to this per-turn token, method and target."""
-    return _mac(token, f"assistant-reply|{method.upper()}|{target}")
+def assistant_reply_proof(reply_key: str, method: str, target: str) -> str:
+    """The dashboard's proof of an answer to an assistant MCP call. It is keyed by the turn's reply key, which the
+    dashboard gives the MCP child in its environment and which is never sent on the wire: something else on the
+    port receives the token but not this key, so it can't forge the proof."""
+    return _mac(reply_key, f"assistant-reply|{method.upper()}|{target}")
 
 
-def valid_assistant_reply(token: str | None, method: str, target: str, value: str | None) -> bool:
-    return bool(token and value) and hmac.compare_digest(
-        str(value).encode("utf-8", "replace"), assistant_reply_proof(str(token), method, target).encode())
+def valid_assistant_reply(reply_key: str | None, method: str, target: str, value: str | None) -> bool:
+    return bool(reply_key and value) and hmac.compare_digest(
+        str(value).encode("utf-8", "replace"), assistant_reply_proof(str(reply_key), method, target).encode())
 
 
 @dataclass(frozen=True)
@@ -213,6 +217,12 @@ class AssistantTokens:
         self._clock = clock
         self._lock = threading.Lock()
         self._active: dict[str, TokenGrant] = {}
+        self._secret = secrets.token_bytes(32)  # this process's: reply keys die with it
+
+    def reply_key(self, token: str) -> str:
+        """The turn's reply key, derived from its token with a secret only this dashboard holds."""
+        mac = hmac.new(self._secret, token.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
+        return f"{ASSISTANT_REPLY_KEY_PREFIX}{mac}"
 
     def issue(self, conversation_id: str, turn: int) -> str:
         token = f"{ASSISTANT_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"

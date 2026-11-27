@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -18,7 +19,8 @@ from pydantic import BaseModel
 from . import auth, mcp_server, redact
 from .approvals import Approval, Approvals
 from .assistant_prompt import DECLINED, Turn, helpers, read_guide
-from .registry import ASSISTANT, ActionContext, ActionError, Actions, ActionSpec, Forbidden, NotFound, Risk, TraceIn
+from .registry import (ASSISTANT, ActionContext, ActionError, Actions, ActionSpec, Conflict, Forbidden, NotFound, Risk,
+                       TraceIn)
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -26,6 +28,9 @@ log = logging.getLogger(__name__)
 RESULT_CHARS = 30_000  # of one tool result given to the model: a panel answer shouldn't cost a whole refresh's trace
 STORED_CHARS = 4_000  # of a tool result kept in messages
 SHOWN_CHARS = 1_500  # of a tool result sent to the panel
+# Cards one conversation may have waiting over MCP. Each waits on a server thread, so a model told to fire many
+# calls at once must not hold every thread (and with them your Approve and Stop buttons) for the card's lifetime.
+MAX_WAITING_CARDS = 3
 
 
 class ApprovalDeclined(ActionError):
@@ -48,6 +53,8 @@ class ToolRunner:
         self.approvals = approvals
         self.tokens = tokens
         self.pool = pool
+        self._waiting: dict[str, int] = {}
+        self._waiting_lock = threading.Lock()
 
     def items_for(self, args: dict[str, Any]) -> list[dict[str, Any]]:
         """What an approval is about, by name and version: the card shows these, not just keys."""
@@ -145,13 +152,30 @@ class ToolRunner:
         if spec.risk != Risk.READ and not spec.user_only:
             if self.tokens.verify(token) is None:
                 raise Forbidden("This assistant turn has already ended")
-            answer = self.ask_approval_sync(grant, turn, has_conv, spec, body)
+            answer = self._wait_bounded(grant, turn, has_conv, spec, body)
             if answer.state != "approved":
                 raise ApprovalDeclined(answer)
             if self.tokens.verify(token) is None:
                 raise Forbidden("This assistant turn has already ended")
             approval_id = answer.id
         return self._exec_mcp(grant, turn, has_conv, spec, body, approval_id)
+
+    def _wait_bounded(self, grant: auth.TokenGrant, turn: Turn | None, has_conv: bool, spec: ActionSpec,
+                      body: BaseModel) -> Approval:
+        cid = grant.conversation_id
+        with self._waiting_lock:
+            if self._waiting.get(cid, 0) >= MAX_WAITING_CARDS:
+                raise Conflict(f"{MAX_WAITING_CARDS} actions are already waiting for your answer: answer those first")
+            self._waiting[cid] = self._waiting.get(cid, 0) + 1
+        try:
+            return self.ask_approval_sync(grant, turn, has_conv, spec, body)
+        finally:
+            with self._waiting_lock:
+                left = self._waiting.get(cid, 1) - 1
+                if left > 0:
+                    self._waiting[cid] = left
+                else:
+                    self._waiting.pop(cid, None)
 
     def _exec_mcp(self, grant: auth.TokenGrant, turn: Turn | None, has_conv: bool, spec: ActionSpec,
                   body: BaseModel, approval_id: str | None) -> tuple[Any, str]:

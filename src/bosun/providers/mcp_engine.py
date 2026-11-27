@@ -27,6 +27,7 @@ from .engines import Event, ToolCaller, TurnReport
 
 log = logging.getLogger(__name__)
 STOP_KILL_WAIT_S = 1.5
+STREAM_LIMIT = 4 * jsontext.MAX_LINE_CHARS  # one JSONL line: a long tool result must not end the read
 
 
 def _child_env(inv_env: Any, acct_env: dict[str, str], unset: tuple[str, ...]) -> dict[str, str]:
@@ -90,11 +91,12 @@ class CliMcpEngine:
 
     needs_token = True
 
-    def __init__(self, settings: Settings, login: accounts.Login, model: str, token: str):
+    def __init__(self, settings: Settings, login: accounts.Login, model: str, token: str, reply_key: str = ""):
         self.settings = settings
         self.login = login
         self.model = model
         self._token = token
+        self._reply_key = reply_key
         self._turn: Any = None
         self._prompt = ""
         self._proc: asyncio.subprocess.Process | None = None
@@ -133,6 +135,9 @@ class CliMcpEngine:
             stderr_task.cancel()
             raise
         finally:
+            if child.returncode is None:  # an error, an unread line or an abandoned stream: the CLI must not live on
+                await self.stop()
+                stderr_task.cancel()
             self._proc = None
 
     async def stream(self) -> AsyncIterator[Event]:
@@ -144,7 +149,8 @@ class CliMcpEngine:
         with tempfile.TemporaryDirectory(prefix="bosun-assistant-") as tmp:
             inv = argv.build_mcp(provider, binary=self.login.binary, model=self.model, system=SYSTEM,
                                  prompt=self._prompt, workdir=Path(tmp), port=self.settings.port,
-                                 token=self._token, tool_names=tool_names(), timeout_ms=TOOL_TIMEOUT_MS)
+                                 token=self._token, tool_names=tool_names(), timeout_ms=TOOL_TIMEOUT_MS,
+                                 reply_key=self._reply_key)
             call_argv = (inv.argv[0], *accounts.login_args(self.login, inv.argv[1:]))
             env = _child_env(inv.env, acct_env, unset)
             extra_kw: dict[str, Any] = (
@@ -156,7 +162,7 @@ class CliMcpEngine:
                 try:
                     child = await asyncio.create_subprocess_exec(
                         *call_argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE, cwd=tmp, env=env, **extra_kw)
+                        stderr=asyncio.subprocess.PIPE, cwd=tmp, env=env, limit=STREAM_LIMIT, **extra_kw)
                 except FileNotFoundError:
                     sp.fail(f"command not found: {call_argv[0]}")
                     yield Event("result", report=TurnReport(

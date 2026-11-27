@@ -60,7 +60,9 @@ while i < len(argv):
     else:
         i += 1
 
-assert cfg.get("env_vars") == ["BOSUN_ASSISTANT_TOKEN"], f"unexpected env_vars: {{cfg}}"
+assert cfg.get("env_vars") == ["BOSUN_ASSISTANT_TOKEN", "BOSUN_ASSISTANT_REPLY_KEY"], f"unexpected env_vars: {{cfg}}"
+reply_key = os.environ.get("BOSUN_ASSISTANT_REPLY_KEY", "")
+assert reply_key.startswith("bsn_rk_") and reply_key not in " ".join(argv) and reply_key not in prompt
 # Forward ONLY basic PATH + variables listed in env_vars (simulating Codex's env_vars filter)
 child_env = {{"PATH": os.environ.get("PATH", "")}}
 for var in cfg["env_vars"]:

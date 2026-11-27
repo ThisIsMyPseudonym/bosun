@@ -6,6 +6,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 from assistant_panel import H, panel  # noqa: F401
 
 from bosun.providers.engines import AssistantEngine, Event, ToolCaller, TurnReport
@@ -217,6 +219,7 @@ def test_mcp_as_assistant_serves_assistant_tools_and_enforces_token(panel):
             sleep=lambda _s: None,
             as_role="assistant",
             assistant_token=token_val,
+            reply_key=panel.app.state.assistant_tokens.reply_key(token_val) if token_val else "",
         )
 
         async def go():
@@ -293,6 +296,7 @@ def test_mcp_assistant_approval_approve_decline_replay_and_user_only(panel):
         sleep=lambda _s: None,
         as_role="assistant",
         assistant_token=tok,
+        reply_key=panel.app.state.assistant_tokens.reply_key(tok),
     )
 
     def _call(name, args):
@@ -373,7 +377,7 @@ def test_build_mcp_locks_down_claude_and_codex_without_token_in_argv_or_files(tm
     assert tok not in " ".join(a) and tok not in cfg_path.read_text(encoding="utf-8") and tok not in (cl.stdin or "")
     assert cl.env[auth.ASSISTANT_TOKEN_ENV] == tok and int(cl.env["MCP_TOOL_TIMEOUT"]) >= 300_000
     # Every long flag emitted for Claude MCP is checked by the contract
-    cl_checked = set(spec("claude").lockdown_flags) | set(spec("claude").mcp_flags)
+    cl_checked = set(spec("claude").lockdown_flags) | set(spec("claude").mcp_flags) | set(spec("claude").fixer_flags)  # --restricted
     assert {f for f in a if f.startswith("--")} <= cl_checked
 
     # Codex CLI MCP invocation
@@ -470,3 +474,99 @@ def test_cli_mcp_engine_streams_claude_and_codex_and_stop_kills_process_group(tm
 
 
 
+
+
+# --- review fixes ------------------------------------------------------------------------------------------------
+
+
+def test_a_turn_that_runs_too_long_is_stopped(panel, monkeypatch):
+    from bosun import assistant as assistant_module
+
+    monkeypatch.setattr(assistant_module, "TURN_TIMEOUT_S", 0.3)
+    engine = InMemoryEngine(("Thinking...",), hold=asyncio.Event())  # never released
+    panel.assistant.engine_factory = lambda _cand, _model: engine
+    cid = panel.ask("hang")["conversation_id"]
+    done = panel.wait(cid)[-1][1]
+    assert done["status"] == "error" and "stopped after" in done["error"]
+
+
+def test_too_many_waiting_cards_in_one_conversation_are_refused_before_a_card_opens(panel):
+    from bosun import auth
+    from bosun.registry import SPECS, Conflict
+
+    runner = panel.assistant._tools
+    cid = "c" * 32
+    tok = panel.app.state.assistant_tokens.issue(cid, 1)
+    grant = panel.app.state.assistant_tokens.verify(tok)
+    runner._waiting[cid] = 3  # three cards already waiting on server threads
+    spec = SPECS["upgrade"]
+    body = panel.app.state.actions.validate("upgrade", {"keys": ["brew:jq"]})
+    with pytest.raises(Conflict):
+        runner.run_mcp_action(grant, None, spec, body, tok)
+    assert runner._waiting[cid] == 3 and isinstance(grant, auth.TokenGrant)  # refused before a card was counted
+
+
+def test_a_responder_holding_only_the_token_cannot_prove_it_is_the_dashboard():
+    from bosun import auth
+
+    tokens = auth.AssistantTokens()
+    tok = tokens.issue("a" * 32, 1)
+    key = tokens.reply_key(tok)
+    assert key.startswith(auth.ASSISTANT_REPLY_KEY_PREFIX) and tok not in key
+    forged = auth.assistant_reply_proof(tok, "POST", "/api/upgrade")  # all a port squatter can compute
+    assert not auth.valid_assistant_reply(key, "POST", "/api/upgrade", forged)
+    real = auth.assistant_reply_proof(key, "POST", "/api/upgrade")
+    assert auth.valid_assistant_reply(key, "POST", "/api/upgrade", real)
+    assert auth.AssistantTokens().reply_key(tok) != key  # another process's dashboard can't derive it either
+
+
+def test_the_cli_dies_when_its_output_cannot_be_read(tmp_path):
+    import os
+    import stat
+    import sys
+
+    from bosun import auth
+    from bosun.assistant_prompt import Turn
+    from bosun.config import load_settings
+    from bosun.providers import accounts, mcp_engine
+    from bosun.providers.engines import CliMcpEngine
+
+    pid_file = tmp_path / "pid"
+    fake = tmp_path / "fake-codex"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        f"sys.stdout.write('x' * {mcp_engine.STREAM_LIMIT + 10} + '\\n'); sys.stdout.flush()\n"
+        "time.sleep(60)\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    eng = CliMcpEngine(load_settings(), accounts.Login("codex", "default", "Default", None, False, str(fake)),
+                       "gpt-5.6-terra", auth.ASSISTANT_TOKEN_PREFIX + "y" * 43)
+
+    async def go():
+        await eng.start_turn(Turn("d" * 32, 1), "hi")
+        with pytest.raises(ValueError):
+            async for _ev in eng.stream():
+                pass
+
+    asyncio.run(go())
+    pid = int(pid_file.read_text())
+    try:
+        os.kill(pid, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    assert not alive
+
+
+def test_the_reply_key_reaches_the_mcp_child_but_never_argv(tmp_path):
+    from bosun import auth
+    from bosun.providers import argv
+
+    tok, key = auth.ASSISTANT_TOKEN_PREFIX + "t" * 43, auth.ASSISTANT_REPLY_KEY_PREFIX + "k" * 64
+    for provider in ("claude", "codex"):
+        inv = argv.build_mcp(provider, binary=f"/bin/{provider}", model="m", system="S", prompt="P",
+                             workdir=tmp_path, port=8787, token=tok, reply_key=key)
+        assert inv.env[auth.ASSISTANT_REPLY_KEY_ENV] == key and key not in " ".join(inv.argv)
+    assert "--restricted" in argv.build_mcp("claude", binary="/bin/claude", model="m", system="S", prompt="P",
+                                            workdir=tmp_path, port=8787, token=tok).argv

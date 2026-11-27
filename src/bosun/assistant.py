@@ -46,6 +46,7 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 MAX_RUNNING = 3  # turns at once, across conversations: each is a CLI process
+TURN_TIMEOUT_S = 1800.0  # a turn that runs longer is stopped: a hung CLI must not hold one of MAX_RUNNING forever
 STOP_GRACE_S = 5.0  # after Stop: how long the CLI gets to report what the turn used before it is cancelled
 
 
@@ -182,7 +183,7 @@ class Assistant:
                 return self.engine_factory(cand, model)
         if cand.provider == "claude":
             return self._sdk_engine(model, login=cand.login)
-        return CliMcpEngine(self.settings, cand.login, model, turn_token)
+        return CliMcpEngine(self.settings, cand.login, model, turn_token, self.tokens.reply_key(turn_token))
 
     def options(self, turn: Turn, stderr: list[str] | None = None) -> ClaudeAgentOptions:
         """Everything the model is given on the Claude SDK path. Tests assert on this."""
@@ -272,7 +273,10 @@ class Assistant:
                         prompt_chars=len(prompt)) as sp:
             try:
                 turn.engine = self._build_engine(cand, model, turn_token)
-                rep = await self._drive_engine(turn, turn.engine, prompt)
+                async with asyncio.timeout(TURN_TIMEOUT_S) as deadline:
+                    rep = await self._drive_engine(turn, turn.engine, prompt)
+                if deadline.expired():
+                    rep = TurnReport(outcome="timeout", error=f"stopped after {TURN_TIMEOUT_S // 60:.0f} minutes")
             finally:
                 turn.engine = None
                 self.tokens.revoke(turn_token)

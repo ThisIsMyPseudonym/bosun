@@ -78,7 +78,7 @@ CLAUDE_FLAGS = ("-p", "--tools", "--disallowedTools", "--strict-mcp-config", "--
                 "--json-schema", "--output-format", "--verbose", "--disable-slash-commands", "--permission-mode",
                 "--model", "--system-prompt")
 CLAUDE_FIXER_FLAGS = ("--restricted", "--permission-prompts")
-CLAUDE_MCP_FLAGS = ("--mcp-config", "--allowedTools", "--include-partial-messages")
+CLAUDE_MCP_FLAGS = ("--mcp-config", "--allowedTools", "--include-partial-messages")  # --restricted: CLAUDE_FIXER_FLAGS
 CODEX_DISABLED_FEATURES = ("shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins",
                            "in_app_browser", "browser_use_external", "multi_agent", "view_image", "image_generation",
                            "hooks", "skill_search", "remote_plugin", "tool_suggest", "memories")
