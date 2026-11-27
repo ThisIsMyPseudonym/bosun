@@ -99,8 +99,33 @@ def test_codex_recorded_shape_and_junk():
     junk = json.dumps({"rate_limits": {"primary": {"used_percent": "lots"}, "secondary": None}})
     nameless = json.dumps({"rate_limits": {"primary": {"used_percent": 3, "window_minutes": -1}}})
     assert windows.parse_codex(junk + "\nrate_limits {\n", at=1.0) == ()
-    assert windows.parse_codex(nameless, at=1.0) == (R("window", "allowed", 0.03, None, 1.0),)
+    assert windows.parse_codex(nameless, at=1.0) == (R("primary", "allowed", 0.03, None, 1.0),)
     assert windows.parse_codex(json.dumps({"rate_limits": []}), at=1.0) == ()
+
+
+def test_unnamed_codex_slots_stay_distinct_and_colliding_windows_keep_worst():
+    unnamed = json.dumps({"rate_limits": {"primary": {"used_percent": 95}, "secondary": {"used_percent": 10}}})
+    got = {r.window: r for r in windows.parse_codex(unnamed, at=1.0)}
+    assert got == {
+        "primary": R("primary", "allowed_warning", 0.95, None, 1.0),
+        "secondary": R("secondary", "allowed", 0.10, None, 1.0),
+    }
+    same_len = json.dumps({"rate_limits": {
+        "primary": {"used_percent": 95, "window_minutes": 300},
+        "secondary": {"used_percent": 10, "window_minutes": 300}}})
+    assert windows.parse_codex(same_len, at=1.0) == (R("five_hour", "allowed_warning", 0.95, None, 1.0),)
+    prefix = "super-long-model-name-that-truncates-at-40"
+    agy = json.dumps([
+        {"model": prefix + "-alpha", "quotaInfo": {"remainingFraction": 0.0}},
+        {"model": prefix + "-beta", "quotaInfo": {"remainingFraction": 0.9}},
+    ])
+    (collided,) = windows.parse_antigravity(agy, at=1.0)
+    assert collided.status == "rejected" and collided.used == 1.0
+    claude_dup = "\n".join([
+        _event(status="rejected", rateLimitType="five_hour", utilization=0.95),
+        _event(status="allowed", rateLimitType="five_hour", utilization=0.10),
+    ])
+    assert windows.parse_claude(claude_dup, at=1.0) == (R("five_hour", "rejected", 0.95, None, 1.0),)
 
 
 # --- Antigravity -------------------------------------------------------------------------------------------------

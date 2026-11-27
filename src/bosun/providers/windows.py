@@ -94,11 +94,24 @@ def json_lines(raw: str, marker: re.Pattern[str]) -> tuple[dict[str, Any], ...]:
     return tuple(o for o in found if o is not None)
 
 
+def _higher(a: float | None, b: float | None) -> float | None:
+    if a is None:
+        return b
+    return a if b is None else max(a, b)
+
+
+def _merge(a: Reading, b: Reading) -> Reading:
+    """Combine two readings of the same window safely: worse status, higher used, later reset."""
+    return Reading(b.window, worse(a.status, b.status), _higher(a.used, b.used),
+                   _higher(a.resets_at, b.resets_at), max(a.at, b.at), b.source)
+
+
 def latest_per_window(readings: list[Reading]) -> tuple[Reading, ...]:
-    """The last reading of each window, in the order the windows first appeared."""
+    """One reading per window in first-seen order; collisions keep the worse status and higher used."""
     seen: dict[str, Reading] = {}
     for r in readings:
-        seen[r.window] = r
+        prev = seen.get(r.window)
+        seen[r.window] = _merge(prev, r) if prev is not None else r
     return tuple(seen.values())
 
 
@@ -172,11 +185,11 @@ CODEX_WARNING = 0.9  # Codex sends no status: at or past 90% is a warning, at 10
 _MINUTES = {300: "five_hour", 10_080: "seven_day", 1_440: "one_day"}
 
 
-def window_for_minutes(minutes: object) -> str:
+def window_for_minutes(minutes: object, fallback: str = "window") -> str:
     """A window's name from its length: Codex says minutes, not a type."""
     m = _number(minutes)
     if m is None or m <= 0:
-        return "window"
+        return fallback
     return _MINUTES.get(round(m), f"{round(m)}_min")
 
 
@@ -187,7 +200,7 @@ def _pick(o: dict[str, Any], *keys: str) -> object:
     return None
 
 
-def _codex_slot(w: dict[str, Any], at: float) -> Reading | None:
+def _codex_slot(w: dict[str, Any], at: float, fallback: str = "window") -> Reading | None:
     percent = _number(_pick(w, "usedPercent", "used_percent"))
     used = min(1.0, percent / 100) if percent is not None and percent >= 0 else None
     in_seconds = _number(_pick(w, "resets_in_seconds", "resetsInSeconds"))
@@ -199,7 +212,7 @@ def _codex_slot(w: dict[str, Any], at: float) -> Reading | None:
     status: Status = ("rejected" if used is not None and used >= 1
                       else "allowed_warning" if used is not None and used >= CODEX_WARNING else "allowed")
     minutes = _pick(w, "windowDurationMins", "window_duration_mins", "window_minutes", "windowMinutes")
-    return Reading(window_for_minutes(minutes), status, used, resets, at)
+    return Reading(window_for_minutes(minutes, fallback), status, used, resets, at)
 
 
 def _codex_snapshot(value: object) -> dict[str, Any] | None:
@@ -218,8 +231,7 @@ def parse_codex_snapshot(value: object, at: float) -> tuple[Reading, ...]:
     snapshot = _codex_snapshot(value)
     if snapshot is None:
         return ()
-    slots = (snapshot.get(k) for k in ("primary", "secondary"))
-    found = (_codex_slot(w, at) for w in slots if isinstance(w, dict))
+    found = (_codex_slot(w, at, key) for key in ("primary", "secondary") if isinstance(w := snapshot.get(key), dict))
     return tuple(r for r in found if r is not None)
 
 
