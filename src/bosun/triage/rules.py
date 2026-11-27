@@ -35,7 +35,7 @@ _HINT_META: dict[str, tuple[Category, StepKind, bool, bool, str | None, str | No
     "no password was provided": ("password_needed", "retry", True, False, None, None),
     "Request dismissed": ("password_needed", "retry", True, False, None, None),
     "No authentication agent": ("password_needed", "runbook", True, False, None, "cask-needs-password"),
-    "Could not get lock": ("busy_or_locked", "retry", False, True, None, None),
+    "Could not get lock": ("busy_or_locked", "retry", False, True, None, "apt-lock"),
     "timed out after": ("admin_prompt", "retry", True, False, None, None),
 }
 
@@ -357,7 +357,7 @@ def match(rec: FailureRecord) -> Verdict | None:
         next_step=NextStep(
             kind=chosen.step_kind,
             recipe=chosen.recipe if chosen.step_kind == "recipe" else None,
-            runbook=chosen.runbook if chosen.step_kind == "runbook" else None,
+            runbook=chosen.runbook if chosen.step_kind in ("runbook", "retry") else None,
             why=chosen.why,
         ),
         needs_person=needs_person,

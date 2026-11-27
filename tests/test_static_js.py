@@ -458,6 +458,25 @@ def test_triage_retry_uses_fix_item_keys_and_omits_button_for_non_retryable_kind
       throw new Error("refresh retry did not POST /api/refresh: " + JSON.stringify(apiCalls));
     }}
 
+    // 6. Retry step with an attached runbook (e.g. apt-lock) shows both Try again and Open guide
+    const aptTrace = {{
+      run: {{ trace_id: "apt00001", kind: "upgrade", subject: "apt:curl", status: "failed", started: 1700000000 }},
+      spans: [], failures: [], jobs: [], fixes: [],
+    }};
+    const aptTriage = {{
+      status: "done", source: "rules", feedback: "",
+      verdict: {{
+        category: "busy_or_locked", cause: "Lock held.", confidence: "high", evidence: [],
+        next_step: {{ kind: "retry", recipe: null, runbook: "apt-lock", why: "Wait and retry." }},
+        needs_person: false, transient: true,
+      }},
+    }};
+    const aptCard = H.verdictCard(aptTriage, aptTrace, {{}});
+    const aptBtns = allNodes(aptCard).filter((n) => n.tagName === "BUTTON").map((n) => n.textContent);
+    if (!aptBtns.includes("Try again") || !aptBtns.includes("Open guide")) {{
+      throw new Error("retry+runbook must show both Try again and Open guide, got: " + JSON.stringify(aptBtns));
+    }}
+
     console.log("OK");
     """
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)

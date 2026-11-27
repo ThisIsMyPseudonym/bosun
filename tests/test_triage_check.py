@@ -52,12 +52,17 @@ def test_recheck_step_keeps_valid_steps_and_handles_refresh_and_recipe(monkeypat
     brew_item = Item(Source.BREW, "jq", "jq", "1.7", "1.7.1")
     apt_item = Item(Source.APT, "curl", "curl", "8.0", "8.1", binaries=("curl",))
 
-    # Valid retry on upgradable item stays retry
+    # Valid retry on upgradable item stays retry and preserves a valid runbook (dropping invalid ones)
     ok_retry = recheck_step(
-        NextStep(kind="retry", why="Retry once lock clears."),
+        NextStep(kind="retry", runbook="apt-lock", why="Retry once lock clears."),
+        category="busy_or_locked", item=apt_item, output="", run_kind="upgrade",
+    )
+    assert ok_retry.kind == "retry" and ok_retry.runbook == "apt-lock"
+    bad_rb_retry = recheck_step(
+        NextStep(kind="retry", runbook="does-not-exist", why="Retry once lock clears."),
         category="busy_or_locked", item=brew_item, output="", run_kind="upgrade",
     )
-    assert ok_retry.kind == "retry"
+    assert bad_rb_retry.kind == "retry" and bad_rb_retry.runbook is None
 
     # Valid runbook stays runbook
     ok_rb = recheck_step(

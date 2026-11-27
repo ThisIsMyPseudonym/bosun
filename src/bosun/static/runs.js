@@ -232,7 +232,12 @@ function triageStepAction(step, trace, triage, S) {
   if (step.kind === "recipe" && MC.recipeButtons) return MC.recipeButtons({ trace_id: trace.run.trace_id });
   if (step.kind === "retry") {
     const go = retryAction(trace, triage, S);
-    return go ? el("button", { class: "primary", text: "Try again", onclick: go }) : null;
+    const out = [];
+    if (go) out.push(el("button", { class: "primary", text: "Try again", onclick: go }));
+    if (step.runbook) {
+      out.push(el("button", { class: go ? "quiet" : "primary", text: "Open guide", onclick: () => openRunbook(step.runbook) }));
+    }
+    return out.length ? out : null;
   }
   if (step.kind === "rescan") {
     const r = trace.run;

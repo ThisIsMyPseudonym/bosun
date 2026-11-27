@@ -78,12 +78,44 @@ def test_every_recipe_followup_retry_why_and_failure_runbook_has_a_rule():
             assert r.after in covered_patterns, f"missing recipe after rule: {r.name}"
     for pattern, _ in recipes.RETRY_WHY:
         assert pattern in covered_patterns, f"missing RETRY_WHY rule: {pattern}"
-    # Every non-setup failure runbook in docs/runbooks/ must have a rule (conflict 5)
+    # Every non-setup failure runbook in docs/runbooks/ must actually produce a verdict with that runbook
     runbook_topics = {
         p.stem for p in mcp_server.RUNBOOKS.glob("*.md")
         if not p.stem.endswith("-setup") and p.stem not in rules.NON_FAILURE_RUNBOOKS
     }
     assert runbook_topics <= covered_runbooks, runbook_topics - covered_runbooks
+
+    runbook_samples: dict[str, FailureRecord] = {
+        "apt-lock": _fail(
+            "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 4242",
+            subject="apt:curl", source="apt", command=("apt-get", "install", "--only-upgrade", "curl"),
+        ),
+        "cask-needs-password": _fail(
+            "GIMP needs your password: run it yourself (brew upgrade --cask gimp)",
+            subject="brew-cask:gimp", source="brew-cask", command=("brew", "upgrade", "--cask", "gimp"),
+        ),
+        "claude-not-logged-in": _fail(
+            "Claude Code isn't logged in for this session",
+            kind="fix", subject="repo:npm:lodash@proj", source="repo", command=(),
+        ),
+        "homebrew-permissions": rec,
+        "osv-scanner-download": _fail(
+            "osv-scanner could not be installed: checksum mismatch",
+            kind="refresh", subject="everything", source="", command=(),
+        ),
+        "update-not-signed": _fail(
+            "update refused: abc1234 is not signed by a trusted key",
+            kind="refresh", subject="everything", source="", command=(),
+        ),
+        "winget-installer-failed": wg_hash,
+    }
+    assert set(runbook_samples) == runbook_topics
+    for topic, sample in runbook_samples.items():
+        verdict = rules.match(sample)
+        assert verdict is not None, f"runbook {topic!r} produced no verdict"
+        assert verdict.next_step.runbook == topic, (
+            f"runbook {topic!r} produced verdict with runbook={verdict.next_step.runbook!r}"
+        )
 
 
 def test_is_outage_only_matches_only_did_not_answer_lines():
