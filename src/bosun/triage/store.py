@@ -39,7 +39,26 @@ def _decode_row(db: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str, An
         ).fetchone()
         if origin is not None:
             data["same_as_run"] = dict(origin)
+    if data.get("source") == "model" and data.get("triage_trace"):
+        info = _model_provenance(db, str(data["triage_trace"]))
+        if info is not None:
+            data["model_info"] = info
     return data
+
+
+def _model_provenance(db: sqlite3.Connection, triage_trace: str) -> dict[str, str] | None:
+    call = db.execute(
+        "SELECT provider, account, model FROM llm_calls "
+        "WHERE trace_id = ? AND job = 'triage' AND outcome = 'ok' ORDER BY id DESC LIMIT 1",
+        (triage_trace,),
+    ).fetchone()
+    if call is None:
+        return None
+    run = db.execute("SELECT actor FROM runs WHERE trace_id = ?", (triage_trace,)).fetchone()
+    provider = str(call["provider"] or "claude")
+    account = str(call["account"] or "default")
+    tier = "strong" if (run is not None and run["actor"] == "user") else "light"
+    return {"provider": provider, "account": account, "model": str(call["model"] or ""), "tier": tier}
 
 
 def save_verdict(
@@ -67,7 +86,7 @@ def save_verdict(
             "ON CONFLICT(failure) DO UPDATE SET "
             "trace_id=excluded.trace_id, signature=excluded.signature, status=excluded.status, "
             "source=excluded.source, verdict=excluded.verdict, same_as=excluded.same_as, "
-            "triage_trace=excluded.triage_trace, finished=excluded.finished",
+            "triage_trace=excluded.triage_trace, feedback='', feedback_ts=NULL, finished=excluded.finished",
             (failure, trace_id, signature, status, source, payload, same_as, triage_trace, ts, finished),
         )
         row = db.execute("SELECT id FROM triage WHERE failure = ?", (failure,)).fetchone()

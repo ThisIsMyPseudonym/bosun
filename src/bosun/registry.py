@@ -168,6 +168,10 @@ class TraceIn(_In):
                           description="A trace id, or a unique prefix of one (the log shows the first 8 characters)")
 
 
+class TriageIn(TraceIn):
+    force: bool = Field(default=False, description="Skip rules and cache and run the model directly (Look deeper)")
+
+
 class TriageFeedbackIn(TraceIn):
     feedback: Literal["helpful", "wrong"] = Field(description="Whether Bosun's triage verdict was helpful or wrong")
 
@@ -349,6 +353,8 @@ SPECS: dict[str, ActionSpec] = _specs(
                "/api/runs/{trace_id}/diagnose"),
     ActionSpec("get_triage", "Error triage verdict for one run, if one has been recorded",
                Risk.READ, TraceIn, "GET", "/api/runs/{trace_id}/triage"),
+    ActionSpec("triage", "Ask an AI model to diagnose a failed run (skips rules and cache when force=true)",
+               Risk.LOCAL, TriageIn, "POST", "/api/runs/{trace_id}/triage"),
     ActionSpec("triage_feedback", "Mark a triage verdict as helpful or wrong (removes wrong verdicts from the cache)",
                Risk.LOCAL, TriageFeedbackIn, "POST", "/api/runs/{trace_id}/triage/feedback", user_only=True),
     ActionSpec("get_runbook", "Read one Bosun troubleshooting runbook by topic name",
@@ -484,7 +490,7 @@ TRIAGE = "triage"  # read-only error triage worker (triage/model.py)
 
 # What `bosun demo` refuses, besides everything that installs, upgrades, pins, fixes, quits, opens or restores
 # (Risk.INSTALL and above): the small actions that would look at, or run something on, the real computer.
-DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "discard_fix", "watch_app", "check_app",
+DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "triage", "discard_fix", "watch_app", "check_app",
                           "assistant_ask", "terminal_input", "terminal_stop",
                           "ai_logins", "add_ai_login", "set_ai_login",
                           "ai_routing", "set_ai_routing", "set_quota_override"})

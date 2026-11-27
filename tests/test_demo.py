@@ -48,6 +48,7 @@ def test_demo_refuses_an_install(client):
 
 def test_demo_refuses_actions_that_open_or_look_at_the_machine(client):
     for path, body in (("/api/open-updates", {}), ("/api/refresh", {}),
+                       ("/api/runs/abcdef01/triage", {"force": True}),
                        ("/api/ai/logins", {"provider": "claude", "id": "work", "label": "Work", "home": "/tmp"}),
                        ("/api/ai/logins/claude/default", {"excluded": True}),
                        ("/api/ai/routing", {"mode": "balance"}),

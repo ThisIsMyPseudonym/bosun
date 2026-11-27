@@ -284,3 +284,74 @@ def test_a_bug_in_triage_never_breaks_the_run_page(tmp_path, monkeypatch):
         assert tri.status_code == 200 and tri.json()["status"] is None
     finally:
         trace.configure(None)
+
+
+def test_triage_action_runs_model_on_click_refuses_demo_and_refuses_triage_actor(tmp_path, monkeypatch):
+    import threading
+    from fake_cli import FakeCli
+    from bosun.registry import ActionContext, Conflict, Forbidden, TRIAGE
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        with trace.run("upgrade", subject="brew:jq") as r:
+            r.fail("mystery exit 1")
+        fake = FakeCli(monkeypatch)
+        fake.reply(
+            "claude",
+            fake.claude_ok({
+                "category": "upstream_broken",
+                "cause": "Bottle missing.",
+                "confidence": "medium",
+                "evidence": [{"source": "trace", "ref": r.trace_id, "line": "mystery exit 1"}],
+                "next_step": {"kind": "retry", "recipe": None, "runbook": None, "why": "Try later."},
+                "needs_person": False,
+                "transient": True,
+            }),
+        )
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+        resp = user.post(f"/api/runs/{r.trace_id}/triage", json={"force": True}, headers=H)
+        assert resp.status_code == 200 and resp.json()["source"] == "model"
+        assert resp.json()["verdict"]["category"] == "upstream_broken"
+        assert resp.json()["triage_trace"]
+
+        # Actor triage cannot call triage (Risk.LOCAL)
+        import pytest
+        with pytest.raises(Forbidden):
+            app.state.actions.call("triage", {"trace_id": r.trace_id}, ActionContext(actor=TRIAGE, surface="triage"))
+
+        # Aged-out failure (no spans, no job/fix output) is rejected with 409 Conflict
+        with trace.run("upgrade", subject="brew:rg") as old_run:
+            old_run.fail("old error")
+        with st._tx(write=True) as db:
+            db.execute("DELETE FROM spans WHERE trace_id = ?", (old_run.trace_id,))
+        aged = user.post(f"/api/runs/{old_run.trace_id}/triage", json={"force": True}, headers=H)
+        assert aged.status_code == 409 and "aged out" in aged.json()["detail"].lower()
+
+        # Concurrent triage for the same run is rejected with Conflict
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_reply(_call):
+            started.set()
+            release.wait(5)
+            return fake.claude_ok({
+                "category": "upstream_broken", "cause": "Bottle missing.", "confidence": "medium",
+                "evidence": [{"source": "trace", "ref": r.trace_id, "line": "mystery exit 1"}],
+                "next_step": {"kind": "none", "recipe": None, "runbook": None, "why": "Done."},
+                "needs_person": False, "transient": False,
+            })
+
+        fake.reply("claude", slow_reply)
+        t = threading.Thread(target=lambda: app.state.triager.triage_click(r.trace_id, force=True))
+        t.start()
+        assert started.wait(5)
+        try:
+            with pytest.raises(Conflict):
+                app.state.triager.triage_click(r.trace_id, force=True)
+        finally:
+            release.set()
+            t.join(5)
+    finally:
+        trace.configure(None)

@@ -48,7 +48,7 @@ from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
                        NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TriageFeedbackIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+                       TraceIn, TriageFeedbackIn, TriageIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
@@ -423,7 +423,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     app.state.actions = actions  # the in-process surface (the assistant) calls these directly
     assistant = Assistant(store, s, actions, approvals, tokens=assistant_tokens)
     app.state.assistant, app.state.approvals, app.state.assistant_tokens = assistant, approvals, assistant_tokens
-    app.state.triage_tokens = triage_tokens
+    triager = tworker.Triager(store, s, triage_tokens)
+    app.state.triage_tokens, app.state.triager = triage_tokens, triager
     app.state.terminals, app.state.upgrader = terminals, upgrader
     if store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")
@@ -996,6 +997,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             raise NotFound("No run with that id (or the prefix matches more than one)")
         tid = found["run"]["trace_id"]
         return _triage_or_none(tid) or {"trace_id": tid, "status": None, "verdict": None}
+
+    @actions.bind("triage")
+    def run_triage(ctx: ActionContext, body: TriageIn):
+        return triager.triage_click(body.trace_id, force=body.force)
 
     def _triage_or_none(tid: str) -> dict | None:
         """A run's verdict, worked out on first read. Triage is advice: a bug in it never breaks the run page."""
