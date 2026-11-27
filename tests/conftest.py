@@ -92,10 +92,11 @@ def providers_ready(request, monkeypatch):
     from bosun.providers import accounts, contract, limits, run
     from bosun.providers.catalog import CATALOG
 
-    monkeypatch.setattr(contract, "check", lambda store, provider, binary, now=None, include_fixer=False:
+    monkeypatch.setattr(contract, "check", lambda store, provider, binary, now=None, include_fixer=False, extra_flags=():
                         contract.ContractStatus(provider, "test", True, (), ""))
     monkeypatch.setattr(contract, "due", lambda binary, now=None: False)
-    monkeypatch.setattr(contract, "cached", lambda store, provider, binary, now=None, stale_ok=False:
+    monkeypatch.setattr(contract, "cached", lambda store, provider, binary, now=None, stale_ok=False,
+                        include_fixer=False, extra_flags=():
                         contract.ContractStatus(provider, "test", True, (), ""))
     monkeypatch.setattr(accounts, "installed", lambda: {p: f"/test/bin/{s.binary}" for p, s in CATALOG.items()})
     monkeypatch.setattr(run, "COOLDOWNS", limits.Cooldowns())

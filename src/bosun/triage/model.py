@@ -74,12 +74,19 @@ def availability(
         if lg.excluded:
             reasons.append(f"{spec.label} ({lg.label}) is excluded")
             continue
+        ef = catalog.extra_flags_for(lg.provider, "triage")
         if cached_only:
-            status = contract.cached(store, lg.provider, lg.binary, now=now, stale_ok=True)
+            status = (
+                contract.cached(store, lg.provider, lg.binary, now=now, stale_ok=True, extra_flags=ef)
+                if ef else contract.cached(store, lg.provider, lg.binary, now=now, stale_ok=True)
+            )
             if status is None or contract.due(lg.binary, now=now):
                 missing.append((lg.provider, lg.binary))
         else:
-            status = contract.check(store, lg.provider, lg.binary, now=now)
+            status = (
+                contract.check(store, lg.provider, lg.binary, now=now, extra_flags=ef)
+                if ef else contract.check(store, lg.provider, lg.binary, now=now)
+            )
         if status is None or status.ok:
             any_ok = True
             if not cached_only:
@@ -87,7 +94,8 @@ def availability(
         else:
             reasons.append(status.finding or f"{spec.label}: contract check failed")
     if cached_only and missing:
-        contract.refresh_async(store, missing, now=now)
+        ef_map = {p: ef for p, _ in missing if (ef := catalog.extra_flags_for(p, "triage"))}
+        contract.refresh_async(store, missing, now=now, extra_flags=ef_map)
     if any_ok:
         return True, ""
     if not any_installed:
@@ -363,7 +371,7 @@ def run_model(
 
     with trace.run("triage", subject=rec.failure, actor="user" if clicked else "triage") as tr:
         when = now()
-        ctx = routing.context(store, cooldowns=cd, now=when, logins=logins)
+        ctx = routing.context(store, cooldowns=cd, now=when, logins=logins, job="triage")
         route, all_skips = _plan_candidates(ctx, clicked=clicked)
         if not store.read_only and route.skipped:
             ledger.notice_skips(store, route.skipped, now=when)

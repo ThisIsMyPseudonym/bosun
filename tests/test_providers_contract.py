@@ -83,6 +83,31 @@ def test_dropping_a_fixer_only_flag_does_not_block_one_shots(store, monkeypatch)
     assert contract.check(store, "claude", "/bin/claude").ok
 
 
+def test_dropping_restricted_blocks_triage_and_assistant_mcp_but_not_one_shots(store, monkeypatch):
+    from bosun.providers import accounts, routing
+    from bosun.triage import model as tmodel
+
+    no_restricted = _drop_option(CLAUDE_HELP, "--restricted")
+    monkeypatch.setattr(proc, "run", help_runner(help_text=no_restricted))
+    monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/bin/claude"})
+
+    # One-shot summaries stay unblocked
+    assert contract.check(store, "claude", "/bin/claude").ok
+
+    # Triage availability fails closed and names --restricted
+    avail, reason = tmodel.availability(store)
+    assert not avail and "--restricted" in reason
+
+    # Cached availability after refresh also reports unavailable
+    avail_cached, reason_cached = tmodel.availability(store, cached_only=True)
+    assert not avail_cached and "--restricted" in reason_cached
+
+    # Routing context for triage and assistant rejects Claude without --restricted
+    for job in ("triage", "assistant"):
+        ctx = routing.context(store, job=job)
+        assert not ctx.contracts["claude"].ok and "--restricted" in ctx.contracts["claude"].missing
+
+
 def test_dropping_a_claude_mcp_flag_fails_closed(store, monkeypatch):
     no_mcp = _drop_option(CLAUDE_HELP, "--mcp-config")
     monkeypatch.setattr(proc, "run", help_runner(help_text=no_mcp))

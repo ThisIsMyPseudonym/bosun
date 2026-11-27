@@ -218,7 +218,7 @@ class Assistant:
         turn.task = asyncio.current_task()
         in_turn = trace.bound(lambda fn, *a: fn(*a))  # tool threads report into this turn's run
         turn.offload = lambda fn, *a: loop.run_in_executor(self._pool, in_turn, fn, *a)
-        ctx = routing.context(self.store, cooldowns=provider_run.COOLDOWNS)
+        ctx = routing.context(self.store, cooldowns=provider_run.COOLDOWNS, job="assistant")
         route = router.plan("assistant", ctx, clicked=True)
         labels = {lg.bucket: lg.label for lg in ctx.logins}
         if not route.candidates:

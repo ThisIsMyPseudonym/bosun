@@ -16,7 +16,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -36,7 +36,7 @@ TIMEOUT = 20.0
 # (resolved path, st_mtime_ns, st_size) -> (when asked, version or None); per process, like the CLI on disk
 _versions: dict[tuple[str, int, int], tuple[float, str | None]] = {}
 _refresh_lock = threading.Lock()
-_refreshing: set[tuple[str, str]] = set()
+_refreshing: set[tuple[str, str, tuple[str, ...]]] = set()
 _refresh_threads: set[threading.Thread] = set()
 
 
@@ -102,11 +102,15 @@ def _binary_key(binary: str) -> tuple[str, int, int]:
         return (binary, 0, 0)
 
 
-def cache_key(s: ProviderSpec, version: str, *, include_fixer: bool = False) -> str:
+def cache_key(s: ProviderSpec, version: str, *, include_fixer: bool = False,
+              extra_flags: tuple[str, ...] = ()) -> str:
     """Where a version's verdict is kept: the CLI, its version, and a digest of everything Bosun requires of it, so a
     later Bosun that requires one more flag or feature never trusts a verdict made against the shorter list."""
-    wanted = json.dumps([s.help_args, s.lockdown_flags, s.mcp_flags, s.features_args, s.lockdown_features,
-                         s.fixer_flags, include_fixer])
+    parts: list[Any] = [s.help_args, s.lockdown_flags, s.mcp_flags, s.features_args, s.lockdown_features,
+                        s.fixer_flags, include_fixer]
+    if extra_flags:
+        parts.append(list(dict.fromkeys(extra_flags)))
+    wanted = json.dumps(parts)
     return f"{s.id}|{version}|{hashlib.sha256(wanted.encode()).hexdigest()[:12]}"
 
 
@@ -126,7 +130,8 @@ def _version(binary: str, at: float) -> str | None:
     return version
 
 
-def _judge(s: ProviderSpec, version: str, binary: str, *, include_fixer: bool = False) -> tuple[ContractStatus, bool]:
+def _judge(s: ProviderSpec, version: str, binary: str, *, include_fixer: bool = False,
+           extra_flags: tuple[str, ...] = ()) -> tuple[ContractStatus, bool]:
     """The verdict on one version's help, and whether the help could be read at all."""
     r = proc.run([binary, *s.help_args], timeout=TIMEOUT)
     text = f"{r.stdout}\n{r.stderr}"
@@ -134,7 +139,8 @@ def _judge(s: ProviderSpec, version: str, binary: str, *, include_fixer: bool = 
         # a cut-off help or crash error lists no flags: not the same as a release that dropped them
         finding = f"{s.label} {version}: its --help could not be read to check its safety flags"
         return ContractStatus(s.id, version, False, (), finding), False
-    required = (*s.lockdown_flags, *s.mcp_flags, *(s.fixer_flags if include_fixer else ()))
+    required = tuple(dict.fromkeys((*s.lockdown_flags, *s.mcp_flags, *(s.fixer_flags if include_fixer else ()),
+                                    *extra_flags)))
     missing = missing_flags(text, required)
     if missing and not r.ok:
         # a crash part-way through printing looks like a dropped flag: fail closed, and ask again in a minute
@@ -197,7 +203,8 @@ def due(binary: str, now: Callable[[], float] = time.time) -> bool:
 
 
 def cached(store: Store | None, provider: str, binary: str, now: Callable[[], float] = time.time,
-           stale_ok: bool = False) -> ContractStatus | None:
+           stale_ok: bool = False, *, include_fixer: bool = False,
+           extra_flags: tuple[str, ...] = ()) -> ContractStatus | None:
     """The cached verdict for `binary` without starting a subprocess; None on a cold cache, or on an expired one
     unless `stale_ok` (the dashboard shows the last verdict while `refresh_async` asks again)."""
     s, at = spec(provider), now()
@@ -209,40 +216,42 @@ def cached(store: Store | None, provider: str, binary: str, now: Callable[[], fl
         return None
     if version is None:
         return ContractStatus(provider, None, False, (), f"{s.label}: its --version could not be read")
-    found = _cached(store, cache_key(s, version), at)
+    found = _cached(store, cache_key(s, version, include_fixer=include_fixer, extra_flags=extra_flags), at)
     return _status_from_cache(provider, version, found) if found is not None else None
 
 
-def check(store: Store | None, provider: str, binary: str,
-          now: Callable[[], float] = time.time, *, include_fixer: bool = False) -> ContractStatus:
+def check(store: Store | None, provider: str, binary: str, now: Callable[[], float] = time.time, *,
+          include_fixer: bool = False, extra_flags: tuple[str, ...] = ()) -> ContractStatus:
     """Whether this CLI, as installed at `binary`, may be given a prompt. Never raises for a CLI's behaviour."""
     s, at = spec(provider), now()
     version = _version(binary, at)
     if version is None:
         return ContractStatus(provider, None, False, (), f"{s.label}: its --version could not be read")
-    key = cache_key(s, version, include_fixer=include_fixer)
+    key = cache_key(s, version, include_fixer=include_fixer, extra_flags=extra_flags)
     found = _cached(store, key, at)
     if found is not None:
         return _status_from_cache(provider, version, found)
-    status, readable = _judge(s, version, binary, include_fixer=include_fixer)
+    status, readable = _judge(s, version, binary, include_fixer=include_fixer, extra_flags=extra_flags)
     _remember(store, key, status, readable, at)
     return status
 
 
-def refresh_async(store: Store | None, targets: Iterable[tuple[str, str]],
-                  now: Callable[[], float] = time.time) -> threading.Thread | None:
+def refresh_async(store: Store | None, targets: Iterable[tuple[str, str]], now: Callable[[], float] = time.time, *,
+                  extra_flags: Mapping[str, tuple[str, ...]] | None = None) -> threading.Thread | None:
     """Check uncached (provider, binary) pairs in a background thread so page loads never wait on CLIs."""
+    ef_map = extra_flags or {}
+    keyed = [(p, b, tuple(ef_map.get(p, ()))) for p, b in dict.fromkeys(targets)]
     with _refresh_lock:
-        todo = [pair for pair in dict.fromkeys(targets) if pair not in _refreshing]
+        todo = [item for item in keyed if item not in _refreshing]
         if not todo:
             return None
         _refreshing.update(todo)
 
     def _work() -> None:
         try:
-            for provider, binary in todo:
+            for provider, binary, ef in todo:
                 try:
-                    check(store, provider, binary, now=now)
+                    check(store, provider, binary, now=now, extra_flags=ef)
                 except sqlite3.Error:
                     break  # store closed on shutdown or test teardown
         finally:
