@@ -1,0 +1,10 @@
+{
+  "result": "{\"headline\":\"h\",\"security_fixes\":[],\"notable_features\":[],\"breaking_changes\":[],\"upgrade_value\":\"low\",\"migration_effort\":\"none\",\"rationale\":\"r\"}",
+  "model": "grok-4.7-build-fast",
+  "session_id": "grok-sess-1",
+  "usage": {
+    "input_tokens": 90,
+    "output_tokens": 35,
+    "cached_tokens": 12
+  }
+}

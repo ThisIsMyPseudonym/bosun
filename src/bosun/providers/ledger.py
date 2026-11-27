@@ -260,9 +260,12 @@ DEFAULT_DASHBOARD_URL = "http://127.0.0.1:8787/"
 
 
 class _SkipLike(Protocol):
-    bucket: str
-    reason: str
-    hit: Hit | None
+    @property
+    def bucket(self) -> str: ...
+    @property
+    def reason(self) -> str: ...
+    @property
+    def hit(self) -> Hit | None: ...
 
 
 def window_label(window: str) -> str:
@@ -283,10 +286,7 @@ def _notice_text(bucket: str, hit: Hit) -> tuple[str, str]:
     who = CATALOG[provider].label if account == DEFAULT else f"{CATALOG[provider].label} ({account})"
     label, pct = window_label(hit.window), f"{round(hit.used * 100)}%"
     title = f"Bosun paused background AI work on {who}: {label} at {pct}"
-    if hit.resets_at is not None:
-        reset_part = f"resets {format_reset(hit.resets_at)}"
-    else:
-        reset_part = "reset time unknown"
+    reset_part = f"resets {format_reset(hit.resets_at)}" if hit.resets_at is not None else "reset time unknown"
     body = (f"{who} {label} is at {pct} ({reset_part}). Open the Usage page and click "
             "Let background work go past 75% until it resets.")
     return title, body

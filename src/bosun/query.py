@@ -32,7 +32,7 @@ TIME_LIMIT_S = 2.0
 MAX_BYTES = 5_000_000  # of result text and blobs; a few rows of span attributes can be large
 MAX_VALUE_BYTES = 10_000_000  # one string or blob SQLite may build (zeroblob(), printf('%.*c'), group_concat)
 
-VIEWS = ("v_current_items", "v_item_history", "v_open_vulns", "v_failures", "v_llm_spend", "v_actions")
+VIEWS = ("v_current_items", "v_item_history", "v_open_vulns", "v_failures", "v_llm_spend", "v_ai_spend", "v_actions")
 
 # Every table SQL may read, with every column it may read. A column added by a later migration is not readable
 # until it is listed here or in HIDDEN: tests/test_query.py fails until someone decides which.
@@ -51,7 +51,7 @@ READABLE: dict[str, frozenset[str]] = {name: frozenset(cols.split()) for name, c
     "log_events": "id ts level logger message trace_id span_id exc",
     "llm_calls": "id ts trace_id span_id purpose item_key project model models input_tokens output_tokens "
                  "cache_read_tokens cache_write_tokens cost_usd duration_ms api_ms turns prompt_chars outcome error "
-                 "session_id attrs",
+                 "session_id attrs provider account job window_draw estimated",
     "snapshots": "id ts errors meta",
     "jobs": "id item_key status started finished trace_id parent_trace actor",
     "fixes": "id item_key project status branch worktree pr_url started finished trace_id parent_trace actor",

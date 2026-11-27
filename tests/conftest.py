@@ -7,6 +7,7 @@ import tempfile
 # Tests never touch the real data folder: several build Settings from the environment, and opening the real
 # database with newer code would migrate it under a running dashboard.
 os.environ["BOSUN_DATA_DIR"] = tempfile.mkdtemp(prefix="bosun-tests-")
+os.environ.setdefault("BOSUN_COHO_WINDOWS", os.path.join(os.environ["BOSUN_DATA_DIR"], "no-coho-windows.json"))
 os.environ.setdefault("BOSUN_OSV_AUTO_UPDATE", "0")  # a test refresh never downloads into bin/
 os.environ.setdefault("BOSUN_SELF_UPDATE", "0")  # never git-pull the checkout under test
 os.environ.setdefault("BOSUN_NO_ICONS", "1")  # never read this machine's app bundles (tests/test_icons.py passes its own reader)
@@ -88,7 +89,7 @@ def providers_ready(request, monkeypatch):
     (tests/test_providers_contract.py)."""
     if request.node.get_closest_marker("real_contract"):
         return
-    from bosun.providers import accounts, contract
+    from bosun.providers import accounts, contract, limits, run
     from bosun.providers.catalog import CATALOG
 
     monkeypatch.setattr(contract, "check", lambda store, provider, binary, now=None:
@@ -97,3 +98,4 @@ def providers_ready(request, monkeypatch):
     monkeypatch.setattr(contract, "cached", lambda store, provider, binary, now=None, stale_ok=False:
                         contract.ContractStatus(provider, "test", True, (), ""))
     monkeypatch.setattr(accounts, "installed", lambda: {p: f"/test/bin/{s.binary}" for p, s in CATALOG.items()})
+    monkeypatch.setattr(run, "COOLDOWNS", limits.Cooldowns())

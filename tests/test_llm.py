@@ -45,7 +45,7 @@ def calls(store):
 def fake_run(out, rc=0, err=""):
     seen = []
 
-    def run(argv, timeout=300, cwd=None, stdin=None, env=None):
+    def run(argv, timeout=300, cwd=None, stdin=None, env=None, unset=()):
         seen.append({"argv": argv, "stdin": stdin})
         return proc.Result(tuple(argv), rc, out if isinstance(out, str) else json.dumps(out), err)
     run.seen = seen
@@ -191,7 +191,7 @@ def _models(run):
 def recording_run(reply_for):
     seen = []
 
-    def run(argv, timeout=300, cwd=None, stdin=None, env=None):
+    def run(argv, timeout=300, cwd=None, stdin=None, env=None, unset=()):
         seen.append({"argv": argv, "stdin": stdin, "env": env})
         return proc.Result(tuple(argv), 0, json.dumps(reply_for(argv[argv.index("--model") + 1])), "")
     run.seen = seen
@@ -273,3 +273,18 @@ def test_long_notes_are_condensed_without_dropping_a_release():
         assert f"config key old_{n} was removed" in out and f"CVE-2026-{n:04d}" in out
     assert "## v1.9\nTiny release." in out and out.count(TRIMMED) == 10
     assert Summarizer.prompt(None, Item(Source.BREW, "x", "x", "1", "2"), out).count("<release_notes (truncated)>") == 1
+
+
+def test_a_record_names_its_provider_login_job_and_draw(store):
+    llm.record("summarize", outcome="ok", provider="codex", account="work", job="summarize",
+               window_draw=0.012, estimated=False)
+    llm.record("explain", outcome="ok")
+    llm.record_report("summarize", envelope(), outcome="ok", provider="gemini", account="default",
+                      job="summarize", window_draw=None, estimated=True)
+    rows = calls(store)
+    assert (rows[0]["provider"], rows[0]["account"], rows[0]["job"], rows[0]["window_draw"], rows[0]["estimated"]) == (
+        "codex", "work", "summarize", pytest.approx(0.012), 0)
+    assert (rows[1]["provider"], rows[1]["account"], rows[1]["job"], rows[1]["window_draw"], rows[1]["estimated"]) == (
+        "claude", "default", "explain", None, 0)
+    assert (rows[2]["provider"], rows[2]["account"], rows[2]["job"], rows[2]["window_draw"], rows[2]["estimated"]) == (
+        "gemini", "default", "summarize", None, 1)

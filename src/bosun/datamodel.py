@@ -69,6 +69,22 @@ VIEWS: dict[str, tuple[str, dict[str, str], str]] = {
          "skipped": "Calls not made: a budget was spent, or there was nothing to summarize."},
         "SELECT day, purpose, SUM(calls) AS calls, ROUND(SUM(cost_usd), 2) AS usd FROM v_llm_spend "
         "GROUP BY day, purpose ORDER BY day DESC"),
+    "v_ai_spend": (
+        "AI calls per day, provider, login, job and model: calls, tokens, window draw and list-price cost.",
+        {"day": "Local date.",
+         "provider": "Which CLI ran: claude, codex, gemini, grok, antigravity, muse.",
+         "account": "Which login ran: default or an added login's id.",
+         "job": "summarize, explain, triage, fix, assistant, computer_use.",
+         "model": "What Bosun asked for (an alias or full id).",
+         "calls": "Calls that reached the CLI (or tried to).",
+         "cached": "Calls Bosun's own cache made unnecessary.",
+         "skipped": "Calls not made: there was nothing to summarize.",
+         "tokens": "Total tokens (input, output, cache reads and cache writes).",
+         "window_draw": "Sum of usage-window share rises attributed to these calls, where reported.",
+         "estimated": "Calls whose CLI reports no usage windows (use counted from calls and tokens).",
+         "cost_usd": "List-price cost where the CLI reports it, kept as detail."},
+        "SELECT day, provider, account, job, SUM(calls) AS calls, SUM(tokens) AS tokens FROM v_ai_spend "
+        "GROUP BY day, provider, account, job ORDER BY day DESC"),
     "v_actions": (
         "The audit trail: every action that changed something, who asked for it, through which surface, with "
         "what input and how it ended. Reads are not recorded. Input that fails validation never becomes an "
@@ -126,6 +142,11 @@ NOTES: dict[str, dict[str, str]] = {
     "audit": {"approved_by": "`user` when the assistant ran this after you approved it in the Ask Bosun panel; "
                              "empty otherwise.",
               "approval_id": "That approval (messages.approval_id)."},
+    "llm_calls": {"provider": "Which CLI: claude, codex, gemini, grok, antigravity, muse.",
+                  "account": "Which login: default or an added one's id.",
+                  "job": "summarize, explain, triage, fix, assistant, computer_use.",
+                  "window_draw": "The largest rise in a usage window this call caused, 0 to 1; NULL = unknown.",
+                  "estimated": "1 = the CLI reports no windows: use counted from calls and tokens."},
 }
 
 _COMMENT = re.compile(r"^\s*([A-Za-z_]\w*)\s[^\n]*?--\s*(.+?)\s*$")

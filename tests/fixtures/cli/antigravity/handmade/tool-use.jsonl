@@ -1,0 +1,2 @@
+{"event":"tool_use","name":"read_file","input":{"path":"/etc/passwd"}}
+{"event":"result","result":"{\"headline\":\"h\"}"}

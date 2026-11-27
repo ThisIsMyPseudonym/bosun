@@ -1,0 +1,3 @@
+{"type":"session.started","session_id":"muse-1","model":"meta-llama-4"}
+{"type":"assistant","message":{"role":"assistant","content":"{\"headline\":\"h\",\"security_fixes\":[],\"notable_features\":[],\"breaking_changes\":[],\"upgrade_value\":\"low\",\"migration_effort\":\"none\",\"rationale\":\"r\"}"}}
+{"type":"result","result":"{\"headline\":\"h\",\"security_fixes\":[],\"notable_features\":[],\"breaking_changes\":[],\"upgrade_value\":\"low\",\"migration_effort\":\"none\",\"rationale\":\"r\"}","usage":{"input_tokens":70,"output_tokens":28}}

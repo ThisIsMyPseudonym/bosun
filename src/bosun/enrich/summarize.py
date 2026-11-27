@@ -1,26 +1,24 @@
 """Turn release notes + vuln data into a short "is this upgrade worth it?" assessment.
 
-Uses the Claude Code CLI (`claude -p`) with your existing Claude Code login, so no API
-key is needed. Each call is sandboxed: no tools, no MCP servers, no user/project
-settings or hooks, no saved session, and an empty working directory. Release notes are
-untrusted, so the model must be unable to act on anything written in them.
-Falls back to keyword heuristics when the CLI is unavailable. Results are cached per
-(item, installed -> available) so each upgrade is summarized once.
+Routes each call through Bosun's provider layer (`providers/run.py`) so any capable, locked-down AI CLI
+installed on the machine can answer. Each call runs with no tools, no MCP servers, no user settings, and a
+fresh empty temporary directory removed afterwards. Release notes are untrusted, so the model must be unable
+to act on anything written in them. Falls back to keyword heuristics when no CLI is available or every login
+is out. Results are cached per (item, installed -> available) so each upgrade is summarized once.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-import shutil
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from .. import kinds, llm, machine, proc  # noqa: F401  (proc: tests patch proc.run through here)
 from ..models import Item, Summary
+from ..providers import accounts, catalog, run as ai_run
 from ..store import Store
 from ..versions import jump
 from .release_notes import MAX_CHARS, TRIMMED
@@ -48,12 +46,6 @@ class Assessment(BaseModel):
         "'low' = behaviour notes or config tweaks at most; 'high' = code or data migration required. "
         "Cautions that rarely matter are 'none' or 'low', not 'high'."))
     rationale: str = Field(description="One or two sentences justifying upgrade_value")
-
-
-def _schema() -> str:
-    schema = Assessment.model_json_schema()
-    schema["additionalProperties"] = False
-    return json.dumps(schema, separators=(",", ":"))
 
 
 def heuristic_summary(item: Item, notes: str) -> Summary:
@@ -93,42 +85,8 @@ def heuristic_summary(item: Item, notes: str) -> Summary:
         major = jump(item.installed, item.available or item.installed) == "major" and not kinds.browser(item)
         effort = "high" if major else ("low" if breaking else "none")
     return Summary(headline=headline, security_fixes=tuple(sec), breaking_changes=tuple(breaking),
-                   upgrade_value=value, rationale="Keyword heuristic (Claude Code CLI not available).",
+                   upgrade_value=value, rationale="Keyword heuristic (AI CLI not available).",
                    migration_effort=effort)
-
-
-def claude_argv(claude: str, model: str) -> list[str]:
-    return [
-        claude, "-p",
-        "--output-format", "json",
-        "--json-schema", _schema(),
-        "--tools", "",               # no tools at all: notes are untrusted input
-        "--strict-mcp-config",       # ...and no MCP servers
-        "--setting-sources", "",     # skip user/project settings, hooks, plugins
-        "--no-session-persistence",
-        "--model", model,
-        "--system-prompt", SYSTEM,
-    ]
-
-
-def parse_cli_result(stdout: str) -> Assessment | None:
-    """Pull the validated assessment out of `claude -p --output-format json` output."""
-    try:
-        envelope = json.loads(stdout)
-    except json.JSONDecodeError:
-        log.warning("claude CLI returned non-JSON: %s", stdout[:200])
-        return None
-    if envelope.get("is_error") or envelope.get("subtype") != "success":
-        log.warning("claude CLI reported an error: %s", str(envelope.get("result"))[:300])
-        return None
-    payload = envelope.get("structured_output")
-    try:
-        if payload is not None:
-            return Assessment.model_validate(payload)
-        return Assessment.model_validate_json(envelope.get("result") or "")
-    except ValidationError as exc:
-        log.warning("claude CLI output failed schema validation: %s", exc)
-        return None
 
 
 HIGH_RISK_CVSS = 7.0
@@ -141,42 +99,57 @@ class Summarizer:
         self.model = model  # for summaries that decide something
         self.routine_model = routine_model or model  # for the rest
         self.sandbox = sandbox
-        self.claude = claude if claude is not None else shutil.which("claude")
-        self.problem = ""  # set when the CLI can't be used at all (e.g. not logged in): stop calling it
+        # `claude=""` disables AI summaries; a non-empty path pins Claude-only (existing tests); None uses the router.
+        self.claude = claude
+        self.problem = ""  # set when every login is out (or budget spent): stop asking for this refresh
+
+    def _logins(self) -> tuple[accounts.Login, ...] | None:
+        if self.claude == "":
+            return ()
         if self.claude:
-            sandbox.mkdir(parents=True, exist_ok=True)
+            return (accounts.default("claude", self.claude),)
+        return None
 
     @property
     def enabled(self) -> bool:
-        return bool(self.claude) and not self.problem
+        if self.problem or self.claude == "":
+            return False
+        if self.claude:
+            return True
+        capable = frozenset(catalog.capable("summarize"))
+        return any(lg.provider in capable for lg in accounts.logins(self.store, usable=True))
 
     def model_for(self, item: Item) -> str:
         """The small model reads routine release notes as well as the large one (measured: same lane on 8 of 8).
         The large one is kept for what a wrong answer would cost: an upgrade that fixes a serious or exploited
         vulnerability, and a major version jump, where "drop-in or not" decides the lane."""
+        return self.model if self.decides(item) else self.routine_model
+
+    @staticmethod
+    def decides(item: Item) -> bool:
+        """Whether a wrong answer here would cost something: such summaries run on each CLI's strong model."""
         serious = any(v.kev or (v.cvss or 0) >= HIGH_RISK_CVSS for v in item.vulns_fixed)
-        major = jump(item.installed, item.available or item.installed) == "major" and not kinds.browser(item)
-        return self.model if serious or major else self.routine_model
+        return serious or (jump(item.installed, item.available or item.installed) == "major" and not kinds.browser(item))
 
     def summarize(self, item: Item, notes: str) -> Summary:
         cached = self.cached(item)
         if cached:
             return cached
-        # Nothing to read: Claude could only restate the versions. A major jump is the exception: whether that
+        # Nothing to read: the model could only restate the versions. A major jump is the exception: whether that
         # product's majors are routine (gcloud bumps one weekly) is something the model knows and the rules don't.
         if not notes.strip() and not item.vulns_fixed and self.model_for(item) == self.routine_model:
             if self.enabled:
                 llm.record("summarize", outcome="skipped", item_key=item.key, source=item.source.value,
                            error="no release notes and no known vulnerabilities")
             return heuristic_summary(item, notes)
-        summary = self._claude(item, notes) if self.enabled else None
+        summary = self._summarize_ai(item, notes) if self.enabled else None
         if summary is None:  # heuristics are cheap: recompute, don't cache
             return heuristic_summary(item, notes)
         self.store.cache_put("summary", f"{item.key}|{item.installed}->{item.available}", summary.__dict__)
         return summary
 
     def cached(self, item: Item) -> Summary | None:
-        """A previously generated Claude summary for this exact upgrade, if any."""
+        """A previously generated AI summary for this exact upgrade, if any."""
         hit = self.store.cache_get("summary", f"{item.key}|{item.installed}->{item.available}")
         if not hit or hit.get("generated_by") == "heuristic" or not hit.get("migration_effort"):
             return None  # heuristic, or summarized before migration_effort existed -> redo once
@@ -192,37 +165,49 @@ class Summarizer:
                 f"Known vulnerabilities fixed by this upgrade:\n{vulns}\n\n"
                 f"<release_notes{cut}>\n{notes or '(no release notes found)'}\n</release_notes>")
 
-    def _ask(self, item: Item, notes: str, model: str, **attrs) -> llm.Call:
-        # prompt goes via stdin: release notes can exceed Windows' 32K command-line limit
-        return llm.claude(claude_argv(self.claude, model), purpose="summarize", timeout=240, cwd=str(self.sandbox),
-                          stdin=self.prompt(item, notes), item_key=item.key, parse=parse_cli_result, one_shot=True,
-                          source=item.source.value, notes_chars=len(notes),
-                          notes_truncated=len(notes) >= MAX_CHARS or TRIMMED in notes, **attrs)
+    def _ask(self, item: Item, notes: str, model: str, tier: Literal["light", "strong"], *,
+             pin: accounts.Login | None = None, **attrs: Any) -> ai_run.Outcome:
+        return ai_run.run(
+            self.store, "summarize", prompt=self.prompt(item, notes), system=SYSTEM, schema=Assessment,
+            tier=tier, item_key=item.key, pin=pin, models={"claude": model}, logins=self._logins(),
+            source=item.source.value, notes_chars=len(notes),
+            notes_truncated=len(notes) >= MAX_CHARS or TRIMMED in notes, **attrs,
+        )
 
-    def _claude(self, item: Item, notes: str) -> Summary | None:
+    def _record_problem(self, out: ai_run.Outcome) -> None:
+        if not out.exhausted or self.problem:
+            return
+        if (out.attempts and all(a.outcome == "not_logged_in" for a in out.attempts)
+                and {a.candidate.provider for a in out.attempts} == {"claude"}):
+            self.problem = ("Claude Code isn't logged in for this session (run `claude` and /login; on macOS an SSH "
+                            "session can't read the login keychain), so summaries used built-in rules")
+        else:
+            self.problem = f"{out.reason}, so summaries used built-in rules"
+
+    def _summarize_ai(self, item: Item, notes: str) -> Summary | None:
         reason = llm.over_budget(self.store, "summarize")
         if reason:  # stop asking for the rest of this refresh; built-in rules cover the remaining items
             self.problem = f"{reason}, so the remaining summaries used built-in rules"
             llm.record("summarize", outcome="budget", item_key=item.key, error=reason, source=item.source.value)
             return None
         model = self.model_for(item)
-        call = self._ask(item, notes, model)
+        strong = self.decides(item)
+        out = self._ask(item, notes, model, "strong" if strong else "light")
         # The small model's answer stands unless it failed its schema or says "migration needed", which moves the
-        # item out of the drop-in lanes: the large model gets the final word on that.
-        doubt = ("schema_error" if call.outcome == "schema_error"
-                 else "says migration needed" if call.ok and call.parsed.migration_effort == "high" else "")
-        if model != self.model and doubt and not llm.over_budget(self.store, "summarize"):
-            model = self.model
-            call = self._ask(item, notes, model, escalated_because=doubt)
-        if call.outcome == "not_logged_in":
-            self.problem = ("Claude Code isn't logged in for this session (run `claude` and /login; on macOS an SSH "
-                            "session can't read the login keychain), so summaries used built-in rules")
-        if not call.ok:
-            log.warning("claude CLI failed for %s (%s): %s", item.key, call.outcome, call.error)
+        # item out of the drop-in lanes: the large model confirms on the same login.
+        last_outcome = out.attempts[-1].outcome if out.attempts else ""
+        doubt = ("schema_error" if not out.ok and last_outcome == "schema_error"
+                 else "says migration needed" if out.ok and out.payload.migration_effort == "high" else "")
+        if not strong and doubt and out.login is not None and not llm.over_budget(self.store, "summarize"):
+            confirmed = self._ask(item, notes, self.model, "strong", pin=out.login, escalated_because=doubt)
+            out = confirmed if confirmed.ok or not out.ok else out  # a failed confirmation keeps a valid answer
+        if not out.ok or out.login is None:
+            self._record_problem(out)
+            log.warning("AI summary failed for %s: %s", item.key, out.reason)
             return None
-        a = call.parsed
+        a: Assessment = out.payload
         return Summary(headline=a.headline, security_fixes=tuple(a.security_fixes),
                        notable_features=tuple(a.notable_features[:5]),
                        breaking_changes=tuple(a.breaking_changes), upgrade_value=a.upgrade_value,
-                       rationale=a.rationale, generated_by=f"claude-code:{model}",
+                       rationale=a.rationale, generated_by=ai_run.model_tag(out.login.provider, out.model),
                        migration_effort=a.migration_effort)

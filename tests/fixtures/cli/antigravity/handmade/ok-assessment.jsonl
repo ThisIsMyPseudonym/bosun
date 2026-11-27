@@ -1,0 +1,2 @@
+{"event":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"{\"headline\":\"h\",\"security_fixes\":[],\"notable_features\":[],\"breaking_changes\":[],\"upgrade_value\":\"low\",\"migration_effort\":\"none\",\"rationale\":\"r\"}"}]}}
+{"event":"result","model":"gemini-3.8-flash","session_id":"agy-1","usage":{"input_tokens":80,"output_tokens":30},"result":"{\"headline\":\"h\",\"security_fixes\":[],\"notable_features\":[],\"breaking_changes\":[],\"upgrade_value\":\"low\",\"migration_effort\":\"none\",\"rationale\":\"r\"}"}
