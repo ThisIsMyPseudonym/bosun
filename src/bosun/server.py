@@ -49,10 +49,10 @@ from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
                        NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TypeIn, ViewIn, UsageIn, BudgetIn, AiLoginIn, AiLoginSetIn)
+                       TraceIn, TypeIn, ViewIn, UsageIn, BudgetIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
-from .providers import accounts as ai_accounts
+from .providers import accounts as ai_accounts, routing as ai_routing
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -953,6 +953,18 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     @actions.bind("set_ai_login")
     def set_ai_login(ctx: ActionContext, body: AiLoginSetIn):
         return ai_accounts.set_excluded(store, body.provider, body.id, body.excluded)
+
+    @actions.bind("ai_routing")
+    def ai_routing_get(ctx: ActionContext, body: Empty):
+        return ai_routing.overview(store)
+
+    @actions.bind("set_ai_routing")
+    def set_ai_routing(ctx: ActionContext, body: AiRoutingIn):
+        return ai_routing.update(store, mode=body.mode, order=body.order, pins=body.pins, job_modes=body.job_modes)
+
+    @actions.bind("set_quota_override")
+    def set_quota_override(ctx: ActionContext, body: AiOverrideIn):
+        return ai_routing.set_override(store, body.bucket, body.on)
 
     @actions.bind("set_pref")
     def prefs(ctx: ActionContext, body: PrefIn):

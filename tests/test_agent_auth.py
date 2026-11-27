@@ -25,7 +25,9 @@ USER_ONLY = {"set_autopilot": {"on": True}, "set_llm_budget": {"daily_usd": 9999
              "set_pref": {"key": "winget:Git.Git", "ignored": True}, "set_notify": {"on": False},
              # which AI CLI and whose plan sees this machine's data (a folder that exists anywhere will do)
              "add_ai_login": {"provider": "claude", "id": "work", "label": "Work", "home": tempfile.gettempdir()},
-             "set_ai_login": {"provider": "claude", "id": "default", "excluded": True}}
+             "set_ai_login": {"provider": "claude", "id": "default", "excluded": True},
+             "set_ai_routing": {"mode": "balance"},
+             "set_quota_override": {"bucket": "claude", "on": True}}
 YOURS_ALONE = {"restore_app"}  # not a limit: it replaces an app with an older copy, which only a person decides
 PANEL = {n for n, sp in SPECS.items() if sp.panel}  # the Ask Bosun panel's own actions: tests/test_assistant.py
 

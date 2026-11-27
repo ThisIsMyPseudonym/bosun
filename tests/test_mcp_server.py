@@ -118,11 +118,12 @@ def test_the_dashboard_decides_what_an_agent_may_do(app, dash):
         assert result.is_error and not body["ok"] and "refused for agents" in body["error"], name
         assert body["note"] == NOTE and len(body["trace_id"]) == 32  # the attempt is a run the user can see
     for name, args in (("set_autopilot", {"on": True}), ("set_llm_budget", {"daily_usd": 500}),
-                       ("set_agent_policy", {"system": True, "external": True})):
+                       ("set_agent_policy", {"system": True, "external": True}),
+                       ("set_ai_routing", {"mode": "balance"}), ("set_quota_override", {"bucket": "claude", "on": True})):
         result, body = call(dash, name, args)
         assert result.is_error and "only be done by you" in body["error"], name
     assert app.store.setting("agents_allow_system") is None and app.store.setting("agents_allow_external") is None
-    assert [r["outcome"] for r in app.store.audit(limit=10)] == ["error"] * 6
+    assert [r["outcome"] for r in app.store.audit(limit=10)] == ["error"] * 8
 
 
 def test_bad_input_and_unknown_tools_are_answered_not_raised(dash):
