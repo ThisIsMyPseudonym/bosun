@@ -58,7 +58,11 @@ def test_codex_reads_its_schema_from_a_file_and_the_prompt_from_stdin(tmp_path):
     assert inv.argv[inv.argv.index("--sandbox") + 1] == "read-only"
     assert inv.argv[1] == "exec" and inv.argv[inv.argv.index("-m") + 1] == "gpt-x" and inv.files == (schema_file,)
     disabled = {inv.argv[i + 1] for i, a in enumerate(inv.argv) if a == "--disable"}
-    assert disabled == {"shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins"}
+    # Everything that reaches outside the reply: shell, apps, browsers, computer use, plugins, subagents, local
+    # image reads, image generation, hooks, skills, tool suggestions and memories (off today, pinned off anyway).
+    assert disabled == {"shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins",
+                        "in_app_browser", "browser_use_external", "multi_agent", "view_image", "image_generation",
+                        "hooks", "skill_search", "remote_plugin", "tool_suggest", "memories"}
     assert disabled == set(spec("codex").lockdown_features)
     assert 'web_search="disabled"' in inv.argv and "--strict-config" in inv.argv
 
