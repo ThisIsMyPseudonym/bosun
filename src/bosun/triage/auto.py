@@ -110,6 +110,17 @@ def _mark_rest_waiting(store: Store, reset_at: float, reason: str, when: float) 
     return count
 
 
+def _mark_rest_skipped(store: Store, reason: str, when: float) -> int:
+    count = 0
+    for rest in tqueue.rows_by_status(store, "queued"):
+        tqueue.save_skipped(
+            store, str(rest["failure"]), str(rest["trace_id"]), str(rest["signature"] or ""),
+            reason, now=when,
+        )
+        count += 1
+    return count
+
+
 def _run_one_auto(
     triager: Any,
     rec: FailureRecord,
@@ -224,7 +235,7 @@ def drain_queued(
             wait_n += extra + _mark_rest_waiting(store, reset_at or when + tqueue.UNDATED_RETRY_S, reason, when)
             break
         elif state == "no_cli":
-            skip_n += extra
+            skip_n += extra + _mark_rest_skipped(store, reason, when)
             break
         else:
             started += 1
