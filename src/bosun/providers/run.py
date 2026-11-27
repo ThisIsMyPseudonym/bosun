@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
-from .. import llm, proc
-from . import accounts, argv, catalog, contract, ledger, limits, quota, replies, router, routing, windows
+from .. import llm, machine, proc
+from . import accounts, argv, catalog, contract, jail, ledger, limits, proxy, quota, replies, router, routing, windows
 
 if TYPE_CHECKING:
     from ..store import Store
@@ -210,3 +210,73 @@ def run(store: Store, job: str, *, prompt: str, system: str, schema: type[BaseMo
     exhausted = pin is None and _exhausted(route, done)
     return Outcome(False, None, done.candidate.login if done.candidate else None, "", done.attempts,
                    _reason(done, route, store, cd, now(), labels), exhausted=exhausted)
+
+
+@dataclass(frozen=True)
+class FixResult:
+    result: proc.Result
+    report: Any
+    outcome: str
+    error: str
+    usage: llm.Usage
+    cost_usd: float = 0.0
+    denied: tuple[str, ...] = ()
+
+
+def _finish_fix(store: Store, login: accounts.Login, model: str, schema: type[BaseModel],
+                prompt: str, res: proc.Result, took_ms: float, before: Mapping[str, windows.Reading],
+                cd: limits.Cooldowns, at: float, *, item_key: str, project: str,
+                extra_denied: tuple[str, ...] = (), attrs: Mapping[str, Any]) -> FixResult:
+    rep = replies.parse(login.provider, res, at)
+    outcome, error, validated = rep.outcome, rep.error, None
+    if outcome == "ok":
+        validated, val_err = _validate(schema, rep.payload)
+        if validated is None:
+            outcome, error = "schema_error", val_err or "the reply didn't match the expected schema"
+    cand = router.Candidate(login.provider, login.bucket, login)
+    _record_side_effects(store, cand, rep, outcome, cd, at)
+    window_draw = quota.draw(before, rep.readings)
+    llm.record("fix", outcome=outcome, usage=rep.usage, model=model, item_key=item_key, project=project,
+               duration_ms=rep.duration_ms or took_ms, api_ms=rep.api_ms, turns=rep.turns,
+               prompt_chars=len(prompt) or None, session_id=rep.session_id, error=error,
+               provider=login.provider, account=login.id, job="fix",
+               window_draw=window_draw, estimated=rep.estimated, **attrs)
+    return FixResult(res, validated, outcome, error, rep.usage, cost_usd=rep.usage.cost_usd, denied=extra_denied)
+
+
+def run_jailed_fix(store: Store, login: accounts.Login, *, model: str, schema: type[BaseModel],
+                   prompt: str, cwd: Path, cache: Path, sandbox_settings: Mapping[str, Any],
+                   env: Mapping[str, str] | None = None, timeout: float = 1800.0, item_key: str = "",
+                   project: str = "", cooldowns: limits.Cooldowns | None = None,
+                   now: Callable[[], float] = time.time, **attrs: Any) -> FixResult:
+    """Run one non-Claude fix pass inside the OS jail with the host allow-list proxy, validate FixReport and record."""
+    cd = COOLDOWNS if cooldowns is None else cooldowns
+    if not store.read_only and not ledger.readings(store, login.bucket):
+        ledger.seed_from_coho(store, login.bucket, now=now())
+    before = {r.window: r for r in ledger.readings(store, login.bucket)}
+    schema_dict = schema.model_json_schema()
+    schema_dict["additionalProperties"] = False
+    own_home, other_homes = jail.login_folders(store, login)
+    allowed = proxy.allowed_hosts_for(login.provider, sandbox_settings)
+    child_tmp = cache / "tmp"
+    child_tmp.mkdir(parents=True, exist_ok=True)
+    acct_env, unset = accounts.login_env(login)
+    with proxy.AllowListProxy(allowed) as px, tempfile.TemporaryDirectory(prefix="bosun-fix-meta-") as meta_str:
+        meta = Path(meta_str)
+        inv = argv.build_fix(login.provider, binary=login.binary, model=model, schema=schema_dict,
+                             prompt=prompt, cwd=cwd, workdir=meta)
+        cli_argv = (inv.argv[0], *accounts.login_args(login, inv.argv[1:]))
+        spec = jail.spec_from_settings(sandbox_settings, proxy_port=px.port,
+                                       login_home=own_home, other_login_homes=other_homes)
+        profile_path = (meta / "jail.sb") if machine.IS_MAC else None
+        if profile_path is not None:
+            profile_path.write_text(jail.seatbelt_profile(spec), encoding="utf-8")
+        wrapped = jail.wrap_argv(spec, cli_argv, profile_path=profile_path)
+        child_env = {**inv.env, **(dict(env) if env else {}), **px.env(), "TMPDIR": str(child_tmp), **acct_env}
+        t0 = time.perf_counter()
+        res = proc.run(wrapped, timeout=timeout, cwd=str(cwd), stdin=inv.stdin, env=child_env,
+                       unset=(*unset, "SSH_AUTH_SOCK"))
+        took_ms = round((time.perf_counter() - t0) * 1000, 1)
+        blocked = tuple(f"network: {h}" for h in px.blocked)
+    return _finish_fix(store, login, model, schema, prompt, res, took_ms, before, cd, now(),
+                       item_key=item_key, project=project, extra_denied=blocked, attrs=attrs)

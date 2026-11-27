@@ -19,7 +19,7 @@ from typing import Any
 from .. import auth
 from ..assistant_prompt import PREFIX, SERVER, TOOL_TIMEOUT_MS
 from ..llm import ONE_SHOT_ENV
-from .catalog import CODEX_DISABLED_FEATURES
+from .catalog import CODEX_DISABLED_FEATURES, CODEX_FIXER_DISABLED_FEATURES
 
 
 @dataclass(frozen=True)
@@ -257,3 +257,45 @@ def build_mcp(provider: str, *, binary: str, model: str, system: str, prompt: st
         raise ValueError(f"no MCP argv builder for {provider!r}")
     return builder(McpCall(binary, model, system, prompt, Path(workdir), port, token, tuple(tool_names), timeout_ms,
                            reply_key))
+
+
+# --- Jailed fixer calls (phase 7) --------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FixCall:
+    binary: str
+    model: str
+    schema: Mapping[str, Any]
+    prompt: str
+    cwd: Path  # worktree (or subdir inside it) the agent edits
+    workdir: Path  # throwaway folder outside worktree & data_dir for schema.json
+
+
+CODEX_FIX_ARGS = ("--sandbox", "workspace-write", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+                  "--strict-config",
+                  *(arg for feature in CODEX_FIXER_DISABLED_FEATURES for arg in ("--disable", feature)),
+                  "-c", 'web_search="disabled"')
+
+
+def _codex_fix(c: FixCall) -> Invocation:
+    """Codex exec for a jailed worktree fix: workspace-write inside outer OS jail, schema file outside worktree,
+    prompt on stdin (never in argv)."""
+    schema = _write(c.workdir, "fix-schema.json", _compact(c.schema))
+    a = (c.binary, "exec", "--json", *CODEX_FIX_ARGS, "--output-schema", str(schema),
+         "-C", str(c.cwd), *_model("-m", c.model), "-")
+    return Invocation(a, c.prompt, files=(schema,))
+
+
+FIX_BUILDERS: Mapping[str, Callable[[FixCall], Invocation]] = {
+    "codex": _codex_fix,
+}
+
+
+def build_fix(provider: str, *, binary: str, model: str, schema: Mapping[str, Any], prompt: str,
+              cwd: Path, workdir: Path) -> Invocation:
+    """Build one jailed fixer invocation for a non-Claude `provider`."""
+    builder = FIX_BUILDERS.get(provider)
+    if builder is None:
+        raise ValueError(f"no fix argv builder for {provider!r}")
+    return builder(FixCall(binary, model, schema, prompt, Path(cwd), Path(workdir)))

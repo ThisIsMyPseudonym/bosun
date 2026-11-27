@@ -45,7 +45,8 @@ def test_a_cli_is_offered_only_the_jobs_its_capabilities_allow():
     from bosun.providers.catalog import capable
 
     assert capable("summarize") == ("claude", "codex", "gemini")
-    assert capable("fix") == ("claude",)
+    assert capable("fix", jail_ok=True) == ("claude", "codex")
+    assert capable("fix", jail_ok=False) == ("claude",)
     assert capable("assistant") == ("claude", "codex")
     assert capable("computer_use") == ("claude", "codex")
     with pytest.raises(KeyError):

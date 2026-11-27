@@ -72,6 +72,8 @@ class ProviderSpec:
     # The login is tied to the exact home_env string, so home_env set to the default folder is a second login beside
     # the unset default (Claude Code: this Mac's two accounts share ~/.claude that way).
     home_string_is_login: bool = False
+    # SANDBOXED_AGENT requires Bosun's whole-process OS jail (`jail.available()`), not a built-in CLI sandbox.
+    needs_jail: bool = False
 
 
 CLAUDE_FLAGS = ("-p", "--tools", "--disallowedTools", "--strict-mcp-config", "--setting-sources", "--no-session-persistence",
@@ -82,8 +84,10 @@ CLAUDE_MCP_FLAGS = ("--mcp-config", "--allowedTools", "--include-partial-message
 CODEX_DISABLED_FEATURES = ("shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins",
                            "in_app_browser", "browser_use_external", "multi_agent", "view_image", "image_generation",
                            "hooks", "skill_search", "remote_plugin", "tool_suggest", "memories")
+CODEX_FIXER_DISABLED_FEATURES = tuple(f for f in CODEX_DISABLED_FEATURES if f not in ("shell_tool", "unified_exec"))
 CODEX_FLAGS = ("--sandbox", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
                "--strict-config", "--disable", "-c", "--output-schema", "--json")
+CODEX_FIXER_FLAGS = ("-C",)
 GEMINI_FLAGS = ("-p", "--approval-mode", "--policy", "--output-format", "--allowed-mcp-server-names", "--extensions")
 GROK_FLAGS = ("--permission-mode", "--disable-web-search", "--tools", "--disallowed-tools", "--no-subagents",
               "--no-plan", "--no-memory", "--verbatim", "--prompt-file", "--output-format", "--json-schema",
@@ -103,8 +107,8 @@ def _catalog(*specs: ProviderSpec) -> Mapping[str, ProviderSpec]:
     return MappingProxyType({s.id: s for s in specs})
 
 
-# Codex has MCP (phase 6) and gets SANDBOXED_AGENT in phase 7 once verified. Claude's models are the
-# defaults here; at call time Settings.summary_model and Settings.model (BOSUN_MODEL*) win (phase 4).
+# Codex has MCP (phase 6) and gets SANDBOXED_AGENT (phase 7) only when the whole-process jail is available.
+# Claude's models are the defaults here; at call time Settings.summary_model and Settings.model (BOSUN_MODEL*) win.
 CATALOG: Mapping[str, ProviderSpec] = _catalog(
     ProviderSpec("claude", "Claude Code", "claude", frozenset({C.TEXT, C.JSON, C.SANDBOXED_AGENT, C.MCP, C.VISION}),
                  HELP, CLAUDE_FLAGS, "CLAUDE_CONFIG_DIR",
@@ -112,11 +116,11 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
                   "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"), "~/.claude",
                  "haiku", "sonnet", "output", ("api.anthropic.com",), fixer_flags=CLAUDE_FIXER_FLAGS,
                  mcp_flags=CLAUDE_MCP_FLAGS, home_string_is_login=True),
-    ProviderSpec("codex", "Codex", "codex", frozenset({C.TEXT, C.JSON, C.MCP, C.VISION}), EXEC_HELP, CODEX_FLAGS,
-                 "CODEX_HOME", ("CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"), "~/.codex",
-                 "gpt-5.6-luna", "gpt-5.6-terra", "output", ("chatgpt.com", "api.openai.com"),
+    ProviderSpec("codex", "Codex", "codex", frozenset({C.TEXT, C.JSON, C.SANDBOXED_AGENT, C.MCP, C.VISION}),
+                 EXEC_HELP, CODEX_FLAGS, "CODEX_HOME", ("CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"),
+                 "~/.codex", "gpt-5.6-luna", "gpt-5.6-terra", "output", ("chatgpt.com", "api.openai.com"),
                  features_args=("features", "list", "-c", 'web_search="disabled"'),
-                 lockdown_features=CODEX_DISABLED_FEATURES),
+                 lockdown_features=CODEX_DISABLED_FEATURES, fixer_flags=CODEX_FIXER_FLAGS, needs_jail=True),
     ProviderSpec("gemini", "Gemini CLI", "gemini", ONE_SHOT, HELP, GEMINI_FLAGS, "GEMINI_CLI_HOME",
                  ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI",
                   "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
@@ -146,11 +150,24 @@ def spec(provider: str) -> ProviderSpec:
     return CATALOG[provider]
 
 
-def capable(job: str, catalog: Mapping[str, ProviderSpec] = CATALOG) -> tuple[str, ...]:
+def effective_capabilities(s: ProviderSpec, *, jail_ok: bool | None = None) -> frozenset[Capability]:
+    """Capabilities available on this machine: a jail-dependent CLI holds `SANDBOXED_AGENT` only with a jail."""
+    if s.needs_jail and C.SANDBOXED_AGENT in s.capabilities:
+        if jail_ok is None:
+            from . import jail
+
+            jail_ok = jail.available()
+        if not jail_ok:
+            return s.capabilities - {C.SANDBOXED_AGENT}
+    return s.capabilities
+
+
+def capable(job: str, catalog: Mapping[str, ProviderSpec] = CATALOG, *, jail_ok: bool | None = None) -> tuple[str, ...]:
     """The CLIs that have every capability a job needs (and are locked down when the job carries untrusted text),
     in catalog order. An unknown job: KeyError."""
     j = JOBS[job]
-    return tuple(p for p, s in catalog.items() if j.needs <= s.capabilities and (s.locked_down or not j.untrusted))
+    return tuple(p for p, s in catalog.items()
+                 if j.needs <= effective_capabilities(s, jail_ok=jail_ok) and (s.locked_down or not j.untrusted))
 
 
 def models_for(provider: str, tier: Literal["light", "strong"], settings: Any = None,

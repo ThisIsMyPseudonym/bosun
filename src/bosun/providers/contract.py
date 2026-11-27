@@ -102,10 +102,11 @@ def _binary_key(binary: str) -> tuple[str, int, int]:
         return (binary, 0, 0)
 
 
-def cache_key(s: ProviderSpec, version: str) -> str:
+def cache_key(s: ProviderSpec, version: str, *, include_fixer: bool = False) -> str:
     """Where a version's verdict is kept: the CLI, its version, and a digest of everything Bosun requires of it, so a
     later Bosun that requires one more flag or feature never trusts a verdict made against the shorter list."""
-    wanted = json.dumps([s.help_args, s.lockdown_flags, s.mcp_flags, s.features_args, s.lockdown_features, s.fixer_flags])
+    wanted = json.dumps([s.help_args, s.lockdown_flags, s.mcp_flags, s.features_args, s.lockdown_features,
+                         s.fixer_flags, include_fixer])
     return f"{s.id}|{version}|{hashlib.sha256(wanted.encode()).hexdigest()[:12]}"
 
 
@@ -120,7 +121,7 @@ def _version(binary: str, at: float) -> str | None:
     return version
 
 
-def _judge(s: ProviderSpec, version: str, binary: str) -> tuple[ContractStatus, bool]:
+def _judge(s: ProviderSpec, version: str, binary: str, *, include_fixer: bool = False) -> tuple[ContractStatus, bool]:
     """The verdict on one version's help, and whether the help could be read at all."""
     r = proc.run([binary, *s.help_args], timeout=TIMEOUT)
     text = f"{r.stdout}\n{r.stderr}"
@@ -128,7 +129,8 @@ def _judge(s: ProviderSpec, version: str, binary: str) -> tuple[ContractStatus, 
         # a cut-off help or crash error lists no flags: not the same as a release that dropped them
         finding = f"{s.label} {version}: its --help could not be read to check its safety flags"
         return ContractStatus(s.id, version, False, (), finding), False
-    missing = missing_flags(text, (*s.lockdown_flags, *s.mcp_flags))
+    required = (*s.lockdown_flags, *s.mcp_flags, *(s.fixer_flags if include_fixer else ()))
+    missing = missing_flags(text, required)
     if missing and not r.ok:
         # a crash part-way through printing looks like a dropped flag: fail closed, and ask again in a minute
         finding = f"{s.label} {version}: its --help could not be read to check its safety flags"
@@ -207,17 +209,17 @@ def cached(store: Store | None, provider: str, binary: str, now: Callable[[], fl
 
 
 def check(store: Store | None, provider: str, binary: str,
-          now: Callable[[], float] = time.time) -> ContractStatus:
+          now: Callable[[], float] = time.time, *, include_fixer: bool = False) -> ContractStatus:
     """Whether this CLI, as installed at `binary`, may be given a prompt. Never raises for a CLI's behaviour."""
     s, at = spec(provider), now()
     version = _version(binary, at)
     if version is None:
         return ContractStatus(provider, None, False, (), f"{s.label}: its --version could not be read")
-    key = cache_key(s, version)
+    key = cache_key(s, version, include_fixer=include_fixer)
     found = _cached(store, key, at)
     if found is not None:
         return _status_from_cache(provider, version, found)
-    status, readable = _judge(s, version, binary)
+    status, readable = _judge(s, version, binary, include_fixer=include_fixer)
     _remember(store, key, status, readable, at)
     return status
 
