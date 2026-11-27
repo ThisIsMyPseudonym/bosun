@@ -109,6 +109,21 @@ def test_unbounded_or_overflowing_resets_fall_back_to_one_hour():
     assert limits.limit_reading("Usage limit reached. Resets in 32 days", NOW, tz=UTC) == _limit(NOW + HOUR)
 
 
+def test_latest_bounded_reset_candidate_wins():
+    assert limits.limit_reading(
+        "Release 2099-01-01T00:00:00Z. Usage limit reached. Resets in 2h", NOW, tz=UTC
+    ) == _limit(NOW + 2 * HOUR)
+    assert limits.limit_reading(
+        "5-hour limit resets in 1m. Weekly limit resets in 5d", NOW, tz=UTC
+    ) == _limit(NOW + 5 * 86400)
+    assert limits.limit_reading(
+        "Usage limit reached. Resets in 1h, resets 2027-01-15T12:00:00Z", NOW, tz=UTC
+    ) == _limit(NOW + 4 * HOUR)
+    assert limits.limit_reading(
+        "Usage limit reached. Resets in 6h, resets 10am (UTC)", NOW, tz=UTC
+    ) == _limit(NOW + 6 * HOUR)
+
+
 # --- 429 cool-downs ----------------------------------------------------------------------------------------------
 
 

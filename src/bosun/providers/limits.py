@@ -61,31 +61,34 @@ def _in_horizon(t: float, now: float) -> bool:
     return math.isfinite(t) and now < t <= now + MAX_RESET_S
 
 
-def _iso(text: str, now: float) -> float | None:
+def _iso(text: str, now: float) -> list[float]:
+    out: list[float] = []
     for m in _ISO.finditer(text):
         try:
             parsed = datetime.fromisoformat(m[1].replace("Z", "+00:00"))
         except ValueError:
             continue
         if parsed.tzinfo and _in_horizon(parsed.timestamp(), now):
-            return parsed.timestamp()
-    return None
+            out.append(parsed.timestamp())
+    return out
 
 
-def _epoch(text: str, now: float) -> float | None:
+def _epoch(text: str, now: float) -> list[float]:
+    out: list[float] = []
     for m in _EPOCH.finditer(text):
         t = float(m[1])
         if _in_horizon(t, now):
-            return t
-    return None
+            out.append(t)
+    return out
 
 
-def _relative(text: str, now: float) -> float | None:
+def _relative(text: str, now: float) -> list[float]:
+    out: list[float] = []
     for m in _RELATIVE.finditer(text):
         seconds = sum(float(n) * _SECONDS[unit[0].lower()] for n, unit in _PART.findall(m[1]))
         if math.isfinite(seconds) and 0 < seconds <= MAX_RESET_S:
-            return now + seconds
-    return None
+            out.append(now + seconds)
+    return out
 
 
 def _zone(name: str | None, fallback: tzinfo | None) -> tuple[bool, tzinfo | None]:
@@ -125,7 +128,7 @@ def _clock_match(m: re.Match[str], now: float, tz: tzinfo | None) -> float | Non
     except ValueError:  # Feb 30
         return None
     if at.timestamp() > now:
-        return at.timestamp()
+        return at.timestamp() if at.timestamp() <= now + 366 * 86400 else None
     if m["year"]:
         return None  # a named date already past says nothing about when
     wall = at.replace(tzinfo=None)  # step the wall clock, then read it in the zone again (DST moves the offset)
@@ -136,23 +139,18 @@ def _clock_match(m: re.Match[str], now: float, tz: tzinfo | None) -> float | Non
     return wall.replace(tzinfo=zone).timestamp()
 
 
-def _clock(text: str, now: float, tz: tzinfo | None) -> float | None:
-    """A clock time ("resets 3:50pm", "try again at Oct 24th, 2026 3:05 PM"), in the zone it names or `tz`.
+def _clock(text: str, now: float, tz: tzinfo | None) -> list[float]:
+    """Clock times ("resets 3:50pm", "try again at Oct 24th, 2026 3:05 PM"), in the zone named or `tz`.
     A time with no date already past means tomorrow; a date with no year already past means next year."""
-    for m in _CLOCK.finditer(text):
-        found = _clock_match(m, now, tz)
-        if found is not None:
-            return found
-    return None
+    found = (_clock_match(m, now, tz) for m in _CLOCK.finditer(text))
+    return [t for t in found if t is not None]
 
 
 def reset_time(text: str, now: float, tz: tzinfo | None = None) -> float | None:
-    """When a limit message says the limit resets (epoch seconds), or None when it names no time Bosun can read."""
+    """When a limit message says the limit resets (epoch seconds), taking the latest plausible candidate."""
     flat = " ".join(text.split())
-    for found in (_iso(flat, now), _epoch(flat, now), _relative(flat, now), _clock(flat, now, tz)):
-        if found is not None:
-            return found
-    return None
+    candidates = (*_iso(flat, now), *_epoch(flat, now), *_relative(flat, now), *_clock(flat, now, tz))
+    return max(candidates) if candidates else None
 
 
 def limit_reading(text: str, now: float, tz: tzinfo | None = None) -> Reading | None:
