@@ -149,6 +149,20 @@ def test_a_new_version_reads_help_once_and_passes(store, monkeypatch):
     assert sum(1 for c in run.calls if c[-1] == "--version") == 1  # and the version for ten minutes
 
 
+def test_a_verdict_is_tied_to_the_flags_bosun_requires(store, monkeypatch):
+    # A later Bosun that requires one more flag must not trust a verdict made against the shorter list.
+    from dataclasses import replace
+
+    run = help_runner(); monkeypatch.setattr(proc, "run", run)
+    assert contract.check(store, "claude", "/bin/claude").ok
+    stricter = replace(spec("claude"), lockdown_flags=(*spec("claude").lockdown_flags, "--new-guard"))
+    monkeypatch.setattr(contract, "spec", lambda provider: stricter)
+    got = contract.check(store, "claude", "/bin/claude")
+    assert not got.ok and got.missing == ("--new-guard",)
+    assert sum(1 for c in run.calls if c[-1] == "--help") == 2
+    assert contract.cache_key(stricter, "2.1.332") != contract.cache_key(spec("claude"), "2.1.332")
+
+
 def test_an_in_place_binary_upgrade_rechecks_version_immediately(store, tmp_path, monkeypatch):
     import os
 
@@ -232,7 +246,9 @@ def test_non_zero_help_that_parses_as_help_is_still_judged(store, monkeypatch):
                                                  help_text=_drop_option(CLAUDE_HELP, "--strict-mcp-config"), rc=2))
     monkeypatch.setattr(contract, "_versions", {})
     got = contract.check(store, "claude", "/bin/claude")
-    assert not got.ok and got.missing == ("--strict-mcp-config",)
+    # a crash part-way through printing looks like a dropped flag: fail closed, but retry rather than condemn
+    assert not got.ok and got.missing == ()
+    assert got.finding == "Claude Code 2.1.333: its --help could not be read to check its safety flags"
 
 
 def test_a_version_that_cannot_be_read_fails_closed_and_is_asked_again_later(store, monkeypatch):
@@ -259,11 +275,14 @@ def test_a_read_only_store_or_none_still_gets_an_answer(tmp_path, monkeypatch):
     '{"ok": false, "readable": false, "at": "yesterday"}',
     '{"ok": true, "readable": true, "at": "not-a-number"}',
     '{"ok": true, "at": 1000.0, "missing": "not-a-list"}',
+    '{"ok": "false", "readable": true, "at": 1000.0, "missing": []}',
+    '{"ok": 1, "readable": true, "at": 1000.0, "missing": []}',
+    '{"ok": true, "readable": "no", "at": 1000.0, "missing": []}',
 ])
 def test_a_corrupt_cache_row_is_treated_as_absent(store, monkeypatch, raw_value):
     with store._tx(write=True) as db:
         db.execute("INSERT OR REPLACE INTO cache VALUES (?,?,?,?)",
-                   (contract.CACHE_KIND, "claude|2.1.332", raw_value, 1000.0))
+                   (contract.CACHE_KIND, contract.cache_key(spec("claude"), "2.1.332"), raw_value, 1000.0))
     run = help_runner()
     monkeypatch.setattr(proc, "run", run)
     got = contract.check(store, "claude", "/bin/claude", now=lambda: 1010.0)

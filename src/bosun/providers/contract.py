@@ -8,6 +8,7 @@ prompt and the dashboard names the flag. No model call is ever spent finding out
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -101,6 +102,13 @@ def _binary_key(binary: str) -> tuple[str, int, int]:
         return (binary, 0, 0)
 
 
+def cache_key(s: ProviderSpec, version: str) -> str:
+    """Where a version's verdict is kept: the CLI, its version, and a digest of everything Bosun requires of it, so a
+    later Bosun that requires one more flag or feature never trusts a verdict made against the shorter list."""
+    wanted = json.dumps([s.help_args, s.lockdown_flags, s.features_args, s.lockdown_features, s.fixer_flags])
+    return f"{s.id}|{version}|{hashlib.sha256(wanted.encode()).hexdigest()[:12]}"
+
+
 def _version(binary: str, at: float) -> str | None:
     key = _binary_key(binary)
     known = _versions.get(key)
@@ -121,6 +129,10 @@ def _judge(s: ProviderSpec, version: str, binary: str) -> tuple[ContractStatus, 
         finding = f"{s.label} {version}: its --help could not be read to check its safety flags"
         return ContractStatus(s.id, version, False, (), finding), False
     missing = missing_flags(text, s.lockdown_flags)
+    if missing and not r.ok:
+        # a crash part-way through printing looks like a dropped flag: fail closed, and ask again in a minute
+        finding = f"{s.label} {version}: its --help could not be read to check its safety flags"
+        return ContractStatus(s.id, version, False, (), finding), False
     if missing:
         finding = f"{s.label} {version} dropped " + ", ".join(f"`{f}`" for f in missing)
         return ContractStatus(s.id, version, False, missing, finding), True
@@ -152,6 +164,8 @@ def _cached(store: Store | None, key: str, at: float) -> dict[str, Any] | None:
     raw_missing = found.get("missing")
     if raw_missing is not None and not isinstance(raw_missing, list):
         return None
+    if not isinstance(found.get("ok"), bool) or not isinstance(found.get("readable", True), bool):
+        return None  # "false" is truthy: only a real boolean is a verdict
     if not found.get("readable", True) and at - float(raw_at) >= UNREADABLE_TTL:
         return None  # an unreadable help may be a busy machine, not a verdict on the version
     return found
@@ -166,7 +180,7 @@ def _remember(store: Store | None, key: str, status: ContractStatus, readable: b
 
 def _status_from_cache(provider: str, version: str, found: dict[str, Any]) -> ContractStatus:
     missing = tuple(str(f) for f in found.get("missing") or ())
-    return ContractStatus(provider, version, bool(found.get("ok")), missing, str(found.get("finding") or ""))
+    return ContractStatus(provider, version, found.get("ok") is True, missing, str(found.get("finding") or ""))
 
 
 def cached(store: Store | None, provider: str, binary: str,
@@ -181,7 +195,7 @@ def cached(store: Store | None, provider: str, binary: str,
         return None
     if version is None:
         return ContractStatus(provider, None, False, (), f"{s.label}: its --version could not be read")
-    found = _cached(store, f"{provider}|{version}", at)
+    found = _cached(store, cache_key(s, version), at)
     return _status_from_cache(provider, version, found) if found is not None else None
 
 
@@ -192,7 +206,7 @@ def check(store: Store | None, provider: str, binary: str,
     version = _version(binary, at)
     if version is None:
         return ContractStatus(provider, None, False, (), f"{s.label}: its --version could not be read")
-    key = f"{provider}|{version}"
+    key = cache_key(s, version)
     found = _cached(store, key, at)
     if found is not None:
         return _status_from_cache(provider, version, found)
