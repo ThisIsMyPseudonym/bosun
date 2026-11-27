@@ -26,7 +26,7 @@ _HINT_META: dict[str, tuple[Category, StepKind, bool, bool, str | None, str | No
     "install technology": ("already_current", "none", True, False, None, None),
     "version number cannot": ("already_current", "none", True, False, None, None),
     "4294967291": ("admin_prompt", "retry", True, False, None, None),
-    "1641": ("already_current", "none", True, False, None, None),
+    "1641": ("already_current", "none", False, False, None, None),
     "No applicable upgrade": ("already_current", "none", True, False, None, None),
     "being used by another": ("in_use", "retry", False, True, None, None),
     "-1743": ("permissions", "retry", True, False, None, None),
@@ -85,6 +85,7 @@ class Rule:
     sources: tuple[str, ...] = ()
     commands: tuple[str, ...] = ()
     item_keys: tuple[str, ...] = ()
+    priority: int = 1
 
     @property
     def specificity(self) -> int:
@@ -119,6 +120,7 @@ def _build_hint_rules() -> list[Rule]:
             transient=transient,
             recipe=recipe,
             runbook=runbook,
+            priority=0,
         ))
     return out
 
@@ -137,6 +139,7 @@ def _build_in_use_rules() -> list[Rule]:
             transient=True,
             sources=("winget",),
             item_keys=(item_key,),
+            priority=2,
         )
         for item_key, hint in actions._IN_USE.items()
     ]
@@ -294,11 +297,11 @@ _RUNBOOK_RULES: tuple[Rule, ...] = (
 
 
 RULES: tuple[Rule, ...] = (
+    *_build_hint_rules(),
     *_build_recipe_rules(),
     *_RUNBOOK_RULES,
-    *_build_in_use_rules(),
-    *_build_hint_rules(),
     *_build_needs_person_rules(),
+    *_build_in_use_rules(),
 )
 
 
@@ -335,14 +338,14 @@ def match(rec: FailureRecord) -> Verdict | None:
     if not text or text == actions.GENERIC_HINT:
         return None
     cmd_tokens = set(verb(rec.command).split()) if rec.command else set()
-    hits: list[tuple[int, int, Rule]] = []
+    hits: list[tuple[int, int, int, Rule]] = []
     for idx, rule in enumerate(RULES):
         if _applies(rule, rec, cmd_tokens) and re.search(rule.pattern, text, re.I):
-            hits.append((-rule.specificity, idx, rule))
+            hits.append((rule.priority, -rule.specificity, idx, rule))
     if not hits:
         return None
-    hits.sort(key=lambda t: (t[0], t[1]))
-    chosen = hits[0][2]
+    hits.sort(key=lambda t: (t[0], t[1], t[2]))
+    chosen = hits[0][3]
     line = _matching_line(chosen.pattern, text)
     evidence = [Evidence(source="output", ref=rec.span_id[:120], line=line)] if line else []
     needs_person = chosen.needs_person or bool(actions.needs_person(text))

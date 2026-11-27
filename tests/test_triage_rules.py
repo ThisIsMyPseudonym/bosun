@@ -110,3 +110,49 @@ def test_evidence_ref_uses_failing_span_id_or_empty_when_missing():
     v2 = rules.match(without_span)
     assert v2 is not None and v2.evidence and v2.evidence[0].ref == ""
 
+
+def test_rules_match_failure_hint_precedence_ties_and_needs_person_parity():
+    samples: list[tuple[str, str, str]] = [
+        ("winget:Git.Git", "winget", "Installer failed with exit code: 1618"),
+        ("winget:Git.Git", "winget", "Installer failed: 0x80073d28 administrator privileges are required"),
+        ("winget:Microsoft.Edge", "winget", "The install technology is different from the current version"),
+        ("winget:Google.CloudSDK", "winget", "This package's version number cannot be determined."),
+        ("winget:Git.Git", "winget", "Installer failed with exit code: 0x80070005 (Access is denied)"),
+        ("winget:Git.Git", "winget", "Installer failed with exit code: 1641"),
+        ("winget:Git.Git", "winget", "No applicable upgrade found."),
+        ("winget:Foo.Bar", "winget", "The file is being used by another process."),
+        ("mac-app:com.microsoft.Excel", "mac-app",
+         "execution error: Not authorized to send Apple events to Microsoft AutoUpdate. (-1743)"),
+        ("apt:curl", "apt", "E: dpkg was interrupted, you must manually run 'dpkg --configure -a'"),
+        ("brew-cask:gimp", "brew-cask", "sudo: a terminal is required to read the password"),
+        ("brew-cask:zoom", "brew-cask", "sudo: no password was provided"),
+        ("apt:sssd", "apt", "Request dismissed by user"),
+        ("apt:sssd", "apt", "No authentication agent found"),
+        ("apt:sssd", "apt", "E: Could not get lock /var/lib/dpkg/lock-frontend"),
+        ("winget:GitHub.cli", "winget", "Starting package install...\ntimed out after 1800s"),
+    ]
+    assert len(samples) == len(actions._HINTS)
+    for idx, (key, src, out) in enumerate(samples):
+        expected = actions.failure_hint(key, out)
+        assert expected == actions._HINTS[idx][1], f"sample {idx} did not trigger _HINTS[{idx}]"
+        v = rules.match(_fail(out, subject=key, source=src, command=()))
+        assert v is not None, f"sample {idx} returned no verdict"
+        assert v.cause == expected, f"hint {idx}: {v.cause!r} != {expected!r}"
+
+    # Hint 5 (1641 / 3010 restart needed) agrees with actions._NEEDS_PERSON (False)
+    for code in ("1641", "3010"):
+        out = f"Installer failed with exit code: {code}"
+        v_restart = rules.match(_fail(out, subject="winget:Git.Git", source="winget", command=()))
+        assert v_restart is not None
+        assert v_restart.needs_person is bool(actions.needs_person(out)) is False
+
+    # Ties follow _HINTS order (hint 0 beats hint 4)
+    tie_out = "Installer failed with exit code: 1618\nAccess is denied 0x80070005"
+    v_tie = rules.match(_fail(tie_out, subject="winget:Git.Git", source="winget", command=()))
+    assert v_tie is not None and v_tie.cause == actions.failure_hint("winget:Git.Git", tie_out)
+
+    # _IN_USE still matches as fallback when no _HINTS pattern matches
+    in_use_out = "Installer failed with exit code: 1"
+    v_in_use = rules.match(_fail(in_use_out, subject="winget:Git.Git", source="winget", command=()))
+    assert v_in_use is not None and v_in_use.cause == actions.failure_hint("winget:Git.Git", in_use_out)
+
