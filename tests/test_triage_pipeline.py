@@ -147,3 +147,19 @@ def test_evaluate_fast_never_restores_disputed_rule_verdict(tmp_path):
         "Permission denied @ rb_sysopen - /opt/homebrew/Cellar/rg",
     )
     assert worker.evaluate_fast(st, rec2, now=230.0) is None
+
+
+def test_evaluate_fast_ignores_corrupt_cached_verdict_without_raising(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    rec = FailureRecord(
+        "job:40", "job", "40", "upgrade", "brew:jq", "brew", "failed", 100.0, "user", "t40",
+        "novel unknown error", ("brew", "upgrade", "--formula", "jq"), 1, "novel unknown error",
+    )
+    sig = worker.signature_of(rec)
+    with st._tx(write=True) as db:
+        db.execute(
+            "INSERT INTO triage (failure, trace_id, signature, status, source, verdict, created, finished) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("job:39", "t39", sig, "done", "model", '{"category":"not_a_real_category"}', 150.0, 151.0),
+        )
+    assert worker.evaluate_fast(st, rec, now=200.0) is None

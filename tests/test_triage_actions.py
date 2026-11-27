@@ -234,3 +234,32 @@ def test_wrong_feedback_retires_rules_and_cached_verdicts_as_disputed_via_http(t
         assert miss["status"] is None and miss["verdict"] is None
     finally:
         trace.configure(None)
+
+
+def test_corrupt_triage_row_is_re_evaluated_on_http_read(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        err = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq"
+        j1 = st.create_job("brew:jq", ["brew", "upgrade", "--formula", "jq"])
+        job1 = st.job(j1)
+        assert job1 is not None
+        with trace.run("upgrade", subject="brew:jq", trace_id=job1["trace_id"]) as r1:
+            r1.fail(err)
+        st.finish_job(j1, "failed", err)
+        with st._tx(write=True) as db:
+            db.execute(
+                "INSERT INTO triage (failure, trace_id, signature, status, source, verdict, created, finished) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"job:{j1}", r1.trace_id, "bad-sig", "done", "model", '{"category":"bogus"}', 100.0, 101.0),
+            )
+
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+        resp = user.get(f"/api/runs/{r1.trace_id}/triage")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "done" and body["source"] == "rules"
+        assert body["verdict"]["category"] == "permissions"
+    finally:
+        trace.configure(None)

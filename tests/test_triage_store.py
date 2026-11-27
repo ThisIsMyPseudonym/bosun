@@ -171,3 +171,28 @@ def test_load_failure_normalizes_partial_fix_and_falls_back_from_null_failed_out
         assert rec_job2.span_id == failed_span_id
     finally:
         trace.configure(None)
+
+
+def test_corrupt_or_invalid_verdict_rows_are_treated_as_missing_on_read(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    with st._tx(write=True) as db:
+        db.execute(
+            "INSERT INTO triage (failure, trace_id, signature, status, source, verdict, created, finished) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("job:bad1", "tbad1", "sig-bad", "done", "model", '{"category":"bogus","extra":1}', 1_000_050.0, 1_000_051.0),
+        )
+        db.execute(
+            "INSERT INTO triage (failure, trace_id, signature, status, source, verdict, created, finished) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("job:bad2", "tbad2", "sig-bad2", "done", "model", "not-json", 1_000_050.0, 1_000_051.0),
+        )
+
+    assert tstore.get(st, "job:bad1") is None
+    assert tstore.get_by_trace(st, "tbad1") is None
+    assert tstore.get(st, "job:bad2") is None
+    assert tstore.find_cached(st, "sig-bad", now=1_000_100.0) is None
+
+    # An older valid cached verdict for the same signature is still found past a corrupt newer one
+    valid_id = tstore.save_verdict(st, "job:good", "tgood", "sig-bad", "model", _verdict(), now=1_000_010.0)
+    found = tstore.find_cached(st, "sig-bad", now=1_000_100.0)
+    assert found is not None and found["id"] == valid_id

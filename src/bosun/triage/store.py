@@ -7,6 +7,8 @@ import sqlite3
 import time
 from typing import Any
 
+from pydantic import ValidationError
+
 from bosun import redact
 from bosun.store import Store
 from bosun.triage.schema import FailureRecord, Verdict
@@ -22,10 +24,12 @@ def _decode_row(db: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str, An
     raw = data.get("verdict") or ""
     if isinstance(raw, str) and raw:
         try:
-            data["verdict"] = json.loads(raw)
-        except ValueError:
-            data["verdict"] = None
+            data["verdict"] = Verdict.model_validate(json.loads(raw)).model_dump(mode="json")
+        except (ValueError, ValidationError):
+            return None
     else:
+        if data.get("status") in ("done", "disputed"):
+            return None
         data["verdict"] = None
     if data.get("same_as"):
         origin = db.execute(
@@ -105,27 +109,35 @@ def get(store: Store, failure: str) -> dict[str, Any] | None:
 
 def get_by_trace(store: Store, trace_id: str) -> dict[str, Any] | None:
     with store._tx() as db:
-        row = db.execute(
-            "SELECT * FROM triage WHERE trace_id = ? ORDER BY id DESC LIMIT 1",
+        rows = db.execute(
+            "SELECT * FROM triage WHERE trace_id = ? ORDER BY id DESC",
             (trace_id,),
-        ).fetchone()
-        return _decode_row(db, row)
+        ).fetchall()
+        for row in rows:
+            decoded = _decode_row(db, row)
+            if decoded is not None:
+                return decoded
+        return None
 
 
 def find_cached(store: Store, sig: str, *, now: float | None = None) -> dict[str, Any] | None:
-    """Return the newest non-disputed model verdict for this signature within CACHE_DAYS."""
+    """Return the newest valid non-disputed model verdict for this signature within CACHE_DAYS."""
     if not sig:
         return None
     ts = time.time() if now is None else now
     cutoff = ts - CACHE_DAYS * 86400
     with store._tx() as db:
-        row = db.execute(
+        rows = db.execute(
             "SELECT * FROM triage WHERE signature = ? AND status = 'done' AND source = 'model' "
             "AND created >= ? AND feedback NOT IN ('wrong', 'disputed') "
-            "ORDER BY created DESC, id DESC LIMIT 1",
+            "ORDER BY created DESC, id DESC",
             (sig, cutoff),
-        ).fetchone()
-        return _decode_row(db, row)
+        ).fetchall()
+        for row in rows:
+            decoded = _decode_row(db, row)
+            if decoded is not None and decoded.get("verdict"):
+                return decoded
+        return None
 
 
 def is_rule_disputed(store: Store, sig: str) -> bool:

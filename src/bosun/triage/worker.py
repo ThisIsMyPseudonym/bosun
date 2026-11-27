@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from pydantic import ValidationError
+
 from bosun import redact, serialize
 from bosun.models import Item
 from bosun.store import Store
@@ -139,7 +141,11 @@ def evaluate_fast(
     # Step 4: 30-day cache of non-disputed model verdicts for the same signature
     cached = tstore.find_cached(store, sig, now=now)
     if cached is not None and cached.get("verdict"):
-        reused = _recheck(Verdict.model_validate(cached["verdict"]), item, rec)
+        try:
+            validated = Verdict.model_validate(cached["verdict"])
+        except ValidationError:
+            return None
+        reused = _recheck(validated, item, rec)
         return _store_or_return(
             store, rec, sig, "cache", reused, persist=persist,
             same_as=int(cached["id"]), same_as_run=cached.get("same_as_run"), now=now,
