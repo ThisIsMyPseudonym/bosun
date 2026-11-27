@@ -135,6 +135,13 @@ def test_latest_bounded_reset_candidate_wins():
     ) == _limit(NOW + 6 * HOUR)
 
 
+def test_weeks_are_parsed_as_a_relative_reset_unit():
+    assert limits.limit_reading("Resets in 1 week", NOW, tz=UTC) == _limit(NOW + 7 * 86400)
+    assert limits.limit_reading("Usage limit reached. Resets in 2 weeks", NOW, tz=UTC) == _limit(NOW + 14 * 86400)
+    assert limits.limit_reading("Resets in 1w 2d", NOW, tz=UTC) == _limit(NOW + 9 * 86400)
+    assert limits.limit_reading("Resets in 5w", NOW, tz=UTC) == _limit(NOW + HOUR)
+
+
 # --- 429 cool-downs ----------------------------------------------------------------------------------------------
 
 

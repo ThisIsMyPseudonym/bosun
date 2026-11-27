@@ -25,7 +25,7 @@ MAX_RESET_S = 31 * 86400.0  # resets further out than a month are unreadable (fa
 MAX_LIMIT_CHARS = 500  # real limit errors are short; longer text is a normal answer quoting limit words
 
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
-_UNIT = r"(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])"
+_UNIT = r"(?:weeks?|wks?|w|days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])"
 _SEP = r"(?:[\s,]*(?:and[\s,]+)?)"
 
 # Coho's LIMIT_WORDS, plus Claude Code's "Rate limit reached" (exit 0), bare "Resets in <dur>" / "try again at <time>",
@@ -55,7 +55,7 @@ _CLOCK = re.compile(
     re.I)
 _MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
                                        "dec"), start=1)}
-_SECONDS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+_SECONDS = {"w": 7 * 86400, "d": 86400, "h": 3600, "m": 60, "s": 1}
 
 
 def _in_horizon(t: float, now: float) -> bool:
