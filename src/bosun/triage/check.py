@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping
 
 from bosun import mcp_server, recipes, redact
@@ -18,21 +19,40 @@ CATEGORY_RUNBOOK: dict[str, str] = {
     "not_signed_in": "claude-not-logged-in",
 }
 
+_DOMAIN_TLDS = (
+    "com|net|org|io|sh|dev|co|ai|xyz|ru|cn|tk|to|cc|tv|info|biz|edu|gov|me|gg|uk|de|fr|jp|au|ca|test|example"
+)
+_CMD_VERBS = (
+    "curl|wget|bash|sh|zsh|fish|csh|ksh|rm|sudo|doas|chmod|chown|chgrp|powershell|pwsh|iex|"
+    r"invoke-expression|invoke-webrequest|cmd\.exe|certutil|mshta|regsvr32|nc|ncat|netcat|eval|xargs"
+)
+_PKG_CMDS = (
+    r"(?:brew|npm|npx|pnpm|yarn|bun|pip|pip3|uv|uvx|apt|apt-get|dnf|yum|pacman|winget|choco|scoop|gem|cargo|go)"
+    r"\s+(?:install|add|run|exec|upgrade|uninstall|remove|tap|dlx)\b"
+)
 _UNSAFE_RE = re.compile(
     r"(?:"
-    r"https?://|"
-    r"ftp://|"
-    r"`|"
-    r"\$\(|"
-    r"\|\s*(?:sh|bash|zsh)\b|"
-    r"\bsudo\b|"
-    r"<[a-z/]|"
-    r"\[[^\]]*\]\(|"
-    r"\]\(|"
-    r"\bignore\s+(?:all\s+|previous\s+|your\s+|prior\s+)?instructions\b"
+    r"\b[a-z][a-z0-9+.-]*://|"
+    r"\b(?:javascript|data|file|vbscript)\s*:|"
+    r"\bwww\.[\w.-]+|"
+    rf"\b[\w-]+(?:\.[\w-]+)*\.(?:{_DOMAIN_TLDS})\b|"
+    r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,15}/|"
+    r"\b[a-z0-9._-]+@[a-z0-9.-]+:|"
+    r"`|\$\(|\|\s*(?:sh|bash|zsh)\b|"
+    rf"\b(?:{_CMD_VERBS})\b|"
+    rf"\b{_PKG_CMDS}|"
+    r"\b(?:python3?|perl|ruby|node)\s+-[ce]\b|"
+    r"<[a-z/]|\[[^\]]*\]\(|\]\(|"
+    r"\b(?:ignore|disregard|forget)\s+(?:\S+\s+){0,3}(?:instructions?|above|previous|prompts?)\b"
     r")",
     re.IGNORECASE,
 )
+
+
+def _normalize_unsafe(text: str) -> str:
+    """NFKC-normalize and strip zero-width / bidi format control characters before unsafe-pattern matching."""
+    nfkc = unicodedata.normalize("NFKC", text)
+    return "".join(ch for ch in nfkc if ch != "\u180e" and unicodedata.category(ch) != "Cf")
 
 
 def _runbook_exists(topic: str | None) -> bool:
@@ -117,8 +137,8 @@ def evidence_matches(line: str, source_text: str) -> bool:
 
 
 def sanitize_text(text: str) -> tuple[str, bool]:
-    """Redact secrets and cut at any URL, shell command, markup, or echoed prompt-injection instruction."""
-    clean = redact.text(text)
+    """Redact secrets, normalize, and cut at any URL, bare domain, shell command, markup, or injection phrase."""
+    clean = _normalize_unsafe(redact.text(text))
     match = _UNSAFE_RE.search(clean)
     if match is None:
         return clean, False
