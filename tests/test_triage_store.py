@@ -34,8 +34,11 @@ def test_cache_reuses_30_day_verdict_and_wrong_disputes_the_family(tmp_path):
     tstore.save_verdict(st, "job:3", "t3", "sig-a", "cache", _verdict(), same_as=origin_id, now=1_000_060.0)
     tstore.set_feedback(st, "job:2", "wrong", now=1_000_100.0)
     assert tstore.get(st, "job:2")["feedback"] == "wrong"
+    assert tstore.get(st, "job:2")["status"] == "disputed"
     assert tstore.get(st, "job:1")["feedback"] == "disputed"
+    assert tstore.get(st, "job:1")["status"] == "disputed"
     assert tstore.get(st, "job:3")["feedback"] == "disputed"
+    assert tstore.get(st, "job:3")["status"] == "disputed"
     assert tstore.get(st, "job:1")["verdict"]["cause"] == "Lock held."
     assert tstore.find_cached(st, "sig-a", now=1_000_200.0) is None
 

@@ -12,7 +12,7 @@ from bosun.store import Store
 from bosun.triage.schema import FailureRecord, Verdict
 
 CACHE_DAYS = 30
-_TERMINAL = frozenset({"done", "skipped", "failed", "fixed_since"})
+_TERMINAL = frozenset({"done", "disputed", "skipped", "failed", "fixed_since"})
 
 
 def _decode_row(db: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -128,6 +128,19 @@ def find_cached(store: Store, sig: str, *, now: float | None = None) -> dict[str
         return _decode_row(db, row)
 
 
+def is_rule_disputed(store: Store, sig: str) -> bool:
+    """True when a rules verdict for this signature has been marked wrong or disputed."""
+    if not sig:
+        return False
+    with store._tx() as db:
+        hit = db.execute(
+            "SELECT 1 FROM triage WHERE signature = ? AND source = 'rules' "
+            "AND (status = 'disputed' OR feedback IN ('wrong', 'disputed')) LIMIT 1",
+            (sig,),
+        ).fetchone()
+        return hit is not None
+
+
 def set_feedback(
     store: Store,
     failure: str,
@@ -135,7 +148,7 @@ def set_feedback(
     *,
     now: float | None = None,
 ) -> dict[str, Any] | None:
-    """Record user feedback ('helpful' or 'wrong'); 'wrong' disputes the whole cached family."""
+    """Record user feedback ('helpful' or 'wrong'); 'wrong' retires the verdict and cached family as disputed."""
     if feedback not in ("helpful", "wrong"):
         raise ValueError(f"invalid feedback: {feedback!r}")
     ts = time.time() if now is None else now
@@ -144,16 +157,21 @@ def set_feedback(
         if row is None:
             return None
         row_id = int(row["id"])
-        db.execute(
-            "UPDATE triage SET feedback = ?, feedback_ts = ? WHERE id = ?",
-            (feedback, ts, row_id),
-        )
         if feedback == "wrong":
+            db.execute(
+                "UPDATE triage SET status = 'disputed', feedback = ?, feedback_ts = ? WHERE id = ?",
+                (feedback, ts, row_id),
+            )
             origin_id = int(row["same_as"]) if row["same_as"] is not None else row_id
             db.execute(
-                "UPDATE triage SET feedback = 'disputed', feedback_ts = ? "
+                "UPDATE triage SET status = 'disputed', feedback = 'disputed', feedback_ts = ? "
                 "WHERE (id = ? OR same_as = ?) AND id != ?",
                 (ts, origin_id, origin_id, row_id),
+            )
+        else:
+            db.execute(
+                "UPDATE triage SET feedback = ?, feedback_ts = ? WHERE id = ?",
+                (feedback, ts, row_id),
             )
         updated = db.execute("SELECT * FROM triage WHERE id = ?", (row_id,)).fetchone()
         return _decode_row(db, updated)

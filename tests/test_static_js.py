@@ -302,7 +302,7 @@ def test_triage_card_renders_cause_evidence_step_and_never_uses_innerhtml():
     if (!spanNode.open || !spanNode.scrolled) throw new Error("clicking evidence link did not open and scroll to span");
 
     const cacheTriage = {{
-      status: "done",
+      status: "disputed",
       source: "cache",
       same_as: 1,
       same_as_run: {{ trace_id: "11223344", kind: "upgrade", subject: "brew:jq", started: 1700000000 }},

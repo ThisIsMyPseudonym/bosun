@@ -150,3 +150,87 @@ def test_failed_run_creates_triage_verdict_on_read_without_manual_seeding(tmp_pa
         assert tstore.get_by_trace(st, r2.trace_id) is not None
     finally:
         trace.configure(None)
+
+
+def test_wrong_feedback_retires_rules_and_cached_verdicts_as_disputed_via_http(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        err = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq"
+        j1 = st.create_job("brew:jq", ["brew", "upgrade", "--formula", "jq"])
+        job1 = st.job(j1)
+        assert job1 is not None
+        with trace.run("upgrade", subject="brew:jq", trace_id=job1["trace_id"]) as r1:
+            r1.fail(err)
+        st.finish_job(j1, "failed", err)
+
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+
+        # First read creates a rules verdict with status='done'
+        first = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert first["status"] == "done" and first["source"] == "rules"
+
+        # Marking it wrong retires it to status='disputed'
+        fb = user.post(f"/api/runs/{r1.trace_id}/triage/feedback", json={"feedback": "wrong"}, headers=H)
+        assert fb.status_code == 200
+        assert fb.json()["status"] == "disputed" and fb.json()["feedback"] == "wrong"
+
+        # Subsequent reads show status='disputed', never silently restored to 'done'
+        after = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert after["status"] == "disputed" and after["feedback"] == "wrong"
+        assert user.get(f"/api/runs/{r1.trace_id}").json()["triage"]["status"] == "disputed"
+
+        # A later failure with the same signature must not silently re-match the disputed rule
+        err2 = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/rg"
+        j2 = st.create_job("brew:rg", ["brew", "upgrade", "--formula", "rg"])
+        job2 = st.job(j2)
+        assert job2 is not None
+        with trace.run("upgrade", subject="brew:rg", trace_id=job2["trace_id"]) as r2:
+            r2.fail(err2)
+        st.finish_job(j2, "failed", err2)
+        second = user.get(f"/api/runs/{r2.trace_id}/triage").json()
+        assert second["status"] is None and second["verdict"] is None
+
+        # A model verdict reused from cache is retired across the family when marked wrong
+        j3 = st.create_job("brew:fd", ["brew", "upgrade", "--formula", "fd"])
+        job3 = st.job(j3)
+        assert job3 is not None
+        with trace.run("upgrade", subject="brew:fd", trace_id=job3["trace_id"]) as r3:
+            r3.fail("mystery upstream glitch")
+        st.finish_job(j3, "failed", "mystery upstream glitch")
+        rec3 = tstore.load_failure(st, r3.trace_id)
+        assert rec3 is not None
+        from bosun.triage import worker
+        sig = worker.signature_of(rec3)
+        tstore.save_verdict(
+            st, rec3.failure, r3.trace_id, sig, "model",
+            Verdict(
+                category="upstream_broken", cause="Mirror down.", confidence="medium", evidence=[],
+                next_step=NextStep(kind="retry", why="Try later."), needs_person=False, transient=True,
+            ),
+        )
+
+        j4 = st.create_job("brew:bat", ["brew", "upgrade", "--formula", "bat"])
+        job4 = st.job(j4)
+        assert job4 is not None
+        with trace.run("upgrade", subject="brew:bat", trace_id=job4["trace_id"]) as r4:
+            r4.fail("mystery upstream glitch")
+        st.finish_job(j4, "failed", "mystery upstream glitch")
+        cached = user.get(f"/api/runs/{r4.trace_id}/triage").json()
+        assert cached["status"] == "done" and cached["source"] == "cache"
+
+        fb4 = user.post(f"/api/runs/{r4.trace_id}/triage/feedback", json={"feedback": "wrong"}, headers=H)
+        assert fb4.status_code == 200 and fb4.json()["status"] == "disputed"
+        assert user.get(f"/api/runs/{r3.trace_id}/triage").json()["status"] == "disputed"
+
+        j5 = st.create_job("brew:eza", ["brew", "upgrade", "--formula", "eza"])
+        job5 = st.job(j5)
+        assert job5 is not None
+        with trace.run("upgrade", subject="brew:eza", trace_id=job5["trace_id"]) as r5:
+            r5.fail("mystery upstream glitch")
+        st.finish_job(j5, "failed", "mystery upstream glitch")
+        miss = user.get(f"/api/runs/{r5.trace_id}/triage").json()
+        assert miss["status"] is None and miss["verdict"] is None
+    finally:
+        trace.configure(None)

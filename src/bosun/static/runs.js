@@ -262,7 +262,7 @@ function jumpToSpan(ref) {
 }
 
 function verdictCard(triage, trace, S) {
-  if (!triage || !["done", "fixed_since"].includes(triage.status)) return null;
+  if (!triage || !["done", "disputed", "fixed_since"].includes(triage.status)) return null;
   if (triage.status === "fixed_since") {
     return el("div", { class: "panel triage-card triage-fixed" },
       el("div", { class: "triage-head" }, el("span", { class: "runstatus ok", text: "Fixed since" }),
@@ -289,7 +289,8 @@ function verdictCard(triage, trace, S) {
     el("div", { class: "triage-head" },
       el("strong", { text: heading }),
       el("span", { class: `triage-conf ${CONF_TONE[v.confidence] || ""}`, text: CONF_LABEL[v.confidence] || v.confidence }),
-      triage.feedback === "disputed" ? el("span", { class: "triage-conf warn", text: "Disputed" }) : null),
+      (triage.status === "disputed" || triage.feedback === "disputed" || triage.feedback === "wrong")
+        ? el("span", { class: "triage-conf warn", text: "Disputed" }) : null),
     el("p", { class: "triage-cause", text: v.cause }),
     evList,
     el("div", { class: "triage-step" }, triageStepAction(v.next_step, trace, triage, S),

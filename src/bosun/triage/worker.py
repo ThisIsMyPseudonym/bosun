@@ -75,6 +75,27 @@ def _ephemeral_row(
     return row
 
 
+def _store_or_return(
+    store: Store,
+    rec: FailureRecord,
+    sig: str,
+    source: str,
+    verdict: Verdict,
+    *,
+    persist: bool,
+    same_as: int | None = None,
+    same_as_run: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    if not persist:
+        return _ephemeral_row(
+            rec, sig, "done", source=source, verdict=verdict,
+            same_as=same_as, same_as_run=same_as_run, now=now,
+        )
+    tstore.save_verdict(store, rec.failure, rec.trace_id, sig, source, verdict, same_as=same_as, now=now)
+    return tstore.get(store, rec.failure)
+
+
 def evaluate_fast(
     store: Store,
     rec: FailureRecord,
@@ -90,6 +111,12 @@ def evaluate_fast(
     if rec.status in SKIPPED_STATUSES:
         return None
 
+    existing = tstore.get(store, rec.failure)
+    if existing is not None and (
+        existing.get("status") == "disputed" or existing.get("feedback") in ("wrong", "disputed")
+    ):
+        return existing
+
     persist = save and not store.read_only
     sig = signature_of(rec)
 
@@ -102,30 +129,21 @@ def evaluate_fast(
 
     item = _lookup_item(store, rec.subject)
 
-    # Step 3: Deterministic rule table
-    matched = rules.match(rec)
-    if matched is not None:
-        checked = _recheck(matched, item, rec)
-        if not persist:
-            return _ephemeral_row(rec, sig, "done", source="rules", verdict=checked, now=now)
-        tstore.save_verdict(store, rec.failure, rec.trace_id, sig, "rules", checked, now=now)
-        return tstore.get(store, rec.failure)
+    # Step 3: Deterministic rule table (unless a rules verdict for this signature was disputed)
+    if not tstore.is_rule_disputed(store, sig):
+        matched = rules.match(rec)
+        if matched is not None:
+            checked = _recheck(matched, item, rec)
+            return _store_or_return(store, rec, sig, "rules", checked, persist=persist, now=now)
 
     # Step 4: 30-day cache of non-disputed model verdicts for the same signature
     cached = tstore.find_cached(store, sig, now=now)
     if cached is not None and cached.get("verdict"):
         reused = _recheck(Verdict.model_validate(cached["verdict"]), item, rec)
-        origin_id = int(cached["id"])
-        if not persist:
-            return _ephemeral_row(
-                rec, sig, "done", source="cache", verdict=reused,
-                same_as=origin_id, same_as_run=cached.get("same_as_run"), now=now,
-            )
-        tstore.save_verdict(
-            store, rec.failure, rec.trace_id, sig, "cache", reused,
-            same_as=origin_id, now=now,
+        return _store_or_return(
+            store, rec, sig, "cache", reused, persist=persist,
+            same_as=int(cached["id"]), same_as_run=cached.get("same_as_run"), now=now,
         )
-        return tstore.get(store, rec.failure)
 
     return None
 

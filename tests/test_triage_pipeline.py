@@ -121,3 +121,29 @@ def test_evaluate_fast_returns_verdict_without_saving_on_read_only_store(tmp_pat
         assert tstore.get_by_trace(ro, r.trace_id) is None
     finally:
         ro.close()
+
+
+def test_evaluate_fast_never_restores_disputed_rule_verdict(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    rec1 = FailureRecord(
+        "job:30", "job", "30", "upgrade", "brew:jq", "brew", "failed", 100.0, "user", "t30",
+        "Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq",
+        ("brew", "upgrade", "--formula", "jq"), 1,
+        "Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq",
+    )
+    row = worker.evaluate_fast(st, rec1, now=200.0)
+    assert row is not None and row["status"] == "done"
+    tstore.set_feedback(st, rec1.failure, "wrong", now=210.0)
+
+    # Re-evaluating the same failure returns the disputed row without restoring 'done'
+    again = worker.evaluate_fast(st, rec1, now=220.0)
+    assert again is not None and again["status"] == "disputed"
+
+    # A sibling failure with the same signature skips the disputed rule
+    rec2 = FailureRecord(
+        "job:31", "job", "31", "upgrade", "brew:rg", "brew", "failed", 100.0, "user", "t31",
+        "Permission denied @ rb_sysopen - /opt/homebrew/Cellar/rg",
+        ("brew", "upgrade", "--formula", "rg"), 1,
+        "Permission denied @ rb_sysopen - /opt/homebrew/Cellar/rg",
+    )
+    assert worker.evaluate_fast(st, rec2, now=230.0) is None
