@@ -113,13 +113,25 @@ def test_the_demo_never_starts_on_a_port_something_else_holds(tmp_path, monkeypa
 
 
 def test_demo_seeds_rules_only_triage_verdicts_and_never_starts_a_cli(tmp_path, monkeypatch):
+    from pathlib import Path
+
     from bosun import proc
+    from bosun.providers import catalog
     from bosun.triage import model as tmodel
 
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    ai_binaries = frozenset(spec.binary for spec in catalog.CATALOG.values())
+    allowed_probes = frozenset({"git", "launchctl", "defaults", "sw_vers", "uname"})
+    seen_bins: list[str] = []
     real_run = proc.run
 
     def guard_proc(argv, *a, **k):
-        if not argv or argv[0] != "git":
+        exe = Path(argv[0]).name if argv else ""
+        seen_bins.append(exe)
+        if exe in ai_binaries:
+            raise AssertionError(f"demo started an AI CLI: {argv}")
+        if exe not in allowed_probes:
             raise AssertionError(f"demo started an unexpected CLI: {argv}")
         return real_run(argv, *a, **k)
 
@@ -145,6 +157,7 @@ def test_demo_seeds_rules_only_triage_verdicts_and_never_starts_a_cli(tmp_path, 
         assert body["triage_available"] is False
         categories.add(body["verdict"]["category"])
     assert {"permissions", "busy_or_locked"} <= categories
+    assert not (set(seen_bins) & ai_binaries)
 
     # Failed demo jobs on /api/jobs also carry their seeded verdict summary
     failed_jobs = [j for j in c.get("/api/jobs").json() if j["status"] == "failed"]
