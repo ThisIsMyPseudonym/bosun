@@ -35,10 +35,10 @@ from pydantic import BaseModel
 from . import llm, mcp_server, redact, trace
 from .approvals import Approval, Approvals
 from .assistant_prompt import (DECLINED, HISTORY_CHARS, HISTORY_RESULT_CHARS, MAX_STEPS, NOT_LOGGED_IN, PREFIX,  # noqa: F401
-                               SERVER, SYSTEM, TOOL_TIMEOUT_MS, GuideIn, _record, compose, helpers, read_guide,
+                               SERVER, SYSTEM, TOOL_TIMEOUT_MS, GuideIn, Turn, _record, compose, helpers, read_guide,
                                tool_names)
 from .config import Settings
-from .providers import accounts
+from .providers import accounts, catalog, ledger, limits, quota, router, routing, run as provider_run, windows
 from .providers.engines import AssistantEngine, ClaudeSdkEngine, Connect, TurnReport
 from .registry import (ASSISTANT, ActionContext, ActionError, Actions, ActionSpec, AskIn, Conflict, Forbidden, NotFound,
                        Risk, TraceIn)
@@ -53,55 +53,14 @@ SHOWN_CHARS = 1_500  # of a tool result sent to the panel
 STOP_GRACE_S = 5.0  # after Stop: how long the CLI gets to report what the turn used before it is cancelled
 
 
-class Turn:
-    """One question being answered: its events, kept so the panel can attach late or again."""
-
-    def __init__(self, conversation_id: str, number: int):
-        self.conversation_id, self.number = conversation_id, number
-        self.trace_id = trace.new_id()
-        self.events: list[tuple[str, dict[str, Any]]] = []
-        self.done = False
-        self.stopped = False
-        self.loop: asyncio.AbstractEventLoop | None = None
-        self.task: asyncio.Task[Any] | None = None
-        self.client: ClaudeSDKClient | None = None
-        self.engine: AssistantEngine | None = None
-        self.offload: Callable[..., Any] = lambda fn, *a: fn(*a)
-        self._cond = threading.Condition()
-
-    def emit(self, kind: str, **data: Any) -> None:
-        with self._cond:
-            if self.done:
-                return
-            self.events.append((kind, data))
-            self.done = kind == "done"
-            self._cond.notify_all()
-
-    def stream(self, after: int = 0, keepalive: float = 15.0) -> Iterator[tuple[int, str, dict[str, Any]] | None]:
-        """(number, kind, data) from event number `after` on, then live until `done`. None means "still here"."""
-        seen = max(0, after)
-        while True:
-            with self._cond:
-                if seen >= len(self.events):
-                    if self.done:
-                        return
-                    self._cond.wait(keepalive)
-                batch = self.events[seen:]
-            if not batch:
-                yield None
-            for kind, data in batch:
-                seen += 1
-                yield seen, kind, data
-
-
 class Assistant:
     def __init__(self, store: Store, settings: Settings, actions: Actions, approvals: Approvals,
                  connect: Connect | None = None):
         self.store, self.settings, self.actions, self.approvals = store, settings, actions, approvals
         self.model = settings.assistant_model or settings.model
-        self.login = "claude"  # current engine's login bucket (updated when turns route across MCP-capable logins)
+        self.login = "claude"  # current engine's login bucket (updated as turns route across MCP-capable logins)
         self.connect: Connect = connect or ClaudeSDKClient  # tests put a scripted model here
-        self.engine_factory: Callable[[Any, str], AssistantEngine] | None = None
+        self.engine_factory: Callable[[router.Candidate, str], AssistantEngine] | None = None
         self._turns: dict[str, Turn] = {}
         self._lock = threading.Lock()
         # tool calls and approval waits block: they run here, off the turn's event loop. Not the loop's own
@@ -203,9 +162,21 @@ class Assistant:
                 out["run"] = {k: run[k] for k in ("trace_id", "kind", "subject", "status")}
         return out
 
-    # --- engines ---------------------------------------------------------------------------------------------------
+    # --- engines & routing -----------------------------------------------------------------------------------------
     def _sdk_engine(self, model: str, login: accounts.Login | None = None) -> ClaudeSdkEngine:
         return ClaudeSdkEngine(self.settings, model, self.connect, login=login, stop_grace=lambda: STOP_GRACE_S)
+
+    def _model_for(self, provider: str) -> str:
+        if provider == "claude":
+            return self.settings.assistant_model or catalog.models_for("claude", "strong", self.settings)
+        return catalog.models_for(provider, "strong", self.settings)
+
+    def _build_engine(self, cand: router.Candidate, model: str) -> AssistantEngine:
+        if self.engine_factory is not None:
+            return self.engine_factory(cand, model)
+        if cand.provider == "claude":
+            return self._sdk_engine(model, login=cand.login)
+        raise RuntimeError(f"no assistant engine for {cand.provider}")
 
     def options(self, turn: Turn, stderr: list[str] | None = None) -> ClaudeAgentOptions:
         """Everything the model is given on the Claude SDK path. Tests assert on this."""
@@ -240,19 +211,41 @@ class Assistant:
         turn.task = asyncio.current_task()
         in_turn = trace.bound(lambda fn, *a: fn(*a))  # tool threads report into this turn's run
         turn.offload = lambda fn, *a: loop.run_in_executor(self._pool, in_turn, fn, *a)
-        engine = (self.engine_factory(None, self.model) if self.engine_factory is not None
-                  else self._sdk_engine(self.model))
-        return await self._run_engine(turn, engine, prompt)
+        ctx = routing.context(self.store, cooldowns=provider_run.COOLDOWNS)
+        route = router.plan("assistant", ctx, clicked=True)
+        labels = {lg.bucket: lg.label for lg in ctx.logins}
+        if not route.candidates:
+            reason = provider_run._reason(router.Attempted((), None), route, self.store,
+                                          provider_run.COOLDOWNS, time.time(), labels)
+            return "error", reason, 0.0
+        status, error, cost = "error", "", 0.0
+        for cand in route.candidates[:router.MAX_ATTEMPTS]:
+            model = self._model_for(cand.provider)
+            self.login = cand.bucket
+            with trace.span("llm_attempt", cand.bucket, job="assistant", provider=cand.provider, mode=route.mode) as sp:
+                outcome, status, error, cost = await self._run_candidate(turn, cand, model, prompt)
+                sp.set(outcome=outcome)
+                if outcome != "ok":
+                    sp.fail(error or outcome)
+            if outcome == "ok" or outcome not in router.FAILOVER or turn.stopped or turn.has_side_effects():
+                break
+        return status, error, cost
 
-    async def _run_engine(self, turn: Turn, engine: AssistantEngine, prompt: str) -> tuple[str, str, float]:
+    async def _run_candidate(self, turn: Turn, cand: router.Candidate, model: str,
+                             prompt: str) -> tuple[str, str, str, float]:
         t0 = time.perf_counter()
+        if not self.store.read_only and not ledger.readings(self.store, cand.bucket):
+            ledger.seed_from_coho(self.store, cand.bucket, now=time.time())
+        before = {r.window: r for r in ledger.readings(self.store, cand.bucket)}
+        engine = self._build_engine(cand, model)
         result: TurnReport | None = None
         turn.engine = engine
 
         async def call_tool(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
             return await self._call_tool(turn, name, arguments)
 
-        with trace.span("llm", "assistant", model=self.model, prompt_chars=len(prompt)) as sp:
+        with trace.span("llm", "assistant", model=model, provider=cand.provider, account=cand.login.id,
+                        prompt_chars=len(prompt)) as sp:
             try:
                 if turn.stopped:
                     raise asyncio.CancelledError
@@ -274,30 +267,44 @@ class Assistant:
                 turn.engine = None
             rep = result or TurnReport(outcome="error", error="engine ended without a result")
             outcome, error = ("cancelled", "stopped") if turn.stopped else (rep.outcome, rep.error)
-            usage = self._record_turn(turn, rep, outcome, error, (time.perf_counter() - t0) * 1000, len(prompt))
+            usage = self._record_turn(turn, cand, model, before, rep, outcome, error,
+                                      (time.perf_counter() - t0) * 1000, len(prompt))
             sp.set(outcome=outcome, cost_usd=round(usage.cost_usd, 6), input_tokens=usage.total_input,
                    output_tokens=usage.output_tokens, turns=rep.turns or (rep.report or {}).get("num_turns"))
             if outcome not in ("ok", "cancelled"):
                 sp.fail(error or outcome)
                 if rep.stderr:
-                    log.warning("assistant turn %s: claude said: %s", turn.trace_id[:8],
+                    log.warning("assistant turn %s: %s said: %s", turn.trace_id[:8], cand.provider,
                                 " | ".join(rep.stderr[-5:])[:1000])
         status = {"ok": "ok", "cancelled": "stopped", "budget": "budget"}.get(outcome, "error")
         if status == "budget":
             error = "This answer hit a cost limit and was cut short"
-        return status, "" if status == "ok" else error, usage.cost_usd
+        return outcome, status, "" if status == "ok" else error, usage.cost_usd
 
-    def _record_turn(self, turn: Turn, rep: TurnReport, outcome: str, error: str, took_ms: float,
-                     prompt_chars: int) -> llm.Usage:
+    def _record_turn(self, turn: Turn, cand: router.Candidate, model: str, before: dict[str, windows.Reading],
+                     rep: TurnReport, outcome: str, error: str, took_ms: float, prompt_chars: int) -> llm.Usage:
+        at = time.time()
+        if not self.store.read_only:
+            if rep.readings:
+                ledger.save(self.store, cand.bucket, rep.readings, now=at)
+            if outcome == "not_logged_in":
+                lim = windows.Reading("limit", "rejected", None, at + limits.NO_RESET_S, at, "limit")
+                ledger.save(self.store, cand.bucket, (lim,), now=at)
+        if outcome == "rate_limit":
+            provider_run.COOLDOWNS.hit(cand.bucket)
+        elif outcome == "ok":
+            provider_run.COOLDOWNS.clear(cand.bucket)
+        window_draw = quota.draw(before, rep.readings)
+        common: dict[str, Any] = dict(provider=cand.provider, account=cand.login.id, job="assistant",
+                                      window_draw=window_draw, estimated=rep.estimated,
+                                      conversation=turn.conversation_id)
         if rep.report is not None:
-            return llm.record_report("assistant", dict(rep.report), outcome=outcome, model=rep.model or self.model,
-                                     error=error, took_ms=took_ms, prompt_chars=prompt_chars,
-                                     conversation=turn.conversation_id)
+            return llm.record_report("assistant", dict(rep.report), outcome=outcome, model=rep.model or model,
+                                     error=error, took_ms=took_ms, prompt_chars=prompt_chars, **common)
         u = rep.usage or llm.Usage()
-        llm.record("assistant", outcome=outcome, usage=u, model=rep.model or self.model,
+        llm.record("assistant", outcome=outcome, usage=u, model=rep.model or model,
                    duration_ms=rep.duration_ms or round(took_ms, 1), api_ms=rep.api_ms, turns=rep.turns,
-                   prompt_chars=prompt_chars, session_id=rep.session_id, error=error,
-                   estimated=rep.estimated, conversation=turn.conversation_id)
+                   prompt_chars=prompt_chars, session_id=rep.session_id, error=error, **common)
         return u
 
     async def _interrupt(self, turn: Turn) -> None:

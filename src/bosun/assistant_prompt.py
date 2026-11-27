@@ -6,12 +6,15 @@ on any CLI's own session history and can move between logins or providers seamle
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from . import mcp_server
+from . import mcp_server, trace
 
 SERVER = "bosun"
 PREFIX = f"mcp__{SERVER}__"  # how Claude Code names an MCP server's tools
@@ -113,6 +116,52 @@ def read_guide(topic: str) -> str:
     if name not in files:
         raise NotFound(f"No guide named {name!r}. There are: {', '.join(sorted(files))}")
     return files[name].read_text(encoding="utf-8")
+
+
+class Turn:
+    """One question being answered: its events, kept so the panel can attach late or again."""
+
+    def __init__(self, conversation_id: str, number: int):
+        self.conversation_id, self.number = conversation_id, number
+        self.trace_id = trace.new_id()
+        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.done = False
+        self.stopped = False
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.task: asyncio.Task[Any] | None = None
+        self.client: Any = None
+        self.engine: Any = None
+        self.offload: Callable[..., Any] = lambda fn, *a: fn(*a)
+        self._cond = threading.Condition()
+
+    def emit(self, kind: str, **data: Any) -> None:
+        with self._cond:
+            if self.done:
+                return
+            self.events.append((kind, data))
+            self.done = kind == "done"
+            self._cond.notify_all()
+
+    def has_side_effects(self) -> bool:
+        """Whether this turn has already shown a message, tool call or approval card to the user."""
+        with self._cond:
+            return any(k in ("message", "tool", "approval") for k, _ in self.events)
+
+    def stream(self, after: int = 0, keepalive: float = 15.0) -> Iterator[tuple[int, str, dict[str, Any]] | None]:
+        """(number, kind, data) from event number `after` on, then live until `done`. None means "still here"."""
+        seen = max(0, after)
+        while True:
+            with self._cond:
+                if seen >= len(self.events):
+                    if self.done:
+                        return
+                    self._cond.wait(keepalive)
+                batch = self.events[seen:]
+            if not batch:
+                yield None
+            for kind, data in batch:
+                seen += 1
+                yield seen, kind, data
 
 
 def compose(context: dict[str, Any], history: list[dict[str, Any]], text: str) -> str:
