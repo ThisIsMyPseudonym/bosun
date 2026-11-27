@@ -169,7 +169,7 @@ class TraceIn(_In):
 
 
 class TriageIn(TraceIn):
-    force: bool = Field(default=False, description="Skip rules and cache and run the model directly (Look deeper)")
+    deep: bool = Field(default=False, description="Look deeper: skip rules and cache and ask an AI model directly")
 
 
 class TriageFeedbackIn(TraceIn):
@@ -353,7 +353,7 @@ SPECS: dict[str, ActionSpec] = _specs(
                "/api/runs/{trace_id}/diagnose"),
     ActionSpec("get_triage", "Error triage verdict for one run, if one has been recorded",
                Risk.READ, TraceIn, "GET", "/api/runs/{trace_id}/triage"),
-    ActionSpec("triage", "Ask an AI model to diagnose a failed run (skips rules and cache when force=true)",
+    ActionSpec("triage", "Ask an AI model to diagnose a failed run (skips rules and cache when deep=true)",
                Risk.LOCAL, TriageIn, "POST", "/api/runs/{trace_id}/triage"),
     ActionSpec("triage_feedback", "Mark a triage verdict as helpful or wrong (removes wrong verdicts from the cache)",
                Risk.LOCAL, TriageFeedbackIn, "POST", "/api/runs/{trace_id}/triage/feedback", user_only=True),

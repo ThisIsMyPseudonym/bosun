@@ -314,6 +314,27 @@ def _plan_candidates(ctx: router.Context, *, clicked: bool) -> tuple[router.Rout
     return router.Route("triage", combined_cands, combined_skips, mcp_route.mode, mcp_route.fell_back_from), combined_skips
 
 
+def _failed_outcome(
+    store: Store,
+    ctx: router.Context,
+    route: router.Route,
+    all_skips: Sequence[router.Skip],
+    done: router.Attempted,
+    cd: limits.Cooldowns,
+    triage_trace: str,
+    at: float,
+) -> ModelOutcome:
+    labels = {lg.bucket: lg.label for lg in ctx.logins}
+    reason = provider_run._reason(done, route, store, cd, at, labels)
+    no_cli = not _has_usable_cli(ctx)
+    waiting, earliest = _quota_info(store, all_skips, done.attempts, at)
+    return ModelOutcome(
+        ok=False, verdict=None, login=done.candidate.login if done.candidate else None,
+        model="", triage_trace=triage_trace, reason=reason,
+        waiting_quota=waiting and not no_cli, earliest_reset=earliest, no_cli=no_cli,
+    )
+
+
 def run_model(
     store: Store,
     settings: Settings,
@@ -329,14 +350,13 @@ def run_model(
     """Route and execute model triage (MCP first, locked-down JSON fallback), check the verdict, and record."""
     cd = provider_run.COOLDOWNS if cooldowns is None else cooldowns
     tier: Literal["light", "strong"] = "strong" if clicked else "light"
-    actor = "user" if clicked else "triage"
     item = _lookup_item(store, rec.subject)
     offered = recipes.describe(item, rec.output or rec.error) if item else []
     bundle = _build_bundle(store, settings, rec)
     sources = _evidence_sources(bundle, rec)
     deadline = time.monotonic() + timeout
 
-    with trace.run("triage", subject=rec.failure, actor=actor) as tr:
+    with trace.run("triage", subject=rec.failure, actor="user" if clicked else "triage") as tr:
         when = now()
         ctx = routing.context(store, cooldowns=cd, now=when, logins=logins)
         route, all_skips = _plan_candidates(ctx, clicked=clicked)
@@ -358,13 +378,6 @@ def run_model(
                 ok=True, verdict=checked, login=done.candidate.login, model=chosen_model,
                 triage_trace=tr.trace_id, reason="",
             )
-        labels = {lg.bucket: lg.label for lg in ctx.logins}
-        reason = provider_run._reason(done, route, store, cd, now(), labels)
-        no_cli = not _has_usable_cli(ctx)
-        waiting, earliest = _quota_info(store, all_skips, done.attempts, now())
-        tr.fail(reason)
-        return ModelOutcome(
-            ok=False, verdict=None, login=done.candidate.login if done.candidate else None,
-            model="", triage_trace=tr.trace_id, reason=reason,
-            waiting_quota=waiting and not no_cli, earliest_reset=earliest, no_cli=no_cli,
-        )
+        failed = _failed_outcome(store, ctx, route, all_skips, done, cd, tr.trace_id, now())
+        tr.fail(failed.reason)
+        return failed

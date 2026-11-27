@@ -185,7 +185,7 @@ def test_fake_codex_runs_bosun_mcp_as_triage_is_read_only_and_never_leaks_token(
             time.sleep(0.02)
 
         with httpx.Client(base_url=f"http://127.0.0.1:{port}", cookies=signed_in(port), timeout=30) as browser:
-            resp = browser.post(f"/api/runs/{failed.trace_id}/triage", json={"force": True}, headers=H)
+            resp = browser.post(f"/api/runs/{failed.trace_id}/triage", json={"deep": True}, headers=H)
             assert resp.status_code == 200, resp.text
             body = resp.json()
             assert body["status"] == "done" and body["source"] == "model"

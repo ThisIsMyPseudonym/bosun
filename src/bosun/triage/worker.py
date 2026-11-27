@@ -220,8 +220,8 @@ class Triager:
         with self._lock:
             self._active_runs.discard(tid)
 
-    def triage_click(self, trace_id: str, *, force: bool = False) -> dict[str, Any]:
-        """Run on-click triage (or Look deeper when force=True) for one failed run."""
+    def triage_click(self, trace_id: str, *, deep: bool = False) -> dict[str, Any]:
+        """Run on-click triage (or Look deeper when deep=True) for one failed run."""
         found = self.store.trace(trace_id)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
@@ -233,7 +233,7 @@ class Triager:
             raise Invalid(f"Runs with status {rec.status!r} cannot be triaged")
         if _aged_out(found):
             raise Conflict("The output for this run has aged out")
-        if not force:
+        if not deep:
             fast = evaluate_fast(self.store, rec)
             if fast is not None and fast.get("status") in ("done", "fixed_since"):
                 return fast
