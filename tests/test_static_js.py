@@ -358,7 +358,7 @@ def test_triage_retry_uses_fix_item_keys_and_omits_button_for_non_retryable_kind
         _text: "", className: "",
         get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
         set textContent(v) {{ this._text = String(v); this.children = []; }},
-        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "disabled") this.disabled = true; if (k === "title") this.title = String(v); }},
         getAttribute(k) {{ return this.attrs[k] ?? null; }},
         addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
         append(...kids) {{ for (const k of kids) this.children.push(k); }},
@@ -503,7 +503,7 @@ def test_triage_send_feedback_posts_to_run_feedback_route():
         _text: "", className: "",
         get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
         set textContent(v) {{ this._text = String(v); this.children = []; }},
-        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "disabled") this.disabled = true; if (k === "title") this.title = String(v); }},
         getAttribute(k) {{ return this.attrs[k] ?? null; }},
         addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
         append(...kids) {{ for (const k of kids) this.children.push(k); }},
@@ -567,6 +567,152 @@ def test_triage_send_feedback_posts_to_run_feedback_route():
       }}
       if (JSON.stringify(JSON.parse(calls[1].opts.body)) !== JSON.stringify({{ feedback: "wrong" }})) {{
         throw new Error("wrong feedback body: " + calls[1].opts.body);
+      }}
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_triage_buttons_look_deeper_disabled_provenance_and_related_seen():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    runs_js = str(STATIC / "runs.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", disabled: false, title: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "disabled") this.disabled = true; if (k === "title") this.title = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      body: mkNode("body"),
+      querySelector: () => ({{ content: "tok" }}),
+      getElementById: () => null,
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{
+      calls.push({{ path, opts }});
+      return {{
+        status: "done", source: "model", feedback: "",
+        model_info: {{ provider: "codex", provider_label: "Codex", account: "work", login_label: "work", model: "gpt-5.6-terra", tier: "strong" }},
+        verdict: {{
+          category: "unknown", cause: "Unclear exit 1.", confidence: "low", evidence: [],
+          next_step: {{ kind: "none", recipe: null, runbook: null, why: "Check output." }},
+          needs_person: false, transient: false,
+        }},
+      }};
+    }};
+    MC.route = {{ parse: () => ({{ page: "trace" }}) }};
+    MC.render = () => {{}};
+    MC.nameOf = (_S, k) => k;
+    MC.ago = () => "1m ago";
+    MC.jobLabel = (j) => j.status;
+    MC.ask = () => {{}};
+    MC.banner = () => {{}};
+    MC.actions = {{ upgrade: () => {{}}, fix: () => {{}}, recheckProject: () => {{}}, copyPrompt: () => {{}} }};
+    eval(fs.readFileSync({json.dumps(runs_js)}, "utf8"));
+
+    const H = MC.triageHelpers;
+    if (!H.triageAction) throw new Error("missing MC.triageHelpers.triageAction");
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+
+    // 1. Triage button when no verdict or failed/skipped, wired to POST /api/runs/<id>/triage
+    const baseTrace = {{
+      run: {{ trace_id: "cafe0001", kind: "upgrade", subject: "brew:jq", status: "failed", started: 1700500000 }},
+      spans: [], failures: [], jobs: [], fixes: [], triage: null,
+      triage_available: true, triage_unavailable_reason: "",
+      related_failures: [
+        {{ trace_id: "prev1", started: 1700000000 }},
+        {{ trace_id: "prev2", started: 1700200000 }},
+        {{ trace_id: "prev3", started: 1700300000 }},
+      ],
+    }};
+    const tb = H.triageAction(baseTrace);
+    const triBtn = allNodes(tb).filter((n) => n.tagName === "BUTTON").find((b) => b.textContent === "Triage");
+    if (!triBtn || triBtn.disabled) throw new Error("expected enabled Triage button");
+
+    // 2. Disabled state when triage_available is false names why
+    const disabledTrace = {{ ...baseTrace, triage_available: false, triage_unavailable_reason: "No locked-down AI CLI installed" }};
+    const tbOff = H.triageAction(disabledTrace);
+    const offBtn = allNodes(tbOff).filter((n) => n.tagName === "BUTTON").find((b) => b.textContent === "Triage");
+    if (!offBtn || !offBtn.disabled) throw new Error("expected disabled Triage button");
+    if (!tbOff.textContent.includes("No locked-down AI CLI installed") && !offBtn.title.includes("No locked-down AI CLI installed")) {{
+      throw new Error("disabled Triage button must explain why");
+    }}
+
+    // 3. Look deeper button appears on rules and cache verdicts (and not on model verdicts)
+    const rulesTriage = {{
+      status: "done", source: "rules", feedback: "",
+      verdict: {{
+        category: "permissions", cause: "Not writable.", confidence: "high", evidence: [],
+        next_step: {{ kind: "runbook", recipe: null, runbook: "homebrew-permissions", why: "Fix it." }},
+        needs_person: true, transient: false,
+      }},
+    }};
+    const rulesCard = H.verdictCard(rulesTriage, baseTrace, {{}});
+    const lookBtn = allNodes(rulesCard).filter((n) => n.tagName === "BUTTON").find((b) => b.textContent === "Look deeper");
+    if (!lookBtn || lookBtn.disabled) throw new Error("expected enabled Look deeper button on rules verdict");
+    if (!rulesCard.textContent.includes("seen 4 times since")) {{
+      throw new Error("expected related_failures count in card: " + rulesCard.textContent);
+    }}
+
+    // 4. Model verdict shows provenance ("Codex, work login, strong model") and "Not sure" for unknown
+    const modelTriage = {{
+      status: "done", source: "model", feedback: "",
+      model_info: {{ provider: "codex", provider_label: "Codex", account: "work", login_label: "work", model: "gpt-5.6-terra", tier: "strong" }},
+      verdict: {{
+        category: "unknown", cause: "Unclear failure.", confidence: "low", evidence: [],
+        next_step: {{ kind: "none", recipe: null, runbook: null, why: "Inspect output." }},
+        needs_person: false, transient: false,
+      }},
+    }};
+    const modelCard = H.verdictCard(modelTriage, baseTrace, {{}});
+    if (!modelCard.textContent.includes("Not sure")) throw new Error("unknown category must show Not sure heading");
+    if (!modelCard.textContent.includes("Codex, work login, strong model")) {{
+      throw new Error("expected model provenance, got: " + modelCard.textContent);
+    }}
+    if (allNodes(modelCard).some((n) => n.tagName === "BUTTON" && n.textContent === "Look deeper")) {{
+      throw new Error("model verdict should not show Look deeper");
+    }}
+
+    // 5. Failed Look deeper keeps showing earlier rules verdict with a note explaining the failure
+    const rulesWithErr = {{ ...rulesTriage, last_error: "Claude timed out" }};
+    const errCard = H.verdictCard(rulesWithErr, baseTrace, {{}});
+    if (!errCard.textContent.includes("Not writable.") || !errCard.textContent.includes("Look deeper failed: Claude timed out")) {{
+      throw new Error("failed Look deeper must keep rules verdict and note failure: " + errCard.textContent);
+    }}
+
+    (async () => {{
+      for (const fn of triBtn.listeners.click || []) await fn();
+      for (const fn of lookBtn.listeners.click || []) await fn();
+      if (calls.length !== 2) throw new Error("expected 2 triage calls, got " + calls.length);
+      if (calls[0].path !== "/api/runs/cafe0001/triage" || calls[0].opts.method !== "POST") {{
+        throw new Error("bad Triage call: " + JSON.stringify(calls[0]));
+      }}
+      if (JSON.parse(calls[0].opts.body).deep !== false) throw new Error("Triage should send deep:false");
+      if (calls[1].path !== "/api/runs/cafe0001/triage" || JSON.parse(calls[1].opts.body).deep !== true) {{
+        throw new Error("Look deeper must send deep:true: " + JSON.stringify(calls[1]));
       }}
       console.log("OK");
     }})().catch((e) => {{ console.error(e); process.exit(1); }});

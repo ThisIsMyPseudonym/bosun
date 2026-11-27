@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from . import auth, launcher
 from .config import PROJECT_ROOT, Settings
-from .registry import AGENT_TIER_SETTINGS, SPECS, ActionError, ActionSpec, Risk, TraceIn
+from .registry import AGENT_TIER_SETTINGS, SPECS, TRIAGE_ALLOWED_ACTIONS, ActionError, ActionSpec, Risk, TraceIn
 
 log = logging.getLogger(__name__)
 
@@ -116,14 +116,24 @@ def tool_specs() -> dict[str, ActionSpec]:
     return {name: sp for name, sp in SPECS.items() if not sp.panel}
 
 
+def triage_tool_specs() -> dict[str, ActionSpec]:
+    """Read-only actions scoped to this run and runbooks, exposed to `bosun mcp --as triage`."""
+    return {
+        name: sp for name, sp in SPECS.items()
+        if sp.risk == Risk.READ and not sp.panel and not sp.user_only and name in TRIAGE_ALLOWED_ACTIONS
+    }
+
+
 def tools(helpers: dict[str, tuple[type[BaseModel], str]] | None = None,
-          tiers: dict[Risk, str] | None = None) -> list[types.Tool]:
+          tiers: dict[Risk, str] | None = None,
+          specs: dict[str, ActionSpec] | None = None) -> list[types.Tool]:
     """The registry as MCP tools, plus the helpers. Nothing here is written per tool beyond GUIDANCE. `bosun mcp`
     and the built-in assistant both list their tools with this, so they describe an action in the same words."""
+    chosen = tool_specs() if specs is None else specs
     out = [types.Tool(name=sp.name, description=describe(sp, tiers), input_schema=sp.input.model_json_schema(),
                       annotations=types.ToolAnnotations(read_only_hint=sp.risk == Risk.READ,
                                                         open_world_hint=sp.risk == Risk.EXTERNAL))
-           for sp in tool_specs().values()]
+           for sp in chosen.values()]
     out += [types.Tool(name=name, description=text, input_schema=model.model_json_schema(),
                        annotations=types.ToolAnnotations(read_only_hint=True, open_world_hint=False))
             for name, (model, text) in (HELPERS if helpers is None else helpers).items()]
@@ -172,15 +182,19 @@ class Dashboard:
                                           trust_env=False)  # loopback only: never through a proxy from the environment
         self._up = up or (lambda: launcher.dashboard_up(self.url))
         self._start, self._wait, self._sleep = start, wait, sleep
-        self._checked = as_role == "assistant"  # the running dashboard spawned us: never auto-start another
+        self._checked = as_role in ("assistant", "triage")  # the running dashboard spawned us: never auto-start another
 
     def _token(self) -> str:
         if self._assistant_token is not None:
             return self._assistant_token
-        return os.environ.get(auth.ASSISTANT_TOKEN_ENV, "")
+        env_var = auth.TRIAGE_TOKEN_ENV if self.as_role == "triage" else auth.ASSISTANT_TOKEN_ENV
+        return os.environ.get(env_var, "")
 
-    def _assistant_reply_key(self) -> str:
-        return self._reply_key if self._reply_key is not None else os.environ.get(auth.ASSISTANT_REPLY_KEY_ENV, "")
+    def _role_reply_key(self) -> str:
+        if self._reply_key is not None:
+            return self._reply_key
+        env_var = auth.TRIAGE_REPLY_KEY_ENV if self.as_role == "triage" else auth.ASSISTANT_REPLY_KEY_ENV
+        return os.environ.get(env_var, "")
 
     def ensure_up(self) -> None:
         """Bosun answering on its port, started first if it wasn't."""
@@ -203,11 +217,14 @@ class Dashboard:
         # without a restart. Each request is signed on its own (auth.agent_signature).
         return auth.AgentAuth(lambda: auth.load_key(self.s.data_dir), self.agent)
 
-    def _call_assistant(self, method: str, path: str, kwargs: dict[str, Any]) -> Reply:
+    def _call_token(self, method: str, path: str, kwargs: dict[str, Any]) -> Reply:
         tok = self._token()
-        r = self._http.request(method, path, headers={auth.ASSISTANT_TOKEN_HEADER: tok}, **kwargs)
-        if r.status_code != 401 and not auth.valid_assistant_reply(
-                self._assistant_reply_key(), r.request.method, r.request.url.raw_path.decode("ascii"), r.headers.get(auth.REPLY_HEADER)):
+        is_triage = self.as_role == "triage"
+        header = auth.TRIAGE_TOKEN_HEADER if is_triage else auth.ASSISTANT_TOKEN_HEADER
+        verifier = auth.valid_triage_reply if is_triage else auth.valid_assistant_reply
+        r = self._http.request(method, path, headers={header: tok}, **kwargs)
+        if r.status_code != 401 and not verifier(
+                self._role_reply_key(), r.request.method, r.request.url.raw_path.decode("ascii"), r.headers.get(auth.REPLY_HEADER)):
             raise DashboardDown(f"Something on port {self.s.port} answered, but couldn't show it is this machine's "
                                 "Bosun dashboard, so its answer was not used.")
         try:
@@ -223,8 +240,8 @@ class Dashboard:
         for name in [seg[1:-1] for seg in spec.path.split("/") if seg.startswith("{")]:
             path = path.replace("{" + name + "}", quote(str(data.pop(name)), safe=""))
         kwargs: dict[str, Any] = {"params": data} if spec.method == "GET" else {"json": data}
-        if self.as_role == "assistant":
-            return self._call_assistant(spec.method, path, kwargs)
+        if self.as_role in ("assistant", "triage"):
+            return self._call_token(spec.method, path, kwargs)
         if not self._checked:
             self.ensure_up()
         try:
@@ -328,11 +345,13 @@ def frame(tool: str, ok: bool, payload: Any, trace_id: str | None = None,
 
 
 def check(name: str, arguments: dict[str, Any] | None,
-          helpers: dict[str, tuple[type[BaseModel], str]] | None = None) -> tuple[ActionSpec | None, BaseModel] | types.CallToolResult:
+          helpers: dict[str, tuple[type[BaseModel], str]] | None = None,
+          specs: dict[str, ActionSpec] | None = None) -> tuple[ActionSpec | None, BaseModel] | types.CallToolResult:
     """A tool call's input against the action's own model: (the action or None for a helper, the checked input),
     or the framed error to hand back."""
     helpers = HELPERS if helpers is None else helpers
-    spec = tool_specs().get(name)
+    chosen = tool_specs() if specs is None else specs
+    spec = chosen.get(name)
     model = spec.input if spec else helpers[name][0] if name in helpers else None
     if model is None:
         return frame(name, False, f"Bosun has no tool named {name!r}")
@@ -347,12 +366,16 @@ def _active_helpers(as_role: str) -> dict[str, tuple[type[BaseModel], str]]:
     if as_role == "assistant":
         from . import assistant_prompt
         return assistant_prompt.helpers()
+    if as_role == "triage":
+        from . import assistant_prompt
+        return {"read_guide": assistant_prompt.helpers()["read_guide"]}
     return HELPERS
 
 
 def dispatch(dash: Dashboard, name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
     """Check the input against the action's own model, send it to the dashboard, frame what comes back."""
-    checked = check(name, arguments, _active_helpers(dash.as_role))
+    specs = triage_tool_specs() if dash.as_role == "triage" else None
+    checked = check(name, arguments, _active_helpers(dash.as_role), specs=specs)
     if isinstance(checked, types.CallToolResult):
         return checked
     spec, body = checked
@@ -400,11 +423,12 @@ ToolCall = Callable[[str, dict[str, Any] | None], Awaitable[types.CallToolResult
 
 
 def tool_server(call: ToolCall, helpers: dict[str, tuple[type[BaseModel], str]] | None = None,
-                instructions: str | None = None, tiers: dict[Risk, str] | None = None, **handlers: Any) -> Server[Any]:
+                instructions: str | None = None, tiers: dict[Risk, str] | None = None,
+                specs: dict[str, ActionSpec] | None = None, **handlers: Any) -> Server[Any]:
     """An MCP server that offers the registry's tools and hands each call to `call`. `bosun mcp` adds resources to
     one of these; the built-in assistant runs one in-process (assistant.py)."""
     async def list_tools(ctx: Any, params: Any) -> types.ListToolsResult:
-        return types.ListToolsResult(tools=tools(helpers, tiers))
+        return types.ListToolsResult(tools=tools(helpers, tiers, specs))
 
     async def call_tool(ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
         return await call(params.name, params.arguments)
@@ -432,6 +456,9 @@ def build(dash: Dashboard) -> Server[Any]:
 
     if dash.as_role == "assistant":
         return tool_server(call, helpers=_active_helpers("assistant"), tiers=TIER_PLAIN)
+    if dash.as_role == "triage":
+        return tool_server(call, helpers=_active_helpers("triage"), tiers=TIER_PLAIN, specs=triage_tool_specs(),
+                           on_list_resources=list_resources, on_read_resource=read_resource)
     return tool_server(call, instructions=INSTRUCTIONS, on_list_resources=list_resources,
                        on_read_resource=read_resource)
 

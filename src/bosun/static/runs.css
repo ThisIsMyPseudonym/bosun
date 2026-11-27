@@ -126,8 +126,10 @@
 .triage-none { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
 .triage-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 8px; border-top: 1px solid var(--line); }
 .triage-src { font-size: 12px; color: var(--ink-3); }
-.triage-fb { display: inline-flex; gap: 6px; }
+.triage-fb { display: inline-flex; gap: 6px; flex-wrap: wrap; }
 .triage-fb button.on { border-color: var(--teal); color: var(--ink); font-weight: 600; }
+.triage-run-action { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.triage-seen { font-size: 12px; }
 .rb-dialog { max-width: 720px; width: calc(100vw - 32px); max-height: 82vh; overflow: auto; background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 18px 20px; }
 .rb-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
 .rb-head h3 { margin: 0; font-size: 16px; }

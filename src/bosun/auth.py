@@ -258,3 +258,99 @@ class AssistantTokens:
     def _prune(self, now: float) -> None:
         for tok in [t for t, g in self._active.items() if now - g.issued_at > self._ttl_s]:
             del self._active[tok]
+
+
+TRIAGE_TOKEN_ENV = "BOSUN_TRIAGE_TOKEN"
+TRIAGE_TOKEN_HEADER = "x-bosun-triage-token"
+TRIAGE_TOKEN_PREFIX = "bsn_tt_"
+TRIAGE_REPLY_KEY_ENV = "BOSUN_TRIAGE_REPLY_KEY"
+TRIAGE_REPLY_KEY_PREFIX = "bsn_tr_"
+TRIAGE_TOKEN_TTL_S = 300.0
+TRIAGE_MAX_CALLS = 8
+
+
+def triage_reply_proof(reply_key: str, method: str, target: str) -> str:
+    """The dashboard's proof of an answer to a triage MCP call, keyed by the job's env-only reply key."""
+    return _mac(reply_key, f"triage-reply|{method.upper()}|{target}")
+
+
+def valid_triage_reply(reply_key: str | None, method: str, target: str, value: str | None) -> bool:
+    return bool(reply_key and value) and hmac.compare_digest(
+        str(value).encode("utf-8", "replace"), triage_reply_proof(str(reply_key), method, target).encode())
+
+
+@dataclass(frozen=True)
+class TriageGrant:
+    """What a live per-job triage token authorises: one triage job with a server-side call cap."""
+
+    trace_id: str
+    issued_at: float
+    max_calls: int
+
+
+class TriageTokens:
+    """In-memory per-job tokens for `bosun mcp --as triage`, with a server-side call cap and reply key."""
+
+    def __init__(self, max_calls: int = TRIAGE_MAX_CALLS, ttl_s: float = TRIAGE_TOKEN_TTL_S,
+                 clock: Callable[[], float] = time.time):
+        self._max_calls = max_calls
+        self._ttl_s = ttl_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._active: dict[str, TriageGrant] = {}
+        self._calls: dict[str, int] = {}
+        self._secret = secrets.token_bytes(32)
+
+    def reply_key(self, token: str) -> str:
+        """The job's reply key, derived from its token with a process-only secret."""
+        mac = hmac.new(self._secret, token.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
+        return f"{TRIAGE_REPLY_KEY_PREFIX}{mac}"
+
+    def issue(self, trace_id: str) -> str:
+        token = f"{TRIAGE_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
+        grant = TriageGrant(trace_id, self._clock(), self._max_calls)
+        with self._lock:
+            self._prune(grant.issued_at)
+            self._active[token] = grant
+            self._calls[token] = 0
+        return token
+
+    def _find_locked(self, token: str | None) -> tuple[str, TriageGrant] | None:
+        if not token or not token.startswith(TRIAGE_TOKEN_PREFIX):
+            return None
+        self._prune(self._clock())
+        raw = token.encode("utf-8", "replace")
+        for candidate, grant in self._active.items():
+            if hmac.compare_digest(candidate.encode(), raw):
+                return candidate, grant
+        return None
+
+    def verify(self, token: str | None) -> TriageGrant | None:
+        with self._lock:
+            found = self._find_locked(token)
+            return found[1] if found is not None else None
+
+    def consume_call(self, token: str | None) -> TriageGrant | None:
+        """Atomically verify the token and consume one tool-call slot; returns None when invalid or exhausted."""
+        with self._lock:
+            found = self._find_locked(token)
+            if found is None:
+                return None
+            key, grant = found
+            used = self._calls.get(key, 0)
+            if used >= grant.max_calls:
+                return None
+            self._calls[key] = used + 1
+            return grant
+
+    def revoke(self, token: str | None) -> None:
+        if not token:
+            return
+        with self._lock:
+            self._active.pop(token, None)
+            self._calls.pop(token, None)
+
+    def _prune(self, now: float) -> None:
+        for tok in [t for t, g in self._active.items() if now - g.issued_at > self._ttl_s]:
+            del self._active[tok]
+            self._calls.pop(tok, None)

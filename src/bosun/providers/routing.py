@@ -192,17 +192,21 @@ def overview(store: Store, now: float | None = None) -> dict[str, Any]:
 
 
 def context(store: Store, *, cooldowns: limits.Cooldowns | None = None, now: float | None = None,
-            logins: tuple[accounts.Login, ...] | None = None, include_fixer: bool = False) -> router.Context:
+            logins: tuple[accounts.Login, ...] | None = None, include_fixer: bool = False,
+            job: str = "") -> router.Context:
     """Build a pure `router.Context` from the store, installed CLIs, contract verdicts, ledger and cool-downs."""
     when = time.time() if now is None else now
     found = accounts.logins(store) if logins is None else logins
     contracts: dict[str, contract.ContractStatus] = {}
     for lg in found:
         if lg.binary and lg.provider not in contracts:
-            contracts[lg.provider] = (
-                contract.check(store, lg.provider, lg.binary, now=lambda: when, include_fixer=True)
-                if include_fixer else contract.check(store, lg.provider, lg.binary, now=lambda: when)
-            )
+            ef = catalog.extra_flags_for(lg.provider, job) if job else ()
+            if include_fixer:
+                contracts[lg.provider] = contract.check(store, lg.provider, lg.binary, now=lambda: when, include_fixer=True)
+            elif ef:
+                contracts[lg.provider] = contract.check(store, lg.provider, lg.binary, now=lambda: when, extra_flags=ef)
+            else:
+                contracts[lg.provider] = contract.check(store, lg.provider, lg.binary, now=lambda: when)
     all_r = ledger.all_readings(store)
     if not store.read_only:
         for lg in found:

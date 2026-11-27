@@ -1,20 +1,27 @@
-"""Fast rules-and-cache triage pipeline (Phase 1: no model calls)."""
+"""Error triage pipeline: fast rules/cache evaluation and on-click model triage worker."""
 
 from __future__ import annotations
 
+import logging
+import threading
 import time
 from typing import Any
 
 from pydantic import ValidationError
 
-from bosun import redact, serialize
+from bosun import auth, redact, serialize
+from bosun.config import Settings
 from bosun.models import Item
+from bosun.registry import Conflict, Failed, Invalid, NotFound
 from bosun.store import Store
 from bosun.triage import check, rules, signature
+from bosun.triage import model as tmodel
 from bosun.triage import store as tstore
 from bosun.triage.schema import FailureRecord, Verdict
 
+log = logging.getLogger(__name__)
 SKIPPED_STATUSES: frozenset[str] = frozenset({"interrupted", "cancelled", "no_changes"})
+MAX_CONCURRENT_TRIAGE = 2
 
 
 def signature_of(rec: FailureRecord) -> str:
@@ -67,6 +74,7 @@ def _ephemeral_row(
         "verdict": redact.value(verdict.model_dump(mode="json")) if verdict is not None else None,
         "same_as": same_as,
         "triage_trace": "",
+        "last_error": "",
         "feedback": "",
         "feedback_ts": None,
         "created": ts,
@@ -172,3 +180,98 @@ def triage_for(
     if rec is None:
         return None
     return evaluate_fast(store, rec, now=now, save=save)
+
+
+def _aged_out(found: dict[str, Any]) -> bool:
+    """True when spans have aged out and no job/fix output remains for the run."""
+    if found.get("spans"):
+        return False
+    if any(j.get("output") for j in found.get("jobs") or ()):
+        return False
+    if any(f.get("result") for f in found.get("fixes") or ()):
+        return False
+    return True
+
+
+class Triager:
+    """Coordinates on-click (and later automatic) model triage with per-run and global concurrency caps."""
+
+    def __init__(
+        self,
+        store: Store,
+        settings: Settings,
+        tokens: auth.TriageTokens,
+        *,
+        max_concurrent: int = MAX_CONCURRENT_TRIAGE,
+    ) -> None:
+        self.store = store
+        self.settings = settings
+        self.tokens = tokens
+        self._max_concurrent = max(1, max_concurrent)
+        self._lock = threading.Lock()
+        self._active_runs: set[str] = set()
+
+    def _acquire(self, tid: str) -> None:
+        with self._lock:
+            if tid in self._active_runs:
+                raise Conflict("Triage is already running for this run")
+            if len(self._active_runs) >= self._max_concurrent:
+                raise Conflict("Too many triage jobs are already running; try again shortly")
+            self._active_runs.add(tid)
+
+    def _release(self, tid: str) -> None:
+        with self._lock:
+            self._active_runs.discard(tid)
+
+    def _run_model_click(self, rec: FailureRecord, tid: str) -> dict[str, Any]:
+        sig = signature_of(rec)
+        previous = tstore.get(self.store, rec.failure)
+        try:
+            tstore.save_status(self.store, rec.failure, tid, sig, "running")
+            outcome = tmodel.run_model(self.store, self.settings, rec, clicked=True, tokens=self.tokens)
+            if outcome.ok and outcome.verdict is not None:
+                tstore.save_verdict(
+                    self.store, rec.failure, tid, sig, "model", outcome.verdict,
+                    triage_trace=outcome.triage_trace,
+                )
+                saved = tstore.get(self.store, rec.failure)
+                assert saved is not None
+                return saved
+            reason = outcome.reason or "Triage model call failed"
+            tstore.restore_or_fail(
+                self.store, rec.failure, tid, sig, previous, reason, triage_trace=outcome.triage_trace,
+            )
+            raise Failed(reason)
+        except Failed:
+            raise
+        except Exception as exc:
+            log.exception("triage click failed unexpectedly for %s", tid[:12])
+            reason = f"Triage failed unexpectedly ({exc.__class__.__name__})"
+            try:
+                tstore.restore_or_fail(self.store, rec.failure, tid, sig, previous, reason)
+            except Exception:
+                log.exception("failed to restore triage state for %s", tid[:12])
+            raise Failed(reason) from None
+
+    def triage_click(self, trace_id: str, *, deep: bool = False) -> dict[str, Any]:
+        """Run on-click triage (or Look deeper when deep=True) for one failed run."""
+        found = self.store.trace(trace_id)
+        if found is None:
+            raise NotFound("No run with that id (or the prefix matches more than one)")
+        tid = str(found["run"]["trace_id"])
+        rec = tstore.load_failure(self.store, tid)
+        if rec is None:
+            raise Invalid("This run did not fail and does not need triage")
+        if rec.status in SKIPPED_STATUSES:
+            raise Invalid(f"Runs with status {rec.status!r} cannot be triaged")
+        if _aged_out(found):
+            raise Conflict("The output for this run has aged out")
+        if not deep:
+            fast = evaluate_fast(self.store, rec)
+            if fast is not None and fast.get("status") in ("done", "fixed_since"):
+                return fast
+        self._acquire(tid)
+        try:
+            return self._run_model_click(rec, tid)
+        finally:
+            self._release(tid)

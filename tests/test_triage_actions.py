@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+import pytest
 
 from conftest import SESSION_KEY, signed_in
 
@@ -41,7 +42,10 @@ def test_run_triage_feedback_is_owner_only_and_runbooks_are_read_only(tmp_path):
         agent = TestClient(app, base_url="http://127.0.0.1:8787")
 
         # get_trace and get_triage both return the verdict (and agent may read them)
-        assert user.get(f"/api/runs/{r.trace_id}").json()["triage"]["source"] == "rules"
+        trace_data = user.get(f"/api/runs/{r.trace_id}").json()
+        assert trace_data["triage"]["source"] == "rules"
+        assert trace_data["triage_available"] is True and trace_data["triage_unavailable_reason"] == ""
+        assert isinstance(trace_data["related_failures"], list)
         assert user.get(f"/api/runs/{r.trace_id}/triage").json()["verdict"]["category"] == "permissions"
         assert agent.get(f"/api/runs/{r.trace_id}/triage", auth=auth.AgentAuth(SESSION_KEY)).status_code == 200
 
@@ -282,5 +286,283 @@ def test_a_bug_in_triage_never_breaks_the_run_page(tmp_path, monkeypatch):
         assert run_resp.status_code == 200 and run_resp.json()["triage"] is None
         tri = user.get(f"/api/runs/{r.trace_id}/triage")
         assert tri.status_code == 200 and tri.json()["status"] is None
+    finally:
+        trace.configure(None)
+
+
+def test_triage_action_runs_model_on_click_refuses_demo_and_refuses_triage_actor(tmp_path, monkeypatch):
+    import threading
+    from fake_cli import FakeCli
+    from bosun.registry import ActionContext, Conflict, Forbidden, TRIAGE
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        with trace.run("upgrade", subject="brew:jq") as r:
+            r.fail("mystery exit 1")
+        fake = FakeCli(monkeypatch)
+        fake.reply(
+            "claude",
+            fake.claude_ok({
+                "category": "upstream_broken",
+                "cause": "Bottle missing.",
+                "confidence": "medium",
+                "evidence": [{"source": "trace", "ref": r.trace_id, "line": "mystery exit 1"}],
+                "next_step": {"kind": "retry", "recipe": None, "runbook": None, "why": "Try later."},
+                "needs_person": False,
+                "transient": True,
+            }),
+        )
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+        resp = user.post(f"/api/runs/{r.trace_id}/triage", json={"deep": True}, headers=H)
+        assert resp.status_code == 200 and resp.json()["source"] == "model"
+        assert resp.json()["verdict"]["category"] == "upstream_broken"
+        assert resp.json()["triage_trace"]
+
+        # Actor triage cannot call triage (Risk.LOCAL)
+        import pytest
+        with pytest.raises(Forbidden):
+            app.state.actions.call("triage", {"trace_id": r.trace_id}, ActionContext(actor=TRIAGE, surface="triage"))
+
+        # Aged-out failure (no spans, no job/fix output) is rejected with 409 Conflict
+        with trace.run("upgrade", subject="brew:rg") as old_run:
+            old_run.fail("old error")
+        with st._tx(write=True) as db:
+            db.execute("DELETE FROM spans WHERE trace_id = ?", (old_run.trace_id,))
+        aged = user.post(f"/api/runs/{old_run.trace_id}/triage", json={"deep": True}, headers=H)
+        assert aged.status_code == 409 and "aged out" in aged.json()["detail"].lower()
+
+        # Concurrent triage for the same run is rejected with Conflict
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_reply(_call):
+            started.set()
+            release.wait(5)
+            return fake.claude_ok({
+                "category": "upstream_broken", "cause": "Bottle missing.", "confidence": "medium",
+                "evidence": [{"source": "trace", "ref": r.trace_id, "line": "mystery exit 1"}],
+                "next_step": {"kind": "none", "recipe": None, "runbook": None, "why": "Done."},
+                "needs_person": False, "transient": False,
+            })
+
+        fake.reply("claude", slow_reply)
+        t = threading.Thread(target=lambda: app.state.triager.triage_click(r.trace_id, deep=True))
+        t.start()
+        assert started.wait(5)
+        try:
+            with pytest.raises(Conflict):
+                app.state.triager.triage_click(r.trace_id, deep=True)
+        finally:
+            release.set()
+            t.join(5)
+    finally:
+        trace.configure(None)
+
+
+def test_rules_dispute_survives_failed_model_click_and_wrong_click_during_running_job_survives(tmp_path, monkeypatch):
+    import threading
+    from fake_cli import FakeCli
+    from bosun.providers import accounts
+    from bosun.triage import worker
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        err1 = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq"
+        j1 = st.create_job("brew:jq", ["brew", "upgrade", "--formula", "jq"])
+        job1 = st.job(j1)
+        assert job1 is not None
+        with trace.run("upgrade", subject="brew:jq", trace_id=job1["trace_id"]) as r1:
+            with trace.span("subprocess", "brew", argv=["brew", "upgrade", "--formula", "jq"]) as sp:
+                sp.set(returncode=1, stderr_tail=err1)
+                sp.fail("exit 1")
+            r1.fail(err1)
+        st.finish_job(j1, "failed", err1)
+
+        monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/test/bin/claude"})
+        fake = FakeCli(monkeypatch)
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+
+        # Rules verdict created, then marked Wrong
+        first = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert first["source"] == "rules" and first["status"] == "done"
+        sig = first["signature"]
+        fb = user.post(f"/api/runs/{r1.trace_id}/triage/feedback", json={"feedback": "wrong"}, headers=H)
+        assert fb.status_code == 200 and tstore.is_rule_disputed(st, sig)
+
+        # Clicking Triage (deep=True) fails on the model, yet the rule dispute MUST remain active
+        fake.reply("claude", fake.bad_json("claude"))
+        failed_click = user.post(f"/api/runs/{r1.trace_id}/triage", json={"deep": True}, headers=H)
+        assert failed_click.status_code == 502
+        assert tstore.is_rule_disputed(st, sig)
+
+        # Sibling failure with the same signature must NOT be served the disputed rule
+        err2 = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/rg"
+        j2 = st.create_job("brew:rg", ["brew", "upgrade", "--formula", "rg"])
+        job2 = st.job(j2)
+        assert job2 is not None
+        with trace.run("upgrade", subject="brew:rg", trace_id=job2["trace_id"]) as r2:
+            with trace.span("subprocess", "brew", argv=["brew", "upgrade", "--formula", "rg"]) as sp2:
+                sp2.set(returncode=1, stderr_tail=err2)
+                sp2.fail("exit 1")
+            r2.fail(err2)
+        st.finish_job(j2, "failed", err2)
+        rec2 = tstore.load_failure(st, r2.trace_id)
+        assert rec2 is not None and worker.signature_of(rec2) == sig
+        assert worker.evaluate_fast(st, rec2) is None
+
+        # A "Wrong" click during a running model job must survive the job finishing
+        err3 = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/fd"
+        j3 = st.create_job("brew:fd", ["brew", "upgrade", "--formula", "fd"])
+        job3 = st.job(j3)
+        assert job3 is not None
+        with trace.run("upgrade", subject="brew:fd", trace_id=job3["trace_id"]) as r3:
+            with trace.span("subprocess", "brew", argv=["brew", "upgrade", "--formula", "fd"]) as sp3:
+                sp3.set(returncode=1, stderr_tail=err3)
+                sp3.fail("exit 1")
+            r3.fail(err3)
+        st.finish_job(j3, "failed", err3)
+        # Seed a rules verdict with a distinct signature so we test disputing during a running job
+        tstore.save_verdict(
+            st, f"job:{j3}", r3.trace_id, "sig-mid-run", "rules",
+            Verdict(
+                category="permissions", cause="Folder not writable.", confidence="high", evidence=[],
+                next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Fix."),
+                needs_person=True, transient=False,
+            ),
+        )
+        started, release = threading.Event(), threading.Event()
+
+        def mid_run_reply(_call):
+            started.set()
+            release.wait(5)
+            return fake.claude_ok({
+                "category": "upstream_broken", "cause": "Mirror failed.", "confidence": "medium",
+                "evidence": [{"source": "output", "ref": "", "line": err3}],
+                "next_step": {"kind": "retry", "recipe": None, "runbook": None, "why": "Try later."},
+                "needs_person": False, "transient": True,
+            })
+
+        fake.reply("claude", mid_run_reply)
+        result_box: list[dict] = []
+        t = threading.Thread(target=lambda: result_box.append(app.state.triager.triage_click(r3.trace_id, deep=True)))
+        t.start()
+        assert started.wait(5)
+        try:
+            mid_fb = user.post(f"/api/runs/{r3.trace_id}/triage/feedback", json={"feedback": "wrong"}, headers=H)
+            assert mid_fb.status_code == 200
+        finally:
+            release.set()
+            t.join(5)
+        assert result_box
+        final = tstore.get_by_trace(st, r3.trace_id)
+        assert final is not None
+        assert final["feedback"] == "wrong" and final["status"] == "disputed"
+        assert tstore.is_rule_disputed(st, final["signature"])
+    finally:
+        trace.configure(None)
+
+
+def test_unexpected_exception_and_failed_look_deeper_restore_verdict_and_return_502(tmp_path, monkeypatch):
+    from fake_cli import FakeCli
+    from bosun.providers import accounts
+    from bosun.triage import model as tmodel
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        err = "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq"
+        j1 = st.create_job("brew:jq", ["brew", "upgrade", "--formula", "jq"])
+        job1 = st.job(j1)
+        assert job1 is not None
+        with trace.run("upgrade", subject="brew:jq", trace_id=job1["trace_id"]) as r1:
+            with trace.span("subprocess", "brew", argv=["brew", "upgrade", "--formula", "jq"]) as sp:
+                sp.set(returncode=1, stderr_tail=err)
+                sp.fail("exit 1")
+            r1.fail(err)
+        st.finish_job(j1, "failed", err)
+
+        with trace.run("upgrade", subject="brew:mystery") as r2:
+            r2.fail("unplaced failure 12345")
+
+        monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/test/bin/claude"})
+        fake = FakeCli(monkeypatch)
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in(), raise_server_exceptions=False)
+
+        # Establish a rules verdict on r1
+        before = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert before["status"] == "done" and before["source"] == "rules"
+        assert before["verdict"]["category"] == "permissions"
+
+        # 1. Failed "Look deeper" (model returns bad JSON) restores the earlier rules verdict + records last_error
+        fake.reply("claude", fake.bad_json("claude"))
+        res = user.post(f"/api/runs/{r1.trace_id}/triage", json={"deep": True}, headers=H)
+        assert res.status_code == 502 and res.json()["detail"]
+        after = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert after["status"] == "done" and after["source"] == "rules"
+        assert after["verdict"]["category"] == "permissions"
+        assert after["last_error"]
+
+        # 2. Unexpected exception during "Look deeper" restores the earlier rules verdict and returns 502, not 500
+        def boom(*_a, **_k):
+            raise RuntimeError("disk hiccup")
+
+        monkeypatch.setattr(tmodel, "run_model", boom)
+        res_exc = user.post(f"/api/runs/{r1.trace_id}/triage", json={"deep": True}, headers=H)
+        assert res_exc.status_code == 502 and "RuntimeError" in res_exc.json()["detail"]
+        after_exc = user.get(f"/api/runs/{r1.trace_id}/triage").json()
+        assert after_exc["status"] == "done" and after_exc["source"] == "rules"
+        assert after_exc["verdict"]["category"] == "permissions"
+        assert "RuntimeError" in after_exc["last_error"]
+
+        # 3. Unexpected exception with no prior verdict marks the row failed (never left 'running') and returns 502
+        res_none = user.post(f"/api/runs/{r2.trace_id}/triage", json={"deep": True}, headers=H)
+        assert res_none.status_code == 502
+        row2 = tstore.get_by_trace(st, r2.trace_id)
+        assert row2 is not None and row2["status"] == "failed" and row2["last_error"]
+    finally:
+        trace.configure(None)
+
+
+@pytest.mark.real_contract
+def test_get_trace_and_get_triage_never_run_cli_subprocess_synchronously(tmp_path, monkeypatch):
+    from bosun import proc
+    from bosun.providers import accounts, contract
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        with trace.run("upgrade", subject="brew:jq") as r:
+            r.fail("mystery exit 1")
+
+        monkeypatch.setattr(contract, "_versions", {})
+        monkeypatch.setattr(accounts, "installed", lambda: {"claude": "/bin/claude", "codex": "/bin/codex"})
+
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+
+        proc_calls: list[tuple] = []
+
+        def forbid_proc(*a, **_kw):
+            proc_calls.append(a)
+            raise AssertionError(f"page load must never call proc.run synchronously: {a}")
+
+        scheduled: list[list[tuple[str, str]]] = []
+        monkeypatch.setattr(proc, "run", forbid_proc)
+        monkeypatch.setattr(contract, "refresh_async", lambda _s, targets, **_kw: scheduled.append(list(targets)))
+
+        # Cold cache: GET /api/runs/{id} and GET /api/runs/{id}/triage must never run proc.run; they queue refresh_async
+        resp = user.get(f"/api/runs/{r.trace_id}")
+        assert resp.status_code == 200 and resp.json()["triage_available"] is True
+        assert proc_calls == []
+        assert scheduled and ("claude", "/bin/claude") in scheduled[0]
+
+        resp2 = user.get(f"/api/runs/{r.trace_id}/triage")
+        assert resp2.status_code == 200 and resp2.json()["triage_available"] is True
+        assert proc_calls == []
     finally:
         trace.configure(None)

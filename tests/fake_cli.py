@@ -27,6 +27,7 @@ class RecordedCall:
     env: Mapping[str, str] | None
     unset: tuple[str, ...]
     timeout: float
+    kill_group: bool = False
 
 
 def _provider_of(argv: Sequence[str]) -> str | None:
@@ -52,13 +53,14 @@ class FakeCli:
 
     def _dispatch(self, argv: list[str] | tuple[str, ...], timeout: float = 300, cwd: str | None = None,
                   stdin: str | None = None, env: dict[str, str] | None = None, private: tuple[int, ...] = (),
-                  ok_codes: tuple[int, ...] = (0,), unset: tuple[str, ...] = ()) -> proc.Result:
+                  ok_codes: tuple[int, ...] = (0,), unset: tuple[str, ...] = (), *,
+                  kill_group: bool = False) -> proc.Result:
         provider = _provider_of(argv)
         if provider is None:
             return self._real(argv, timeout=timeout, cwd=cwd, stdin=stdin, env=env,
-                              private=private, ok_codes=ok_codes, unset=unset)
+                              private=private, ok_codes=ok_codes, unset=unset, kill_group=kill_group)
         rec = RecordedCall(provider, tuple(argv), cwd, stdin, dict(env) if env is not None else None,
-                           tuple(unset), timeout)
+                           tuple(unset), timeout, kill_group=kill_group)
         self.calls.append(rec)
         q = self._queues.get(provider)
         if not q:

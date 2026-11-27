@@ -35,7 +35,7 @@ _TOKENS = [
     r"secret_[A-Za-z0-9]{43}", r"ntn_[A-Za-z0-9]{40,}",  # Notion
     r"lin_api_[A-Za-z0-9]{40}",  # Linear
     r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",  # JWT
-    r"bsn_(?:at|rk)_[A-Za-z0-9_-]{20,}",  # Bosun per-turn assistant MCP token and its reply key
+    r"bsn_(?:at|rk|tt|tr)_[A-Za-z0-9_-]{20,}",  # Bosun per-turn assistant/triage MCP tokens and reply keys
 ]
 _TOKEN_RE = re.compile("|".join(f"(?:{p})" for p in _TOKENS))
 _PEM_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)

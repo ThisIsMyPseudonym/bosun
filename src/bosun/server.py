@@ -48,11 +48,11 @@ from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
                        NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TriageFeedbackIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+                       TraceIn, TriageFeedbackIn, TriageIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
-from .triage import store as tstore, worker as tworker
+from .triage import model as tmodel, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -77,6 +77,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     icon_dir = store.path.parent  # app icons read from this machine are cached beside the database
     sessions = auth.Sessions(session_key or auth.load_key(s.data_dir))
     assistant_tokens = auth.AssistantTokens()
+    triage_tokens = auth.TriageTokens()
     cookie = auth.cookie_name(s.port)
     refresh_file_lock = lock.FileLock(store.path.parent / "refresh.lock")
     # with a `bosun refresh` running on its own, only what no process is doing any more: some may be its own
@@ -153,6 +154,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             response = RedirectResponse("/", status_code=303)
             response.set_cookie(cookie, value, max_age=auth.COOKIE_MAX_AGE_S, httponly=True, samesite="strict", path="/")
             return response
+        triage_token = request.headers.get(auth.TRIAGE_TOKEN_HEADER)
+        if triage_token is not None and not path.startswith(OPEN_PATHS):
+            return _refuse_triage(request, triage_token)
         assistant_token = request.headers.get(auth.ASSISTANT_TOKEN_HEADER)
         if assistant_token is not None and not path.startswith(OPEN_PATHS):
             return _refuse_assistant(request, assistant_token)
@@ -227,6 +231,34 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         request.state.actor, request.state.surface = registry.ASSISTANT, "assistant"
         request.state.assistant_grant = grant
         request.state.assistant_token = assistant_token
+        return None
+
+    def _refuse_triage(request: Request, triage_token: str) -> Response | None:
+        """A read-only error triage MCP call (`bosun mcp --as triage`): per-job token in header, 8-call cap."""
+        if request.headers.get("origin") is not None or request.headers.get("sec-fetch-site") is not None:
+            return JSONResponse({"error": "triage requests must not come from a browser"}, status_code=403)
+        if request.headers.get("authorization") is not None or request.headers.get(auth.ASSISTANT_TOKEN_HEADER) is not None:
+            return JSONResponse({"error": "conflicting credentials"}, status_code=403)
+        if triage_tokens.verify(triage_token) is None:
+            return JSONResponse({"error": "invalid or expired triage token"}, status_code=401)
+        raw = request.scope.get("raw_path") or request.url.path.encode()
+        target = raw.decode("ascii", "replace") + (f"?{request.scope['query_string'].decode('ascii', 'replace')}"
+                                                   if request.scope.get("query_string") else "")
+        request.state.reply_proof = auth.triage_reply_proof(triage_tokens.reply_key(triage_token),
+                                                            request.method, target)
+        path = request.url.path
+        if not path.startswith("/api/") or path == "/api/state":
+            return JSONResponse({"error": "triage can only call read-only actions"}, status_code=403)
+        if path.startswith(("/api/assistant", "/api/icon", "/api/terminal")):
+            return JSONResponse({"error": "this panel route is not open to triage"}, status_code=403)
+        grant = triage_tokens.consume_call(triage_token)
+        if grant is None:
+            return JSONResponse(
+                {"error": "Triage tool-call limit reached. Stop calling tools and emit your JSON verdict now."},
+                status_code=429,
+            )
+        request.state.actor, request.state.surface = registry.TRIAGE, "triage"
+        request.state.triage_grant = grant
         return None
 
     @app.middleware("http")
@@ -393,6 +425,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     app.state.actions = actions  # the in-process surface (the assistant) calls these directly
     assistant = Assistant(store, s, actions, approvals, tokens=assistant_tokens)
     app.state.assistant, app.state.approvals, app.state.assistant_tokens = assistant, approvals, assistant_tokens
+    triager = tworker.Triager(store, s, triage_tokens)
+    app.state.triage_tokens, app.state.triager = triage_tokens, triager
     app.state.terminals, app.state.upgrader = terminals, upgrader
     if store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")
@@ -938,33 +972,67 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         return store.runs(limit=body.limit, kind=body.kind, status=body.status, subject=body.subject,
                           before=body.before)
 
+    def _triage_availability() -> tuple[bool, str]:
+        if s.demo:
+            return False, "Model triage is off in demo mode"
+        try:
+            return tmodel.availability(store, cached_only=True)
+        except Exception:  # noqa: BLE001 - never break the run page
+            log.exception("triage availability check failed")
+            return False, "Model triage availability could not be checked"
+
+    def _check_triage_trace(ctx: ActionContext, requested: str) -> None:
+        if ctx.actor == registry.TRIAGE and (not ctx.triage_trace_id or not ctx.triage_trace_id.startswith(requested)):
+            raise registry.Forbidden("triage token is bound to a different run")
+
+    def _verify_triage_trace(ctx: ActionContext, resolved: str) -> None:
+        if ctx.actor == registry.TRIAGE and resolved != ctx.triage_trace_id:
+            raise registry.Forbidden("triage token is bound to a different run")
+
     @actions.bind("get_trace")
     def get_trace(ctx: ActionContext, body: TraceIn):
+        _check_triage_trace(ctx, body.trace_id)
         found = store.trace(body.trace_id)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
         tid = found["run"]["trace_id"]
+        _verify_triage_trace(ctx, tid)
+        avail, reason = _triage_availability()
         return {
             **found,
             "tree": diagnose.span_tree(found["spans"]),
             "failures": diagnose.failures(found["spans"]),
+            "related_failures": diagnose.related(store, found["run"]),
             "triage": _triage_or_none(tid),
+            "triage_available": avail,
+            "triage_unavailable_reason": reason,
         }
 
     @actions.bind("diagnose")
     def diagnose_run(ctx: ActionContext, body: DiagnoseIn):
-        found = diagnose.bundle(store, s, body.trace_id, facts=body.facts)
+        _check_triage_trace(ctx, body.trace_id)
+        facts = False if ctx.actor == registry.TRIAGE else body.facts
+        found = diagnose.bundle(store, s, body.trace_id, facts=facts)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
+        _verify_triage_trace(ctx, str((found.get("run") or {}).get("trace_id") or ""))
         return found
 
     @actions.bind("get_triage")
     def get_triage(ctx: ActionContext, body: TraceIn):
+        _check_triage_trace(ctx, body.trace_id)
         found = store.trace(body.trace_id)
         if found is None:
             raise NotFound("No run with that id (or the prefix matches more than one)")
         tid = found["run"]["trace_id"]
-        return _triage_or_none(tid) or {"trace_id": tid, "status": None, "verdict": None}
+        _verify_triage_trace(ctx, tid)
+        avail, reason = _triage_availability()
+        base = _triage_or_none(tid) or {"trace_id": tid, "status": None, "verdict": None}
+        return {**base, "triage_available": avail, "triage_unavailable_reason": reason}
+
+    @actions.bind("triage")
+    def run_triage(ctx: ActionContext, body: TriageIn):
+        return triager.triage_click(body.trace_id, deep=body.deep)
 
     def _triage_or_none(tid: str) -> dict | None:
         """A run's verdict, worked out on first read. Triage is advice: a bug in it never breaks the run page."""
@@ -1107,7 +1175,12 @@ def _endpoint(actions: Actions, spec: ActionSpec, assistant: Assistant | None = 
             headers = {TRACE_HEADER: tid} if tid else None
             return JSONResponse(jsonable_encoder(result), status_code=spec.status_code, headers=headers)
         # the guard (create_app's _refuse_agent) names an agent; anyone else it let through is you, in the browser
-        ctx = ActionContext(actor=getattr(request.state, "actor", "user"), surface=getattr(request.state, "surface", "http"))
+        triage_grant = getattr(request.state, "triage_grant", None)
+        ctx = ActionContext(
+            actor=getattr(request.state, "actor", "user"),
+            surface=getattr(request.state, "surface", "http"),
+            triage_trace_id=triage_grant.trace_id if triage_grant is not None else None,
+        )
         # an action that changes something is a run: say which, so whoever asked can follow it (wait_run, the Runs page)
         headers = {TRACE_HEADER: ctx.trace_id} if spec.risk != Risk.READ else None
         try:  # handlers block (subprocesses, Claude): keep them off the event loop, as plain `def` routes were

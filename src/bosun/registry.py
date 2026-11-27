@@ -168,6 +168,10 @@ class TraceIn(_In):
                           description="A trace id, or a unique prefix of one (the log shows the first 8 characters)")
 
 
+class TriageIn(TraceIn):
+    deep: bool = Field(default=False, description="Look deeper: skip rules and cache and ask an AI model directly")
+
+
 class TriageFeedbackIn(TraceIn):
     feedback: Literal["helpful", "wrong"] = Field(description="Whether Bosun's triage verdict was helpful or wrong")
 
@@ -349,6 +353,8 @@ SPECS: dict[str, ActionSpec] = _specs(
                "/api/runs/{trace_id}/diagnose"),
     ActionSpec("get_triage", "Error triage verdict for one run, if one has been recorded",
                Risk.READ, TraceIn, "GET", "/api/runs/{trace_id}/triage"),
+    ActionSpec("triage", "Ask an AI model to diagnose a failed run (skips rules and cache when deep=true)",
+               Risk.LOCAL, TriageIn, "POST", "/api/runs/{trace_id}/triage", user_only=True),
     ActionSpec("triage_feedback", "Mark a triage verdict as helpful or wrong (removes wrong verdicts from the cache)",
                Risk.LOCAL, TriageFeedbackIn, "POST", "/api/runs/{trace_id}/triage/feedback", user_only=True),
     ActionSpec("get_runbook", "Read one Bosun troubleshooting runbook by topic name",
@@ -480,10 +486,12 @@ AGENT_TIER_WORDS = {Risk.SYSTEM: "quit and reopen apps and open system updaters"
 
 
 ASSISTANT = "assistant"  # the built-in Ask Bosun assistant (assistant.py)
+TRIAGE = "triage"  # read-only error triage worker (triage/model.py)
+TRIAGE_ALLOWED_ACTIONS = frozenset({"diagnose", "get_trace", "get_triage", "get_runbook"})
 
 # What `bosun demo` refuses, besides everything that installs, upgrades, pins, fixes, quits, opens or restores
 # (Risk.INSTALL and above): the small actions that would look at, or run something on, the real computer.
-DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "discard_fix", "watch_app", "check_app",
+DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "triage", "discard_fix", "watch_app", "check_app",
                           "assistant_ask", "terminal_input", "terminal_stop",
                           "ai_logins", "add_ai_login", "set_ai_login",
                           "ai_routing", "set_ai_routing", "set_quota_override"})
@@ -524,6 +532,8 @@ class ActionContext:
     # The id of a one-call approval the user gave in the Ask Bosun panel. Only permit reads it, and it checks it
     # against the approvals the server holds: naming an id that isn't there, or is for another call, gets nothing.
     approval: str | None = None
+    # For actor == TRIAGE: the single failed run's trace_id bound to the per-job triage token.
+    triage_trace_id: str | None = None
 
 
 Handler = Callable[[ActionContext, Any], Any]
@@ -583,6 +593,10 @@ class Actions:
                                 "until the user turns that on in the dashboard (AI usage, Agents). Ask the user to do "
                                 "this step themselves, or to turn the switch on")
             return None
+        if ctx.actor == TRIAGE:
+            if spec.risk == Risk.READ and spec.name in TRIAGE_ALLOWED_ACTIONS:
+                return None
+            raise Forbidden(f"{spec.name} is refused for triage: triage may only read this run and Bosun runbooks")
         if ctx.actor == ASSISTANT:
             if spec.risk == Risk.READ:
                 return None

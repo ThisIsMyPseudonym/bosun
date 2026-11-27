@@ -144,12 +144,15 @@ TABLES: dict[str, str] = {
                      "reading past `resets_at`, or undated and a week old, says nothing about now.",
     "triage": "One error-triage verdict per failed job, fix or run: cause, confidence, evidence and suggested next step. "
               "Kept for a year.",
+    "triage_disputed_rules": "Failure signatures whose deterministic rules verdict the user marked wrong, so later "
+                             "runs skip that rule even after a model triage attempt.",
 }
 
 # for columns the schema has no comment on (tables from before comments were written)
 NOTES: dict[str, dict[str, str]] = {
     "snapshots": {"errors": "JSON list of what failed in that refresh.",
                   "meta": "JSON: `projects` (key, name, path, last commit) and `lanes` (items per lane)."},
+    "triage": {"last_error": "Redacted error from the latest failed model triage attempt (empty when none)."},
     "jobs": {"item_key": "The item, or relaunch:<app>.", "status": "waiting, queued, running, succeeded, failed, "
              "cancelled, abandoned.", "trace_id": "The run that did the work.",
              "parent_trace": "The run that asked for it.", "actor": "Who asked for it."},

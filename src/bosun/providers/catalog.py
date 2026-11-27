@@ -69,6 +69,7 @@ class ProviderSpec:
     lockdown_features: tuple[str, ...] = ()  # feature names passed to --disable; a version lacking one fails closed
     fixer_flags: tuple[str, ...] = ()  # flags used only by the fixer, kept separate so one-shots aren't blocked
     mcp_flags: tuple[str, ...] = ()  # extra flags used by CliMcpEngine, checked beside lockdown_flags
+    restricted_flags: tuple[str, ...] = ()  # extra flags used by MCP assistant and triage paths (e.g. --restricted)
     # The login is tied to the exact home_env string, so home_env set to the default folder is a second login beside
     # the unset default (Claude Code: this Mac's two accounts share ~/.claude that way).
     home_string_is_login: bool = False
@@ -80,7 +81,8 @@ CLAUDE_FLAGS = ("-p", "--tools", "--disallowedTools", "--strict-mcp-config", "--
                 "--json-schema", "--output-format", "--verbose", "--disable-slash-commands", "--permission-mode",
                 "--model", "--system-prompt")
 CLAUDE_FIXER_FLAGS = ("--restricted", "--permission-prompts")
-CLAUDE_MCP_FLAGS = ("--mcp-config", "--allowedTools", "--include-partial-messages")  # --restricted: CLAUDE_FIXER_FLAGS
+CLAUDE_MCP_FLAGS = ("--mcp-config", "--allowedTools", "--include-partial-messages")
+CLAUDE_RESTRICTED_FLAGS = ("--restricted",)
 CODEX_DISABLED_FEATURES = ("shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "plugins",
                            "in_app_browser", "browser_use_external", "multi_agent", "view_image", "image_generation",
                            "hooks", "skill_search", "remote_plugin", "tool_suggest", "memories")
@@ -115,7 +117,7 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
                  ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
                   "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"), "~/.claude",
                  "haiku", "sonnet", "output", ("api.anthropic.com",), fixer_flags=CLAUDE_FIXER_FLAGS,
-                 mcp_flags=CLAUDE_MCP_FLAGS, home_string_is_login=True),
+                 mcp_flags=CLAUDE_MCP_FLAGS, restricted_flags=CLAUDE_RESTRICTED_FLAGS, home_string_is_login=True),
     ProviderSpec("codex", "Codex", "codex", frozenset({C.TEXT, C.JSON, C.SANDBOXED_AGENT, C.MCP, C.VISION}),
                  EXEC_HELP, CODEX_FLAGS, "CODEX_HOME", ("CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"),
                  "~/.codex", "gpt-5.6-luna", "gpt-5.6-terra", "output", ("chatgpt.com", "api.openai.com"),
@@ -148,6 +150,16 @@ CATALOG: Mapping[str, ProviderSpec] = _catalog(
 def spec(provider: str) -> ProviderSpec:
     """One CLI's spec. An unknown provider is a programming error, not input: KeyError."""
     return CATALOG[provider]
+
+
+def extra_flags_for(provider: str, job: str) -> tuple[str, ...]:
+    """Extra contract flags required by a specific job path (triage/assistant MCP or fixer)."""
+    s = spec(provider)
+    if job in ("triage", "assistant"):
+        return s.restricted_flags
+    if job == "fix":
+        return s.fixer_flags
+    return ()
 
 
 def effective_capabilities(s: ProviderSpec, *, jail_ok: bool | None = None) -> frozenset[Capability]:

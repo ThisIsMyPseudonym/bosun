@@ -262,6 +262,91 @@ def build_mcp(provider: str, *, binary: str, model: str, system: str, prompt: st
                            reply_key))
 
 
+# --- MCP triage calls (read-only, structured JSON verdict) -------------------------------------------------------
+
+TRIAGE_TOOL_TIMEOUT_MS = 60_000
+
+
+@dataclass(frozen=True)
+class TriageMcpCall:
+    binary: str
+    model: str
+    schema: Mapping[str, Any]
+    system: str
+    prompt: str
+    workdir: Path
+    port: int
+    token: str
+    tool_names: tuple[str, ...]
+    timeout_ms: int = TRIAGE_TOOL_TIMEOUT_MS
+    reply_key: str = ""
+
+
+def _triage_mcp_cmd(port: int) -> tuple[str, tuple[str, ...]]:
+    return sys.executable, ("-m", "bosun.cli", "mcp", "--as", "triage", "--port", str(port))
+
+
+def _triage_env(c: TriageMcpCall) -> dict[str, str]:
+    """Per-job triage token and reply key, kept strictly in the child environment."""
+    return {auth.TRIAGE_TOKEN_ENV: c.token, **({auth.TRIAGE_REPLY_KEY_ENV: c.reply_key} if c.reply_key else {})}
+
+
+def _claude_triage_mcp(c: TriageMcpCall) -> Invocation:
+    cmd, cmd_args = _triage_mcp_cmd(c.port)
+    cfg = _write(c.workdir, "mcp-config.json",
+                 json.dumps({"mcpServers": {SERVER: {"command": cmd, "args": list(cmd_args)}}}, separators=(",", ":")))
+    allowed = ",".join(f"{PREFIX}{name}" for name in c.tool_names)
+    a = (c.binary, "-p", "--restricted",
+         "--output-format", "stream-json", "--verbose",
+         "--json-schema", _compact(c.schema),
+         "--tools", "",
+         "--disallowedTools", "WebSearch,WebFetch,Bash",
+         "--allowedTools", allowed,
+         "--mcp-config", str(cfg),
+         "--strict-mcp-config",
+         "--setting-sources", "",
+         "--no-session-persistence",
+         "--disable-slash-commands",
+         "--permission-mode", "dontAsk",
+         *_model("--model", c.model),
+         "--system-prompt", c.system)
+    env = {"MCP_TOOL_TIMEOUT": str(c.timeout_ms), "ENABLE_TOOL_SEARCH": "false", **_triage_env(c)}
+    return Invocation(a, c.prompt, env, files=(cfg,))
+
+
+def _codex_triage_mcp(c: TriageMcpCall) -> Invocation:
+    cmd, cmd_args = _triage_mcp_cmd(c.port)
+    schema = _write(c.workdir, "schema.json", _compact(c.schema))
+    triage_env = _triage_env(c)
+    timeout_sec = max(1, int(c.timeout_ms // 1000))
+    mcp_cfg = (
+        "-c", f"mcp_servers.{SERVER}.command={json.dumps(cmd)}",
+        "-c", f"mcp_servers.{SERVER}.args={json.dumps(list(cmd_args))}",
+        "-c", f"mcp_servers.{SERVER}.env_vars={json.dumps(list(triage_env))}",
+        "-c", f"mcp_servers.{SERVER}.tool_timeout_sec={timeout_sec}",
+    )
+    a = (c.binary, "exec", "--json", *CODEX_NO_TOOLS, "--output-schema", str(schema), *mcp_cfg,
+         *_model("-m", c.model), "-")
+    return Invocation(a, with_system(c.system, c.prompt), triage_env, files=(schema,))
+
+
+TRIAGE_MCP_BUILDERS: Mapping[str, Callable[[TriageMcpCall], Invocation]] = {
+    "claude": _claude_triage_mcp,
+    "codex": _codex_triage_mcp,
+}
+
+
+def build_triage_mcp(provider: str, *, binary: str, model: str, schema: Mapping[str, Any], system: str, prompt: str,
+                     workdir: Path, port: int, token: str, tool_names: Sequence[str] = (),
+                     timeout_ms: int = TRIAGE_TOOL_TIMEOUT_MS, reply_key: str = "") -> Invocation:
+    """Build one locked-down read-only MCP triage invocation for `provider`."""
+    builder = TRIAGE_MCP_BUILDERS.get(provider)
+    if builder is None:
+        raise ValueError(f"no triage MCP argv builder for {provider!r}")
+    return builder(TriageMcpCall(binary, model, schema, system, prompt, Path(workdir), port, token, tuple(tool_names),
+                                 timeout_ms, reply_key))
+
+
 # --- Jailed fixer calls (phase 7) --------------------------------------------------------------------------------
 
 

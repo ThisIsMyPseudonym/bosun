@@ -196,3 +196,25 @@ def test_corrupt_or_invalid_verdict_rows_are_treated_as_missing_on_read(tmp_path
     valid_id = tstore.save_verdict(st, "job:good", "tgood", "sig-bad", "model", _verdict(), now=1_000_010.0)
     found = tstore.find_cached(st, "sig-bad", now=1_000_100.0)
     assert found is not None and found["id"] == valid_id
+
+
+def test_save_verdict_overwrite_keeps_user_feedback_until_user_acts_again(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    tstore.save_verdict(st, "job:50", "t50", "sig-fb", "rules", _verdict("Rules cause."), now=100.0)
+    tstore.set_feedback(st, "job:50", "wrong", now=110.0)
+    assert tstore.get(st, "job:50")["feedback"] == "wrong"
+    assert tstore.get(st, "job:50")["feedback_ts"] == 110.0
+
+    # Overwriting with a new verdict for the same signature keeps user feedback and disputed status
+    tstore.save_verdict(st, "job:50", "t50", "sig-fb", "model", _verdict("Model cause."), now=120.0)
+    after = tstore.get(st, "job:50")
+    assert after is not None
+    assert after["verdict"]["cause"] == "Model cause."
+    assert after["feedback"] == "wrong" and after["feedback_ts"] == 110.0
+    assert after["status"] == "disputed"
+
+    # Only when the user acts again does feedback change
+    updated = tstore.set_feedback(st, "job:50", "helpful", now=130.0)
+    assert updated is not None
+    assert updated["feedback"] == "helpful" and updated["feedback_ts"] == 130.0
+    assert updated["status"] == "done"
