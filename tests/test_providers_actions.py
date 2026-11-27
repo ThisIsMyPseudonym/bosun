@@ -1,5 +1,7 @@
 """The owner adds, excludes and lists AI logins through the dashboard; agents and the assistant cannot."""
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -7,7 +9,8 @@ from conftest import SESSION_KEY, signed_in
 
 from bosun import auth
 from bosun.config import load_settings
-from bosun.providers import accounts
+from bosun.providers import accounts, ledger, windows
+from bosun.registry import ActionContext, Forbidden
 from bosun.server import create_app
 from bosun.store import Store
 
@@ -157,3 +160,110 @@ def test_login_folders_under_home_are_returned_with_tilde(client, tmp_path, monk
     assert listed["home"] == "~/.claude-work"
     toggled = client.post("/api/ai/logins/claude/work", json={"excluded": True}, headers=H)
     assert toggled.status_code == 200 and toggled.json()["home"] == "~/.claude-work"
+
+
+def test_routing_and_the_override_are_the_owners_alone(app, client, agent_client):
+    # Default read works for both owner and agent
+    got = client.get("/api/ai/routing").json()
+    assert got == {"mode": "default", "order": [], "pins": {"fix": "claude"}, "job_modes": {}, "overrides": []}
+    assert agent_client.get("/api/ai/routing", auth=AGENT).status_code == 200
+
+    # Agent and assistant are refused writes (403 / Forbidden)
+    assert agent_client.post("/api/ai/routing", json={"mode": "balance"}, auth=AGENT).status_code == 403
+    assert agent_client.post("/api/ai/override", json={"bucket": "claude", "on": True}, auth=AGENT).status_code == 403
+    with pytest.raises(Forbidden):
+        app.state.actions.call("set_ai_routing", {"mode": "balance"}, ActionContext(actor="assistant", surface="assistant"))
+    with pytest.raises(Forbidden):
+        app.state.actions.call("set_quota_override", {"bucket": "claude", "on": True},
+                               ActionContext(actor="assistant", surface="assistant"))
+
+    # Owner sets balance, order, pin and per-job mode -> read back
+    r = client.post("/api/ai/routing", json={"mode": "balance", "order": ["codex", "claude"],
+                                             "pins": {"summarize": "codex"}, "job_modes": {"explain": "default"}},
+                    headers=H)
+    assert r.status_code == 200
+    assert r.json() == {"mode": "balance", "order": ["codex", "claude"],
+                        "pins": {"fix": "claude", "summarize": "codex"},
+                        "job_modes": {"explain": "default"}, "overrides": []}
+    assert client.get("/api/ai/routing").json() == r.json()
+
+    # Unpinning fix stays unpinned across a later mode update
+    assert client.post("/api/ai/routing", json={"pins": {"fix": None}}, headers=H).json()["pins"] == {"summarize": "codex"}
+    assert client.post("/api/ai/routing", json={"mode": "default"}, headers=H).json()["pins"] == {"summarize": "codex"}
+
+    # Override ends at the hit window's reset, or 24h when undated; on=False clears it
+    now = time.time()
+    reset = now + 3600
+    ledger.save(app.store, "claude", (windows.Reading("five_hour", "allowed", 0.82, reset, now),), now=now)
+    ov = client.post("/api/ai/override", json={"bucket": "claude", "on": True}, headers=H)
+    assert ov.status_code == 200 and ov.json()["on"] is True and ov.json()["until"] == pytest.approx(reset, abs=1.0)
+    # Nothing held back on codex (no window at the line): refused, never a blanket 24 h
+    assert client.post("/api/ai/override", json={"bucket": "codex", "on": True}, headers=H).status_code == 400
+    ledger.save(app.store, "codex", (windows.Reading("five_hour", "allowed", 0.9, None, now),), now=now)
+    undated = client.post("/api/ai/override", json={"bucket": "codex", "on": True}, headers=H)
+    assert undated.status_code == 200 and undated.json()["until"] == pytest.approx(now + 86400, abs=5.0)
+    assert len(client.get("/api/ai/routing").json()["overrides"]) == 2
+    cleared = client.post("/api/ai/override", json={"bucket": "claude", "on": False}, headers=H)
+    assert cleared.status_code == 200 and cleared.json() == {"bucket": "claude", "on": False, "until": None, "windows": {}}
+    assert [o["bucket"] for o in client.get("/api/ai/routing").json()["overrides"]] == ["codex"]
+
+
+def test_bad_routing_or_override_input_is_refused(client):
+    assert client.post("/api/ai/routing", json={"order": ["claude@missing"]}, headers=H).status_code == 400
+    assert client.post("/api/ai/routing", json={"pins": {"nope": "claude"}}, headers=H).status_code == 400
+    assert client.post("/api/ai/routing", json={"pins": {"summarize": "claude@missing"}}, headers=H).status_code == 400
+    assert client.post("/api/ai/routing", json={"job_modes": {"summarize": "chaos"}}, headers=H).status_code == 400
+    assert client.post("/api/ai/routing", json={"job_modes": {"summarize": "pinned:claude@missing"}},
+                       headers=H).status_code == 400
+    assert client.post("/api/ai/override", json={"bucket": "claude@missing", "on": True}, headers=H).status_code == 400
+
+
+def test_routing_and_override_writes_refuse_read_only_store(tmp_path):
+    from bosun.providers import routing
+
+    db_path = tmp_path / "db.sqlite"
+    from bosun.registry import Conflict
+
+    now = 1_800_000_000.0
+    with Store(db_path) as rw:
+        routing.update(rw, mode="balance")
+        ledger.save(rw, "claude", (windows.Reading("five_hour", "allowed", 0.8, now + 3600, now),), now=now)
+        routing.set_override(rw, "claude", True, now=now)
+    with Store(db_path, read_only=True) as ro:
+        assert routing.overview(ro, now=now)["mode"] == "balance"
+        assert len(routing.overrides(ro, now=now)) == 1
+        with pytest.raises(Conflict, match="read-only"):
+            routing.update(ro, mode="default")
+        with pytest.raises(Conflict, match="read-only"):
+            routing.set_override(ro, "claude", False, now=now)
+
+
+def test_malformed_or_far_future_overrides_are_dropped_and_each_window_ends_at_its_own_reset(tmp_path):
+    import json
+
+    from bosun.providers import routing
+
+    now = 1_800_000_000.0
+    with Store(tmp_path / "db.sqlite") as s:
+        s.set_setting(routing.OVERRIDES_SETTING, json.dumps({
+            "claude": {"five_hour": now + 1e9},     # far future: dropped
+            "claude@work": {"five_hour": now + 25 * 86400},  # longer than a 5-hour window could last: dropped
+            "codex": {"five_hour": True},           # bool: dropped
+            "gemini": {"five_hour": now - 10},      # expired: dropped
+            "../x": {"five_hour": now + 3600},      # bad bucket: dropped
+            "muse": now + 3600,                     # old shape with no window: dropped
+            "grok": {"five_hour": now + 3600, "bad window!": now + 60},  # valid window kept, bad one dropped
+        }))
+        assert [(o.bucket, o.window) for o in routing.overrides(s, now=now)] == [("grok", "five_hour")]
+        s.set_setting(routing.OVERRIDES_SETTING, "{not json")
+        assert routing.overrides(s, now=now) == ()
+        ledger.save(s, "claude", (
+            windows.Reading("five_hour", "allowed", 0.80, now + 3600, now),
+            windows.Reading("seven_day", "allowed", 0.78, now + 3 * 86400, now),
+            windows.Reading("seven_day_opus", "allowed", 0.10, now + 3 * 86400, now),  # under the line: not lifted
+        ), now=now)
+        res = routing.set_override(s, "claude", True, now=now)
+        assert res["until"] == now + 3 * 86400
+        assert res["windows"] == {"five_hour": now + 3600, "seven_day": now + 3 * 86400}
+        assert sorted((o.window, o.until) for o in routing.overrides(s, now=now)) == [
+            ("five_hour", now + 3600), ("seven_day", now + 3 * 86400)]

@@ -209,6 +209,25 @@ class AiLoginSetIn(_In):
     excluded: bool = Field(description="True: Bosun never routes a job to this login")
 
 
+_AI_BUCKET = r"^[a-z]{2,20}(?:@[a-z][a-z0-9-]{1,19})?$"
+
+
+class AiRoutingIn(_In):
+    mode: Literal["default", "balance"] | None = Field(
+        None, description="How Bosun picks a login: default (your order) or balance (furthest behind pace)")
+    order: list[str] | None = Field(
+        None, max_length=64, description="Preference order of login buckets (e.g. ['codex', 'claude'])")
+    pins: dict[str, str | None] | None = Field(
+        None, description="Job -> login bucket to pin it to, or null to unpin")
+    job_modes: dict[str, str | None] | None = Field(
+        None, description="Per-job mode override: default, balance, pinned:<bucket>, or null to clear")
+
+
+class AiOverrideIn(_In):
+    bucket: str = Field(pattern=_AI_BUCKET, description="Login bucket (e.g. claude or claude@work)")
+    on: bool = Field(description="True: let background work past 75% until the window resets; False: clear")
+
+
 class DiagnoseIn(TraceIn):
     facts: bool = Field(True, description="Include machine facts and tool versions (runs a few --version commands)")
 
@@ -356,6 +375,12 @@ SPECS: dict[str, ActionSpec] = _specs(
                Risk.LOCAL, AiLoginIn, "POST", "/api/ai/logins", user_only=True),
     ActionSpec("set_ai_login", "Exclude an AI login from Bosun's jobs, or bring it back",
                Risk.LOCAL, AiLoginSetIn, "POST", "/api/ai/logins/{provider}/{id}", user_only=True),
+    ActionSpec("ai_routing", "How Bosun picks an AI login: default order or balance by pace, per-job pins, and "
+               "active 75% line overrides", Risk.READ, Empty, "GET", "/api/ai/routing"),
+    ActionSpec("set_ai_routing", "Set AI routing mode (default or balance), login preference order, and per-job pins",
+               Risk.LOCAL, AiRoutingIn, "POST", "/api/ai/routing", user_only=True),
+    ActionSpec("set_quota_override", "Let background AI work go past the 75% line on one login until its window "
+               "resets, or clear that override", Risk.LOCAL, AiOverrideIn, "POST", "/api/ai/override", user_only=True),
     ActionSpec("set_agent_policy", "Choose whether agents (Claude Code over MCP) may quit and reopen apps and open "
                "system updaters, and whether they may push branches and open pull requests",
                Risk.LOCAL, AgentPolicyIn, "POST", "/api/agents/policy", user_only=True),
@@ -452,7 +477,8 @@ ASSISTANT = "assistant"  # the built-in Ask Bosun assistant (assistant.py)
 # (Risk.INSTALL and above): the small actions that would look at, or run something on, the real computer.
 DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "discard_fix", "watch_app", "check_app",
                           "assistant_ask", "terminal_input", "terminal_stop",
-                          "ai_logins", "add_ai_login", "set_ai_login"})
+                          "ai_logins", "add_ai_login", "set_ai_login",
+                          "ai_routing", "set_ai_routing", "set_quota_override"})
 
 
 def is_agent(actor: Actor) -> bool:
