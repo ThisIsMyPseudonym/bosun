@@ -156,6 +156,21 @@ def parse_claude(raw: str, at: float) -> tuple[Reading, ...]:
     return latest_per_window(readings)
 
 
+_MIN_NAME = re.compile(r"^(\d+)_min$")
+
+
+def window_hours(window: str) -> float | None:
+    """A window's length in hours, where its name says (Coho's `windowHoursOf`); None for `quota:<model>` and the like."""
+    if window == "five_hour":
+        return 5.0
+    if window.startswith("seven_day"):
+        return 168.0
+    if window == "one_day":
+        return 24.0
+    m = _MIN_NAME.match(window)
+    return int(m[1]) / 60 if m and int(m[1]) > 0 else None
+
+
 # --- Codex -------------------------------------------------------------------------------------------------------
 
 CODEX_WARNING = 0.9  # Codex sends no status: at or past 90% is a warning, at 100% a refusal
