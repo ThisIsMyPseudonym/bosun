@@ -8,8 +8,10 @@ never raised, and nothing here may ever make a login look like it has more room 
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Set as AbstractSet
 from dataclasses import dataclass
+from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -154,6 +156,47 @@ def _capability_detail(job: catalog.Job, provider: str) -> str:
     return f"{spec.label} is not locked down for untrusted input"
 
 
+def _window_label(window: str) -> str:
+    if window == "five_hour":
+        return "5-hour limit"
+    if window == "seven_day":
+        return "weekly limit"
+    if window.startswith("seven_day_"):
+        return f"weekly ({window.removeprefix('seven_day_')}) limit"
+    if window == "one_day":
+        return "daily limit"
+    if window.startswith("quota:"):
+        return f"{window.removeprefix('quota:')} quota"
+    return "usage limit" if window == "limit" else f"{window} limit"
+
+
+def _format_reset(resets_at: float) -> str:
+    return datetime.fromtimestamp(resets_at).astimezone().strftime("%a %I:%M %p").replace(" 0", " ")
+
+
+def _limit_skip(bucket: str, curr: tuple[windows.Reading, ...]) -> Skip | None:
+    rejected = [r for r in curr if r.status == "rejected"]
+    if not rejected:
+        return None
+    scored = [(windows.valid_reset(r.window, r.resets_at, r.at), r) for r in rejected]
+    resets, worst = max(scored, key=lambda pair: (-1.0 if pair[0] is None else pair[0], pair[1].at))
+    label = _window_label(worst.window)
+    detail = f"{label} reached, resets {_format_reset(resets)}" if resets is not None else f"{label} reached"
+    return Skip(bucket, "limit", detail, hit=quota.Hit(worst.window, 1.0, resets))
+
+
+def _cooldown_skip(bucket: str, cooldowns: AbstractSet[str] | Mapping[str, float], now: float) -> Skip | None:
+    if isinstance(cooldowns, Mapping):
+        until = cooldowns.get(bucket)
+        if until is not None and math.isfinite(until) and until > now:
+            secs = max(1, round(until - now))
+            return Skip(bucket, "cooldown", f"rate limited, try again in {secs} s")
+        return None
+    if bucket in cooldowns:
+        return Skip(bucket, "cooldown", "rate limited, cooling down")
+    return None
+
+
 def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Login, ctx: Context) -> Skip | None:
     if login.provider not in capable:
         return Skip(login.bucket, "capability", _capability_detail(job, login.provider))
@@ -166,7 +209,10 @@ def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Logi
     if status is None or not status.ok:
         detail = status.finding if status is not None and status.finding else f"{spec.label}: contract check failed"
         return Skip(login.bucket, "contract", detail)
-    return None
+    curr = quota.current(ctx.readings.get(login.bucket, ()), ctx.now)
+    if (limit := _limit_skip(login.bucket, curr)) is not None:
+        return limit
+    return _cooldown_skip(login.bucket, ctx.cooldowns, ctx.now)
 
 
 def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:

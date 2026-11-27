@@ -120,3 +120,29 @@ def test_filters_run_in_order_and_missing_contract_fails_closed():
         ("gemini", "contract"),
         ("claude@work", "contract"),
     ]
+
+
+# --- Task 3.3: limits and cool-downs -----------------------------------------------------------------------------
+
+
+def test_a_login_at_its_limit_or_cooling_down_is_not_a_candidate():
+    readings = {
+        "claude": (R("five_hour", "rejected", 1.0, NOW + 3600, NOW),),
+        "claude@work": (R("five_hour", "rejected", 1.0, NOW - 1, NOW - 7200),),  # stale: back in
+        "gemini": (R("limit", "rejected", None, None, NOW - 60, "limit"),),  # undated refusal < 1h: still out
+    }
+    route = router.plan("summarize", ctx(readings=readings, cooldowns=frozenset({"claude", "codex"})))
+    assert [c.bucket for c in route.candidates] == ["claude@work"]
+    skips = {s.bucket: s for s in route.skipped}
+    assert skips["claude"].reason == "limit" and "resets" in skips["claude"].detail
+    assert skips["claude"].hit == quota.Hit("five_hour", 1.0, NOW + 3600)
+    assert skips["codex"].reason == "cooldown"
+    assert skips["gemini"].reason == "limit" and skips["gemini"].hit == quota.Hit("limit", 1.0, None)
+
+
+def test_mapping_cooldowns_respect_expiry():
+    route = router.plan("summarize", ctx(cooldowns={"claude": NOW + 45, "codex": NOW - 1}))
+    assert "claude" not in [c.bucket for c in route.candidates]
+    assert "codex" in [c.bucket for c in route.candidates]
+    skip = next(s for s in route.skipped if s.bucket == "claude")
+    assert skip.reason == "cooldown" and "45" in skip.detail
