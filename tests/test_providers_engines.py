@@ -139,3 +139,64 @@ def test_ask_bosun_fails_cleanly_when_no_mcp_login_is_available(panel):
     assert done["status"] == "error" and "excluded" in done["error"]
 
 
+def test_assistant_tokens_bind_to_conversation_and_turn_and_expire():
+    from bosun import auth, redact
+
+    clock = [1000.0]
+    tokens = auth.AssistantTokens(ttl_s=60.0, clock=lambda: clock[0])
+    tok = tokens.issue("a" * 32, 2)
+    assert tok.startswith(auth.ASSISTANT_TOKEN_PREFIX) and len(tok) >= 48
+    grant = tokens.verify(tok)
+    assert grant == auth.TokenGrant("a" * 32, 2, 1000.0)
+    assert tokens.verify("wrong") is None and tokens.verify("") is None and tokens.verify(None) is None
+    # Redact pattern masks the bare token everywhere
+    assert tok not in redact.text(f"leaked {tok} here")
+    assert tok not in " ".join(redact.argv(["cmd", tok, f"BOSUN_ASSISTANT_TOKEN={tok}"]))
+    assert tok not in str(redact.value({"token": tok, "nested": [tok]}))
+    # Expiry
+    clock[0] += 61.0
+    assert tokens.verify(tok) is None
+    # Explicit revocation
+    tok2 = tokens.issue("b" * 32, 1)
+    assert tokens.verify(tok2) is not None
+    tokens.revoke(tok2)
+    assert tokens.verify(tok2) is None
+
+
+def test_per_turn_token_never_reaches_argv_prompt_trace_log_db_or_sse(panel, caplog):
+    import json
+
+    caplog.set_level("DEBUG")
+    seen_tokens: list[str] = []
+
+    class TokenCapturingEngine(InMemoryEngine):
+        needs_token = True
+
+        def __init__(self, token: str):
+            super().__init__(("Answer with ", f"leaked {token}"))
+            seen_tokens.append(token)
+            self.token = token
+
+    panel.assistant.engine_factory = lambda _cand, _model, token=None: TokenCapturingEngine(token or "")
+    cid = panel.ask("check status")["conversation_id"]
+    events = panel.wait(cid)
+    assert events[-1][1]["status"] == "ok"
+    assert len(seen_tokens) == 1 and seen_tokens[0].startswith("bsn_at_")
+    tok = seen_tokens[0]
+    # Revoked as soon as the turn finishes
+    assert panel.assistant.tokens.verify(tok) is None
+    stored = json.dumps(
+        [panel.rows(f"SELECT * FROM {t}") for t in ("messages", "conversations", "audit", "runs", "spans", "llm_calls")],
+        default=str,
+    )
+    conversation_json = panel.user.get(f"/api/assistant/conversations/{cid}").text
+    leaked_places = "\n".join([
+        json.dumps(events),
+        stored,
+        caplog.text,
+        conversation_json,
+    ])
+    assert tok not in leaked_places
+
+
+

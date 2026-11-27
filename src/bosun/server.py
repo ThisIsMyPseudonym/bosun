@@ -353,10 +353,11 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             _recheck_after_upgrades(sources)
 
     approvals = approving.Approvals()  # the user's one-call yeses to the assistant; permit spends them
+    assistant_tokens = auth.AssistantTokens()
     actions = Actions(store=store, approvals=approvals, demo=s.demo)
     app.state.actions = actions  # the in-process surface (the assistant) calls these directly
-    assistant = Assistant(store, s, actions, approvals)
-    app.state.assistant, app.state.approvals = assistant, approvals
+    assistant = Assistant(store, s, actions, approvals, tokens=assistant_tokens)
+    app.state.assistant, app.state.approvals, app.state.assistant_tokens = assistant, approvals, assistant_tokens
     app.state.terminals, app.state.upgrader = terminals, upgrader
     if store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")

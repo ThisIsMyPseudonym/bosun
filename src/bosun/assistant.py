@@ -32,7 +32,7 @@ import mcp_types as types
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, CLINotFoundError  # noqa: F401
 from pydantic import BaseModel
 
-from . import llm, mcp_server, redact, trace
+from . import auth, llm, mcp_server, redact, trace
 from .approvals import Approval, Approvals
 from .assistant_prompt import (DECLINED, HISTORY_CHARS, HISTORY_RESULT_CHARS, MAX_STEPS, NOT_LOGGED_IN, PREFIX,  # noqa: F401
                                SERVER, SYSTEM, TOOL_TIMEOUT_MS, GuideIn, Turn, _record, compose, helpers, read_guide,
@@ -55,16 +55,15 @@ STOP_GRACE_S = 5.0  # after Stop: how long the CLI gets to report what the turn 
 
 class Assistant:
     def __init__(self, store: Store, settings: Settings, actions: Actions, approvals: Approvals,
-                 connect: Connect | None = None):
+                 connect: Connect | None = None, tokens: auth.AssistantTokens | None = None):
         self.store, self.settings, self.actions, self.approvals = store, settings, actions, approvals
+        self.tokens = tokens if tokens is not None else auth.AssistantTokens()
         self.model = settings.assistant_model or settings.model
         self.login = "claude"  # current engine's login bucket (updated as turns route across MCP-capable logins)
         self.connect: Connect = connect or ClaudeSDKClient  # tests put a scripted model here
-        self.engine_factory: Callable[[router.Candidate, str], AssistantEngine] | None = None
+        self.engine_factory: Callable[..., AssistantEngine] | None = None
         self._turns: dict[str, Turn] = {}
         self._lock = threading.Lock()
-        # tool calls and approval waits block: they run here, off the turn's event loop. Not the loop's own
-        # executor: closing a loop waits for that one, and a stopped turn must not wait for a long action.
         self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="assistant-tool")
 
     # --- what the panel calls (through the registry's assistant_* actions) -----------------------------------------
@@ -105,6 +104,7 @@ class Assistant:
         if turn is None or turn.done:
             raise Conflict("Nothing is being answered in this conversation")
         turn.stopped = True
+        self.tokens.revoke_conversation(conversation_id)
         self.approvals.stop(conversation_id)  # a card that was waiting is answered no, so its tool call returns
         if turn.loop is not None:
             asyncio.run_coroutine_threadsafe(self._interrupt(turn), turn.loop)
@@ -171,9 +171,12 @@ class Assistant:
             return self.settings.assistant_model or catalog.models_for("claude", "strong", self.settings)
         return catalog.models_for(provider, "strong", self.settings)
 
-    def _build_engine(self, cand: router.Candidate, model: str) -> AssistantEngine:
+    def _build_engine(self, cand: router.Candidate, model: str, turn_token: str) -> AssistantEngine:
         if self.engine_factory is not None:
-            return self.engine_factory(cand, model)
+            try:
+                return self.engine_factory(cand, model, turn_token)
+            except TypeError:
+                return self.engine_factory(cand, model)
         if cand.provider == "claude":
             return self._sdk_engine(model, login=cand.login)
         raise RuntimeError(f"no assistant engine for {cand.provider}")
@@ -237,9 +240,8 @@ class Assistant:
         if not self.store.read_only and not ledger.readings(self.store, cand.bucket):
             ledger.seed_from_coho(self.store, cand.bucket, now=time.time())
         before = {r.window: r for r in ledger.readings(self.store, cand.bucket)}
-        engine = self._build_engine(cand, model)
+        turn_token = self.tokens.issue(turn.conversation_id, turn.number)
         result: TurnReport | None = None
-        turn.engine = engine
 
         async def call_tool(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
             return await self._call_tool(turn, name, arguments)
@@ -247,6 +249,8 @@ class Assistant:
         with trace.span("llm", "assistant", model=model, provider=cand.provider, account=cand.login.id,
                         prompt_chars=len(prompt)) as sp:
             try:
+                engine = self._build_engine(cand, model, turn_token)
+                turn.engine = engine
                 if turn.stopped:
                     raise asyncio.CancelledError
                 await engine.start_turn(turn, prompt, call_tool)
@@ -265,6 +269,7 @@ class Assistant:
                 result = TurnReport(outcome="error", error=f"{exc.__class__.__name__}: {exc}"[:300])
             finally:
                 turn.engine = None
+                self.tokens.revoke(turn_token)
             rep = result or TurnReport(outcome="error", error="engine ended without a result")
             outcome, error = ("cancelled", "stopped") if turn.stopped else (rep.outcome, rep.error)
             usage = self._record_turn(turn, cand, model, before, rep, outcome, error,
