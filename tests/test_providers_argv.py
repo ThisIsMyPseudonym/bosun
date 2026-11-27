@@ -144,3 +144,14 @@ def test_muse_takes_the_prompt_from_a_file_and_works_in_the_temp_folder(tmp_path
     assert prompt.read_text() == "S\n\n---\n\nP" and json.loads(schema.read_text()) == {"type": "object"}
     assert inv.files == (prompt, schema) and inv.stdin is None and a[a.index("--workspace") + 1] == str(tmp_path)
     assert a[:4] == ("muse", "exec", "--provider", "meta") and "--model" not in a  # "": Muse's own default
+
+
+def test_gemini_deny_rules_sit_at_the_top_of_their_tier():
+    # --policy loads at the user tier, beside ~/.gemini/policies; within a tier priorities run 0-999 and the
+    # highest wins (0.71.1 docs/reference/policy-engine.md), so a user's own allow rule must not outrank a deny.
+    import tomllib
+
+    from bosun.providers.argv import GEMINI_POLICY
+
+    rules = tomllib.loads(GEMINI_POLICY.read_text(encoding="utf-8"))["rule"]
+    assert rules and all(r["decision"] == "deny" and r["priority"] == 999 for r in rules)
