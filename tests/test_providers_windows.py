@@ -35,6 +35,16 @@ def test_unified_windows_each_become_a_reading_and_a_share_over_one_is_capped():
     assert len(got) == 2
 
 
+def test_claude_unified_merge_keeps_top_level_reset_or_figure_when_unified_lacks_them():
+    at = 1_800_000_000.0
+    no_reset = _event(status="allowed", rateLimitType="five_hour", utilization=0.7, resetsAt=at + 3600,
+                      unifiedWindows={"five_hour": {"utilization": 0.8}})
+    assert windows.parse_claude(no_reset, at=at) == (R("five_hour", "allowed", 0.8, at + 3600, at),)
+    no_util = _event(status="allowed", rateLimitType="five_hour", utilization=0.7, resetsAt=at + 3600,
+                     unifiedWindows={"five_hour": {"resetsAt": at + 3600, "status": "allowed_warning"}})
+    assert windows.parse_claude(no_util, at=at) == (R("five_hour", "allowed_warning", 0.7, at + 3600, at),)
+
+
 def test_an_unknown_window_name_is_kept_under_its_own_name():
     got = windows.parse_claude(_event(status="allowed", rateLimitType="seven_day_fable", utilization=0.41), at=1.0)
     assert got == (R("seven_day_fable", "allowed", 0.41, None, 1.0),)

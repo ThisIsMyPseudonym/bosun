@@ -143,9 +143,9 @@ def _claude_event(info: dict[str, Any], at: float) -> list[Reading]:
         r = _unified(str(name), w, at)
         if r is None:
             continue
-        # The per-window entry is the fuller one: it replaces the top-level one, keeping the worse status.
+        # The per-window entry merges with the top-level one, keeping worse status and any top-level figure/reset it lacks.
         same = out.get(r.window)
-        out[r.window] = Reading(r.window, worse(same.status, r.status), r.used, r.resets_at, at) if same else r
+        out[r.window] = _merge(same, r) if same else r
     return list(out.values())
 
 
