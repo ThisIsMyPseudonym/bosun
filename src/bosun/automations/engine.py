@@ -199,20 +199,25 @@ class Automator:
         created = 0
         for aid, _row, defn in ((a, r, d) for a, (r, d) in rules.items() if isinstance(d.trigger, ScheduleTrigger)):
             assert isinstance(defn.trigger, ScheduleTrigger)
+            if not isinstance(defn.conditions, ScheduleConditions):
+                continue
+            seen_slot = astore.cursor(self.store, f"sched_{aid}") or ""
             for slot in schedule.due_slots(defn.trigger, now=when, tz=self.tz):
                 dedup = f"schedule:{slot.slot_key}"
-                if slot.missed:
-                    fid = astore.insert_firing(
-                        self.store, aid, defn.name, "schedule", slot.slot_key, dedup,
-                        status="missed", reason="missed schedule slot (>2 h late)", now=when,
-                    )
-                elif isinstance(defn.conditions, ScheduleConditions) and amatch.matches_schedule(
-                    self.store, defn.conditions, defn.action, now=when,
-                ):
-                    fid = astore.insert_firing(
+                matched = amatch.matches_schedule(self.store, defn.conditions, defn.action, now=when)
+                if not slot.missed:
+                    if slot.slot_key > seen_slot:
+                        astore.set_cursor(self.store, f"sched_{aid}", slot.slot_key)
+                        seen_slot = slot.slot_key
+                    fid = (astore.insert_firing(
                         self.store, aid, defn.name, "schedule", slot.slot_key, dedup,
                         status="scheduled", due=when + defn.delay_s,
                         deadline=slot.scheduled_ts + SCHEDULE_DEADLINE_S, now=when,
+                    ) if matched else None)
+                elif matched and slot.slot_key > seen_slot:
+                    fid = astore.insert_firing(
+                        self.store, aid, defn.name, "schedule", slot.slot_key, dedup,
+                        status="missed", reason="missed schedule slot (>2 h late)", now=when,
                     )
                 else:
                     fid = None

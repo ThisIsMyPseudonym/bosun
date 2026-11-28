@@ -638,3 +638,50 @@ def test_engine_rechecks_pause_and_rule_mid_tick_and_permits_notify(tmp_path):
     assert astore.get_firing(st, f4)["status"] == "skipped"
 
 
+def test_schedule_slot_unmatched_in_window_never_becomes_spurious_missed(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([], [])
+    app = create_app(load_settings(), st, "t" * 32)
+    eng = Automator(st, load_settings(), app.state.actions, tz=CHI)
+
+    sched_def = AutomationDef(
+        name="Nightly fix",
+        trigger=ScheduleTrigger(kind="schedule", time="02:00", days=()),
+        conditions=ScheduleConditions(project="p1", lane="now"),
+        action="start_fix",
+        scope=StartFixScope(project="p1", lane="now"),
+        mode="run",
+    )
+    t_in_window = datetime(2026, 11, 27, 2, 5, tzinfo=CHI).timestamp()
+    sid = astore.save(st, sched_def, enabled=True, grant_digest=grant_digest(sched_def), granted_by="user", now=t_in_window - 60)
+
+    # 1. Scan inside window when conditions don't match -> no firing
+    assert eng.tick(now=t_in_window).scanned == 0
+    assert astore.list_firings(st, automation_id=sid) == []
+
+    # 2. Item arrives > 2h later -> must NOT insert a spurious 'missed' firing for the already-scanned slot
+    it = Item(Source.REPO, "lodash", "lodash", "4.0", "4.17.21", ecosystem="npm", project="p1", lane="now")
+    st.save_snapshot([item_to_dict(it)], [])
+    t_late = datetime(2026, 11, 27, 4, 15, tzinfo=CHI).timestamp()
+    assert eng.tick(now=t_late).scanned == 0
+    assert astore.list_firings(st, automation_id=sid) == []
+
+    # 3. Next day: genuinely missed window (never scanned in 02:00..04:00) WITH matching item -> records missed
+    t_next_day_late = datetime(2026, 11, 28, 5, 0, tzinfo=CHI).timestamp()
+    assert eng.tick(now=t_next_day_late).scanned == 1
+    firings = astore.list_firings(st, automation_id=sid)
+    assert len(firings) == 1 and firings[0]["status"] == "missed" and firings[0]["event_ref"] == "2026-11-28T02:00"
+
+    # 4. A rule whose conditions don't match even when waking up > 2h late also produces no spurious missed firing
+    empty_def = sched_def.model_copy(
+        update={
+            "name": "Empty project fix",
+            "conditions": ScheduleConditions(project="p_none", lane="now"),
+            "scope": StartFixScope(project="p_none", lane="now"),
+        }
+    )
+    eid = astore.save(st, empty_def, enabled=True, grant_digest=grant_digest(empty_def), granted_by="user", now=t_in_window)
+    assert eng.tick(now=t_next_day_late + 60).scanned == 0
+    assert astore.list_firings(st, automation_id=eid) == []
+
+
