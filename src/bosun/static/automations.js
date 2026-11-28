@@ -86,6 +86,71 @@ async function deleteRule(rule) {
   }
 }
 
+async function decideOffer(offer, approve) {
+  try {
+    await api(`/api/automations/firings/${offer.id}/decide`, {
+      method: "POST",
+      body: JSON.stringify({ approve: !!approve }),
+    });
+    fetchAutomations(true);
+    if (MC.refreshNow) MC.refreshNow().catch(() => {});
+  } catch (err) {
+    alert(`Could not ${approve ? "approve" : "decline"} offer: ${err.message}`);
+    fetchAutomations(true);
+  }
+}
+
+function isOfferExpired(offer) {
+  return !!(offer.expired || offer.status === "expired" || (offer.deadline && Date.now() / 1000 >= offer.deadline));
+}
+
+function offerItemsText(items) {
+  return (items || []).slice(0, 6).map((it) => {
+    const ver = it.installed && it.available ? ` (${it.installed} → ${it.available})`
+      : it.available ? ` (${it.available})` : "";
+    return `${it.name || it.key}${ver}`;
+  }).join(", ") + ((items || []).length > 6 ? ` and ${items.length - 6} more` : "");
+}
+
+function offerCard(offer, isDemo) {
+  const expired = isOfferExpired(offer);
+  const itemsLine = offerItemsText(offer.items);
+  const inputText = JSON.stringify(offer.input || {});
+  const statusLine = expired
+    ? "This offer expired after 24 hours and can no longer be approved."
+    : offer.deadline ? `Waiting for your approval · expires ${MC.clock(offer.deadline)}` : "Waiting for your approval";
+  return el("article", { class: `panel auto-offer${expired ? " auto-offer-expired" : ""}` },
+    el("div", { class: "auto-card-top" },
+      el("strong", { text: offer.automation_name || `Automation #${offer.automation_id}` }),
+      el("div", { class: "auto-chips" },
+        el("span", { class: `auto-chip ${expired ? "auto-bad" : "auto-warn"}`, text: expired ? "Expired" : "Needs approval" }))),
+    el("p", { class: "auto-sentence", text: offer.action_label || offer.action || "Run automation" }),
+    itemsLine ? el("div", { class: "auto-meta", text: `Items: ${itemsLine}` }) : null,
+    offer.why ? el("div", { class: "auto-meta", text: offer.why }) : null,
+    el("div", { class: "auto-offer-input" },
+      el("span", { class: "hint", text: "Input: " }),
+      el("code", { text: inputText })),
+    el("div", { class: "auto-offer-foot" },
+      el("span", { class: "auto-meta", text: statusLine }),
+      el("div", { class: "auto-offer-actions" },
+        el("button", {
+          class: "quiet", disabled: isDemo || expired || null, text: "Decline",
+          onclick: () => decideOffer(offer, false),
+        }),
+        el("button", {
+          class: "primary", disabled: isDemo || expired || null, text: "Approve",
+          onclick: () => decideOffer(offer, true),
+        }))));
+}
+
+function offersPanel(offers, isDemo) {
+  const list = offers || [];
+  if (!list.length) return null;
+  return el("section", { class: "auto-section auto-offers" },
+    el("h2", { text: "Waiting offers" }),
+    el("div", { class: "auto-list" }, ...list.map((o) => offerCard(o, isDemo))));
+}
+
 function headerBar(data, onNew) {
   const paused = !!data.paused;
   const isDemo = !!data.demo;
@@ -185,12 +250,15 @@ function rulesSection(title, items, isDemo, onEdit) {
 MC.automationsHelpers = {
   headerBar,
   ruleCard,
+  offerCard,
+  offersPanel,
   historyPanel,
   fetchAutomations,
   setPaused,
   toggleRule,
   renewRule,
   deleteRule,
+  decideOffer,
 };
 
 MC.views.automations = function automations() {
@@ -231,6 +299,7 @@ MC.views.automations = function automations() {
     headerBar(data, () => openEdit(null)),
     pausedBanner,
     demoBanner,
+    offersPanel(data.waiting_offers || [], isDemo),
     editorNode,
     rulesSection("Your automations", custom, isDemo, openEdit),
     rulesSection("Presets", presets, isDemo, openEdit),

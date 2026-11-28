@@ -3,9 +3,9 @@
 (() => {
 const { el, api, plural } = MC;
 const $ = (s) => document.querySelector(s);
-const S = { raw: false, prefs: {}, items: [], allItems: [], projects: [], history: [], openKey: null,
+const S = { raw: false, demo: false, prefs: {}, items: [], allItems: [], projects: [], history: [], openKey: null,
             list: { group: "route", sort: "risk" }, find: "", jobs: [], fixes: [], trayOpen: false, dormantOpen: false, showIgnored: false, needsAll: false,
-            autopilot: { on: false, time: null, queued: [] }, relaunch: [], notify: { on: true }, agents: { system: false, external: false } };
+            autopilot: { on: false, time: null, queued: [] }, relaunch: [], automationOffers: [], notify: { on: true }, agents: { system: false, external: false } };
 
 // What you said about an item, and whether it is back: worked out by the server (attention.py), never here.
 MC.standing = (i) => i.standing || { state: "", back: "", said: "" };
@@ -61,6 +61,7 @@ async function load() {
     // "visible" tells the server you're looking, so it doesn't send a notification about what's on screen
     const st = await api(`/api/state${document.visibilityState === "visible" ? "?visible=1" : ""}`);
     S.notify = st.notify || S.notify; renderBell();
+    S.demo = !!st.demo; S.automationOffers = st.automation_offers || [];
     S.claude = st.claude_enabled; S.view = st.view || "auto";
     S.agents = st.agents || S.agents;
     MC.assistantInfo = st.assistant || null;  // the Ask Bosun panel's model and login

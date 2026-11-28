@@ -128,7 +128,39 @@ function systemUpdatesEntry(pkgs) {
            verb: `Open ${MC.MACHINE.updates}`, act: () => MC.actions.openUpdates(), open: () => { location.hash = "#/pc"; } };
 }
 
-MC.todayHelpers = { machineEntry, failedEntry };
+async function decideTodayOffer(offer, approve) {
+  try {
+    await api(`/api/automations/firings/${offer.id}/decide`, {
+      method: "POST", body: JSON.stringify({ approve: !!approve }),
+    });
+    if (MC.refreshNow) MC.refreshNow().catch(() => {});
+  } catch (err) {
+    if (MC.banner) MC.banner(`Could not ${approve ? "approve" : "decline"} offer: ${err.message}`);
+    if (MC.refreshNow) MC.refreshNow().catch(() => {});
+  }
+}
+
+function offerCard(offer, isDemo) {
+  const expired = !!(offer.expired || offer.status === "expired" || (offer.deadline && Date.now() / 1000 >= offer.deadline));
+  const items = (offer.items || []).slice(0, 4).map((i) =>
+    `${i.name || i.key}${i.installed && i.available ? ` (${i.installed} → ${i.available})` : i.available ? ` (${i.available})` : ""}`).join(", ");
+  const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
+  return el("div", { class: `need need-offer${expired ? " need-offer-expired" : ""}` },
+    MC.glyph("bolt", "md"),
+    el("div", { class: "body" },
+      el("div", { class: "title" },
+        el("strong", { class: "name", text: offer.automation_name || `Automation #${offer.automation_id}` }),
+        el("span", { class: "chip", text: expired ? "Expired" : "Automation offer" })),
+      el("div", { class: "line", text: offer.action_label || offer.action || "Run automation" }),
+      items ? el("div", { class: "line offer-sub", text: items }) : null,
+      el("div", { class: "line offer-sub", text: expired ? "This offer expired after 24 hours and can no longer be approved."
+        : `${offer.why || "Waiting for approval"} · ${JSON.stringify(offer.input || {})}` })),
+    el("div", { class: "offer-btns" },
+      el("button", { class: "quiet", disabled: isDemo || expired || null, text: "Decline", onclick: stop(() => decideTodayOffer(offer, false)) }),
+      el("button", { class: "primary", disabled: isDemo || expired || null, text: "Approve", onclick: stop(() => decideTodayOffer(offer, true)) })));
+}
+
+MC.todayHelpers = { machineEntry, failedEntry, offerCard, decideTodayOffer };
 
 MC.needsYou = function needsYou(S, scopes) {
   const staged = S.relaunch || [], covered = new Set(staged.flatMap((r) => r.keys));
@@ -158,14 +190,16 @@ function needRow(n, filled) {
 }
 
 function needsPanel(S, scopes, needs) {
+  const offers = S.automationOffers || [];
   const shown = S.needsAll ? needs : needs.slice(0, 6);
   const first = shown.findIndex((n) => n.verb);
   return el("section", { class: "panel needs" },
     el("div", { class: "sec" }, el("h3", { text: "Needs you" }),
       needs.length ? el("button", { class: "link accent", text: "What should I do first?", title: "Ask Bosun",
         onclick: () => MC.ask("What should I do first?", { page: "today" }) }) : null),
-    needs.length ? el("div", {}, ...shown.map((n, i) => needRow(n, i === first)))
-      : el("p", { class: "empty", text: "Nothing urgent. Bosun will say when something is." }),
+    offers.length ? el("div", { class: "need-offers" }, ...offers.map((o) => offerCard(o, !!S.demo))) : null,
+    needs.length ? el("div", {}, ...shown.map((n, i) => needRow(n, !offers.length && i === first)))
+      : offers.length ? null : el("p", { class: "empty", text: "Nothing urgent. Bosun will say when something is." }),
     needs.length > shown.length ? el("button", { class: "link", text: `Show all ${needs.length}`, onclick: () => { S.needsAll = true; MC.render(); } }) : null);
 }
 

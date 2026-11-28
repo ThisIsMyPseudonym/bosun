@@ -364,6 +364,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                             "coverage": _coverage(), "kept": _kept(), "rejected": _rejected()},
                 "history": store.history(), "autopilot": _autopilot(snap), "relaunch": _pending_relaunch(),
                 "notify": {"on": notify.is_on(store)},
+                "demo": s.demo,
+                "automation_offers": adecide.waiting_offers(store),
                 "agents": registry.agent_policy(store),
                 "assistant": {"model": assistant.model if assistant else s.model,
                               "login": assistant.login if assistant else "claude"},

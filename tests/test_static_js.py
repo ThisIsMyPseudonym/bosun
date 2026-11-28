@@ -1899,3 +1899,127 @@ def test_automations_editor_supports_verdict_trigger_and_retry_when_busy_preset(
     """
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0 and "VERDICT_EDITOR_OK" in r.stdout, f"stdout={r.stdout}\nstderr={r.stderr}"
+
+
+def test_offer_cards_render_on_automations_and_today_with_approve_decline_expiry_and_demo():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    for name in ("automations.js", "today.js"):
+        assert "innerHTML" not in code_only((STATIC / name).read_text(encoding="utf-8")), name
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    today_js = str(STATIC / "today.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", disabled: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "disabled") this.disabled = true; }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = []; this.append(...kids); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.location = {{ hash: "#/automations" }};
+    globalThis.alert = () => {{}};
+    globalThis.confirm = () => true;
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{
+      calls.push({{ path, opts }});
+      if (path === "/api/automations") return {{ paused: false, demo: false, automations: [], projects: [], waiting_offers: [] }};
+      if (path.startsWith("/api/automations/firings?")) return {{ firings: [] }};
+      return {{ status: "done" }};
+    }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}), href: (p, id) => `#/${{p}}/${{id}}` }};
+    MC.render = () => {{}};
+    MC.banner = () => {{}};
+    MC.refreshNow = async () => {{}};
+    MC.ago = () => "2m ago";
+    MC.clock = () => "14:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    MC.ask = () => {{}};
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(today_js)}, "utf8"));
+
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const liveOffer = {{
+      id: 42, automation_id: 7, automation_name: "<b>Relaunch</b>",
+      action: "relaunch_app", action_label: "Quit and reopen Google Chrome to finish its update",
+      items: [{{ key: "brew-cask:google-chrome", name: "Google Chrome", installed: "130.0", available: "131.0" }}],
+      input: {{ app: "chrome" }}, why: "Triggered after a full refresh",
+      status: "offered", expired: false, created: 1700000000, deadline: 9999999999,
+    }};
+    const expiredOffer = {{
+      ...liveOffer, id: 43, status: "expired", expired: true, deadline: 1000,
+    }};
+
+    // 1. Automations offersPanel renders plain text, input, why, Approve & Decline, disables in demo, and flags expired
+    const H = MC.automationsHelpers;
+    if (typeof H.offersPanel !== "function") throw new Error("MC.automationsHelpers.offersPanel missing");
+    const panel = H.offersPanel([liveOffer, expiredOffer], false);
+    const ptxt = panel.textContent;
+    if (!ptxt.includes("Quit and reopen Google Chrome") || !ptxt.includes("130.0") || !ptxt.includes("131.0")
+        || !ptxt.includes("chrome") || !ptxt.includes("Triggered after a full refresh")
+        || !ptxt.includes("<b>Relaunch</b>")) {{
+      throw new Error("missing offer card text: " + ptxt);
+    }}
+    if (!ptxt.toLowerCase().includes("expired")) throw new Error("missing expired notice: " + ptxt);
+    const cards = allNodes(panel).filter((n) => n.tagName === "ARTICLE" && (n.className || "").includes("auto-offer"));
+    if (cards.length !== 2) throw new Error("expected 2 offer cards, got " + cards.length);
+    const liveApprove = allNodes(cards[0]).find((n) => n.tagName === "BUTTON" && n.textContent === "Approve");
+    const liveDecline = allNodes(cards[0]).find((n) => n.tagName === "BUTTON" && n.textContent === "Decline");
+    const expApprove = allNodes(cards[1]).find((n) => n.tagName === "BUTTON" && n.textContent === "Approve");
+    if (!liveApprove || liveApprove.disabled || !liveDecline || liveDecline.disabled) {{
+      throw new Error("live offer buttons must be enabled");
+    }}
+    if (!expApprove || !expApprove.disabled) throw new Error("expired offer Approve button must be disabled");
+    liveApprove.listeners.click[0]();
+    liveDecline.listeners.click[0]();
+
+    const demoPanel = H.offersPanel([liveOffer], true);
+    const demoBtns = allNodes(demoPanel).filter((n) => n.tagName === "BUTTON");
+    if (!demoBtns.length || demoBtns.some((b) => !b.disabled)) throw new Error("demo offer buttons must be disabled");
+
+    // 2. Today offer card helper renders Approve/Decline and posts the right decide_offer bodies
+    const TH = MC.todayHelpers;
+    if (typeof TH.offerCard !== "function") throw new Error("MC.todayHelpers.offerCard missing");
+    const tLive = TH.offerCard(liveOffer, false);
+    const tTxt = tLive.textContent;
+    if (!tTxt.includes("Quit and reopen Google Chrome") || !tTxt.includes("Triggered after a full refresh")) {{
+      throw new Error("today offer card missing text: " + tTxt);
+    }}
+    const tDemo = TH.offerCard(liveOffer, true);
+    if (allNodes(tDemo).filter((n) => n.tagName === "BUTTON").some((b) => !b.disabled)) {{
+      throw new Error("today demo offer buttons must be disabled");
+    }}
+    const tApprove = allNodes(tLive).find((n) => n.tagName === "BUTTON" && n.textContent === "Approve");
+    const tDecline = allNodes(tLive).find((n) => n.tagName === "BUTTON" && n.textContent === "Decline");
+    tApprove.listeners.click[0]({{ stopPropagation() {{}} }});
+    tDecline.listeners.click[0]({{ stopPropagation() {{}} }});
+
+    setTimeout(() => {{
+      const approveCall = calls.find((c) => c.path === "/api/automations/firings/42/decide" && JSON.parse(c.opts.body).approve === true);
+      const declineCall = calls.find((c) => c.path === "/api/automations/firings/42/decide" && JSON.parse(c.opts.body).approve === false);
+      if (!approveCall || !declineCall) throw new Error("decide calls mismatch: " + JSON.stringify(calls));
+      console.log("OFFER_CARDS_OK");
+    }}, 0);
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0 and "OFFER_CARDS_OK" in r.stdout, f"stdout={r.stdout}\nstderr={r.stderr}"
