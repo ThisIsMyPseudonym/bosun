@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -16,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from .. import proc  # noqa: F401  (proc: tests patch proc.run through here)
 from ..models import Item, Source
-from ..providers import accounts, run as ai_run
+from ..providers import accounts, router, run as ai_run
 from ..store import Store
 from .exposure import REACH_LABEL, impact, profile, reach
 
@@ -107,7 +109,7 @@ class Explainer:
     def cached(self, item: Item) -> dict | None:
         return self.store.cache_get("explain", cache_key(item))
 
-    def explain(self, item: Item) -> dict:
+    def explain(self, item: Item, *, background: bool = False, now: Callable[[], float] = time.time) -> dict:
         hit = self.cached(item)
         if hit:
             return hit
@@ -115,10 +117,13 @@ class Explainer:
             raise RuntimeError("No AI CLI available")
         out = ai_run.run(
             self.store, "explain", prompt=facts(item), system=SYSTEM, schema=Assessment,
-            tier="strong", item_key=item.key, project=item.project or "", clicked=True,
-            models={"claude": self.model}, logins=self._logins(), source=item.source.value,
+            tier="strong", item_key=item.key, project=item.project or "", clicked=not background,
+            background=background, models={"claude": self.model}, logins=self._logins(),
+            now=now, source=item.source.value,
         )
         if not out.ok or out.login is None:
+            if out.quota_held:
+                raise router.QuotaHeld(out.earliest_reset, out.reason)
             raise RuntimeError(out.reason)
         result = out.payload.model_dump()
         result["model"] = ai_run.model_tag(out.login.provider, out.model)

@@ -42,6 +42,8 @@ class Outcome:
     attempts: tuple[router.Attempt, ...]
     reason: str  # why nothing answered: names each login and its reset
     exhausted: bool = False  # True when no eligible login remains in the pool
+    quota_held: bool = False  # True when every candidate was skipped by quota/line/cap/cooldown
+    earliest_reset: float | None = None
 
 
 def model_tag(provider: str, model: str) -> str:
@@ -187,9 +189,9 @@ def _exhausted(route: router.Route, done: router.Attempted) -> bool:
 
 def run(store: Store, job: str, *, prompt: str, system: str, schema: type[BaseModel],
         tier: Literal["light", "strong"], item_key: str = "", project: str = "", timeout: float = 240.0,
-        clicked: bool = False, pin: accounts.Login | None = None, models: Mapping[str, str] | None = None,
-        logins: tuple[accounts.Login, ...] | None = None, cooldowns: limits.Cooldowns | None = None,
-        now: Callable[[], float] = time.time, **attrs: Any) -> Outcome:
+        clicked: bool = False, background: bool = False, pin: accounts.Login | None = None,
+        models: Mapping[str, str] | None = None, logins: tuple[accounts.Login, ...] | None = None,
+        cooldowns: limits.Cooldowns | None = None, now: Callable[[], float] = time.time, **attrs: Any) -> Outcome:
     """Route and execute one job, failing over across candidates and recording every attempt."""
     cd = COOLDOWNS if cooldowns is None else cooldowns
     when = now()
@@ -198,7 +200,7 @@ def run(store: Store, job: str, *, prompt: str, system: str, schema: type[BaseMo
         labels = {pin.bucket: pin.label}
     else:
         ctx = routing.context(store, cooldowns=cd, now=when, logins=logins)
-        route = router.plan(job, ctx, clicked=clicked)
+        route = router.plan(job, ctx, clicked=clicked, force_background=background)
         labels = {lg.bucket: lg.label for lg in ctx.logins}
     if not store.read_only and route.skipped:
         ledger.notice_skips(store, route.skipped, now=when)
@@ -210,8 +212,11 @@ def run(store: Store, job: str, *, prompt: str, system: str, schema: type[BaseMo
         validated, chosen_model = done.result.value
         return Outcome(True, validated, done.candidate.login, chosen_model, done.attempts, "", exhausted=False)
     exhausted = pin is None and _exhausted(route, done)
+    held = not route.candidates and router.is_quota_held(route.skipped)
+    reset = router.quota_held_reset(route.skipped) if held else None
     return Outcome(False, None, done.candidate.login if done.candidate else None, "", done.attempts,
-                   _reason(done, route, store, cd, now(), labels), exhausted=exhausted)
+                   _reason(done, route, store, cd, now(), labels), exhausted=exhausted,
+                   quota_held=held, earliest_reset=reset)
 
 
 @dataclass(frozen=True)

@@ -565,6 +565,8 @@ class ActionContext:
     triage_trace_id: str | None = None
     # For actor == automation:<id>: the firing row id (used to verify "failed item / failed project" scopes).
     firing_id: int | None = None
+    # Optional deterministic clock for in-process callers (e.g. Automator.tick(now=...)).
+    now: float | None = None
 
 
 Handler = Callable[[ActionContext, Any], Any]
@@ -663,7 +665,7 @@ class Actions:
             raise Forbidden(f"{spec.name} is refused: automation {aid} has an invalid definition") from None
         if not secrets.compare_digest(str(row["grant_digest"] or ""), grant_digest(defn)):
             raise Forbidden(f"{spec.name} is refused: automation {aid} grant does not match its current definition")
-        if grant_expired(defn.action, defn.mode, row["granted_at"]):
+        if grant_expired(defn.action, defn.mode, row["granted_at"], now=ctx.now):
             raise Forbidden(f"{spec.name} is refused: automation {aid} grant has expired; renew it in the dashboard")
         if spec.name not in ALLOWLIST or spec.name != defn.action or spec.user_only or spec.risk >= Risk.EXTERNAL:
             raise Forbidden(f"{spec.name} is not allowed for automation {aid}")

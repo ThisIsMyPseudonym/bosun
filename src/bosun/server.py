@@ -51,7 +51,7 @@ from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPol
                        TraceIn, TriageFeedbackIn, TriageIn, TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
-from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
+from .providers import accounts as ai_accounts, router as ai_router, routing as ai_routing, usage as ai_usage
 from .triage import model as tmodel, settings as tsettings, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
@@ -686,7 +686,11 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if found is None:
             raise NotFound("Unknown item; refresh and try again")
         try:
-            return explainer.explain(item_from_dict(found))
+            when = ctx.now
+            clock = (lambda: when) if when is not None else time.time
+            return explainer.explain(item_from_dict(found), background=registry.is_automation(ctx.actor), now=clock)
+        except ai_router.QuotaHeld:
+            raise
         except RuntimeError as exc:
             log.warning("explain failed for %s: %s", body.keys[0], exc)
             raise Failed(f"Assessment failed: {exc}")
@@ -969,7 +973,12 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if missing:
             raise NotFound("Unknown item; refresh and try again")
         try:
-            return {"fix": fixer.start([item_from_dict(known[k]) for k in body.keys])}
+            when = ctx.now
+            clock = (lambda: when) if when is not None else None
+            return {"fix": fixer.start([item_from_dict(known[k]) for k in body.keys],
+                                       background=registry.is_automation(ctx.actor), now=clock)}
+        except ai_router.QuotaHeld:
+            raise
         except ValueError as exc:
             raise Invalid(str(exc))
         except RuntimeError as exc:
