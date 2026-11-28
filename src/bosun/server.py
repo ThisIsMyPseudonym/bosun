@@ -45,14 +45,16 @@ from .enrich.exposure import REACH_EXPLAIN, REACH_LABEL, impact, profile, reach
 from .fixer import Fixer
 from .config import Settings
 from .refresh import COLLECTORS, recheck, recheck_project, refresh
-from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
-                       ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
-                       NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TriageFeedbackIn, TriageIn, TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, AutomationFiringsIn,
+                       AutomationIdIn, AutomationToggleIn, Conflict, ConversationIn, ConversationsIn, DecideIn, Empty,
+                       Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
+                       NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk,
+                       RunbookIn, RunIn, RunManyIn, RunsIn, SaveAutomationIn, TraceIn, TriageFeedbackIn, TriageIn,
+                       TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, router as ai_router, routing as ai_routing, usage as ai_usage
-from .automations import engine as aengine, store as astore
+from .automations import api as aapi, engine as aengine, presets as apresets, store as astore
 from .triage import model as tmodel, settings as tsettings, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
@@ -82,9 +84,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     cookie = auth.cookie_name(s.port)
     refresh_file_lock = lock.FileLock(store.path.parent / "refresh.lock")
     # with a `bosun refresh` running on its own, only what no process is doing any more: some may be its own
-    stale = store.abandon_stale_jobs(keep_live=lock.is_locked(refresh_file_lock.path))
-    if stale:
-        log.info("marked %d jobs from a previous run as abandoned", stale)
+    if not store.read_only:
+        stale = store.abandon_stale_jobs(keep_live=lock.is_locked(refresh_file_lock.path))
+        if stale:
+            log.info("marked %d jobs from a previous run as abandoned", stale)
     token = token or secrets.token_urlsafe(32)
     refresh_state: dict = {"running": False, "last_result": None, "error": None, "rechecking": [], "trace_id": None}
     refresh_lock = threading.Lock()
@@ -130,18 +133,19 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         threading.Thread(target=selfupdate.restart_when_idle, args=(_selfupdate_busy,),
                          kwargs={"report": _not_started},
                          daemon=True, name="self-update").start()
-    if store.abandon_stale_fixes():
-        log.info("marked interrupted fixes as failed")
-    interrupted = store.mark_interrupted_runs("serve")
-    if interrupted:
-        log.info("marked %d runs from a previous dashboard as interrupted", interrupted)
-    reset = tstore.reset_running(store)
-    if reset:
-        log.info("returned %d interrupted triage rows to queued", reset)
     if not store.read_only:
+        if store.abandon_stale_fixes():
+            log.info("marked interrupted fixes as failed")
+        interrupted = store.mark_interrupted_runs("serve")
+        if interrupted:
+            log.info("marked %d runs from a previous dashboard as interrupted", interrupted)
+        reset = tstore.reset_running(store)
+        if reset:
+            log.info("returned %d interrupted triage rows to queued", reset)
         recovered = astore.recover_running(store)
         if recovered:
             log.info("recovered %d interrupted automation firings", recovered)
+        apresets.seed(store)
     fixer = Fixer(store, s)
     explainer = Explainer(store, s.model, s.claude_sandbox)
     allowed_hosts = {f"127.0.0.1:{s.port}", f"localhost:{s.port}"}
@@ -442,7 +446,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     if not s.demo and not store.read_only:
         threading.Thread(target=automator.run, daemon=True, name="automations").start()
     app.state.terminals, app.state.upgrader = terminals, upgrader
-    if store.close_open_messages():
+    if not store.read_only and store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")
 
     @actions.bind("assistant_ask")
@@ -1081,8 +1085,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
 
     @actions.bind("list_runs")
     def list_runs(ctx: ActionContext, body: RunsIn):
-        return store.runs(limit=body.limit, kind=body.kind, status=body.status, subject=body.subject,
-                          before=body.before)
+        return aapi.decorate_runs(
+            store,
+            store.runs(limit=body.limit, kind=body.kind, status=body.status, subject=body.subject, before=body.before),
+        )
 
     def _triage_availability() -> tuple[bool, str]:
         if s.demo:
@@ -1112,6 +1118,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         avail, reason = _triage_availability()
         return {
             **found,
+            "run": aapi.decorate_actor(store, found["run"]),
+            "parent": aapi.decorate_actor(store, found["parent"]) if found.get("parent") else found.get("parent"),
+            "children": aapi.decorate_runs(store, found.get("children") or []),
             "tree": diagnose.span_tree(found["spans"]),
             "failures": diagnose.failures(found["spans"]),
             "related_failures": diagnose.related(store, found["run"]),
@@ -1171,6 +1180,38 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     @actions.bind("set_triage_settings")
     def triage_settings_set(ctx: ActionContext, body: TriageSettingsIn):
         return tsettings.update(store, auto=body.auto, daily_limit=body.daily_limit)
+
+    @actions.bind("list_automations")
+    def list_automations(ctx: ActionContext, body: Empty):
+        return aapi.list_automations(store, demo=s.demo)
+
+    @actions.bind("list_automation_firings")
+    def list_automation_firings(ctx: ActionContext, body: AutomationFiringsIn):
+        return aapi.list_firings(
+            store, automation_id=body.automation_id, status=body.status, limit=body.limit, demo=s.demo,
+        )
+
+    @actions.bind("save_automation")
+    def save_automation(ctx: ActionContext, body: SaveAutomationIn):
+        return aapi.save_automation(store, body, actor=ctx.actor)
+
+    @actions.bind("set_automation_enabled")
+    def set_automation_enabled(ctx: ActionContext, body: AutomationToggleIn):
+        return aapi.set_automation_enabled(
+            store, body.automation_id, body.enabled, confirm_grant=body.confirm_grant, actor=ctx.actor,
+        )
+
+    @actions.bind("renew_automation")
+    def renew_automation(ctx: ActionContext, body: AutomationIdIn):
+        return aapi.renew_automation(store, body.automation_id, actor=ctx.actor)
+
+    @actions.bind("delete_automation")
+    def delete_automation(ctx: ActionContext, body: AutomationIdIn):
+        return aapi.delete_automation(store, body.automation_id)
+
+    @actions.bind("pause_automations")
+    def pause_automations(ctx: ActionContext, body: OnIn):
+        return aapi.pause_automations(store, body.on)
 
     @actions.bind("get_runbook")
     def get_runbook(ctx: ActionContext, body: RunbookIn):

@@ -121,7 +121,8 @@ def test_user_only_actions_are_never_the_assistants_approved_or_not(panel):
     for name in ("set_agent_policy", "set_notify", "set_pref", "assistant_ask", "assistant_decide",
                  "assistant_delete", "assistant_conversations", "add_ai_login", "set_ai_login",
                  "set_ai_routing", "set_quota_override", "dismiss_ai_notice", "triage", "triage_feedback",
-                 "set_triage_settings"):
+                 "set_triage_settings", "save_automation", "set_automation_enabled", "renew_automation",
+                 "delete_automation", "pause_automations"):
         with pytest.raises(Forbidden, match="only be done by you"):
             panel.actions.permit(SPECS[name], as_assistant(), SPECS[name].input.model_construct())
     assert panel.store.setting("autopilot") in (None, "0")

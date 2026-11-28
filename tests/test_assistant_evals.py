@@ -177,6 +177,7 @@ def test_each_call_needs_its_own_approval(panel):
 
 
 def test_user_only_actions_get_no_card_and_are_refused(panel):
+    from bosun.automations import store as astore
     from bosun.providers import routing as ai_routing
 
     async def script(model):
@@ -185,6 +186,14 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
         model.ignore = await model.call("set_pref", {"key": JQ, "ignored": True})
         model.triage = await model.call("triage", {"trace_id": "abcdef01", "deep": True})
         model.triage_cfg = await model.call("set_triage_settings", {"auto": False, "daily_limit": 0})
+        model.auto_save = await model.call("save_automation", {
+            "name": "Digest", "trigger": {"kind": "refresh"}, "conditions": {},
+            "action": "notify", "scope": {"digest": "what_changed"}, "mode": "run", "enabled": True,
+        })
+        model.auto_toggle = await model.call("set_automation_enabled", {"automation_id": 1, "enabled": True})
+        model.auto_renew = await model.call("renew_automation", {"automation_id": 1})
+        model.auto_delete = await model.call("delete_automation", {"automation_id": 1})
+        model.auto_pause = await model.call("pause_automations", {"on": True})
         await model.say("Turn Autopilot on from the Today page.")
 
     panel.script(script)
@@ -192,10 +201,12 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
     events = panel.wait(cid)
     assert events[-1][1]["status"] == "ok" and not [k for k, _ in events if k == "approval"]
     model = panel.fakes[0].model
-    for result in (model.auto, model.override, model.ignore, model.triage, model.triage_cfg):
+    for result in (model.auto, model.override, model.ignore, model.triage, model.triage_cfg,
+                   model.auto_save, model.auto_toggle, model.auto_renew, model.auto_delete, model.auto_pause):
         assert not result["ok"] and "only be done by you" in result["error"]
     assert panel.store.setting("autopilot") in (None, "0") and panel.store.prefs() == {}
     assert panel.store.setting("triage_auto") is None
+    assert astore.is_paused(panel.store) is False
     assert ai_routing.overrides(panel.store) == ()
     refused = panel.audit("set_autopilot")[0]  # the attempt is on record
     assert (refused["actor"], refused["outcome"], refused["approved_by"]) == ("assistant", "error", "")
@@ -203,6 +214,8 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
     assert [(t["tool"], t["outcome"]) for t in tools] == [
         ("set_autopilot", "refused"), ("set_quota_override", "refused"), ("set_pref", "refused"),
         ("triage", "refused"), ("set_triage_settings", "refused"),
+        ("save_automation", "refused"), ("set_automation_enabled", "refused"), ("renew_automation", "refused"),
+        ("delete_automation", "refused"), ("pause_automations", "refused"),
     ]
 
 

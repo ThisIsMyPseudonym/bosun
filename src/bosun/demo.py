@@ -202,6 +202,29 @@ def _seed_triage(store: Store, now: float) -> None:
             tworker.evaluate_fast(store, rec, now=now, save=True)
 
 
+def _seed_automations(store: Store, now: float) -> None:
+    """Seed shipped-off presets and example firing history for demo mode (the engine never runs)."""
+    from .automations import presets, store as astore
+
+    presets.seed(store, now=now)
+    wc = astore.get_by_preset(store, "what_changed")
+    nf = astore.get_by_preset(store, "nightly_fix")
+    if wc is not None:
+        astore.insert_firing(
+            store, int(wc["id"]), str(wc["name"]), "refresh", "snap:1", "demo:what_changed:1",
+            status="done",
+            reason="Newly exploited: tiny-parse; New in Do now: Firefox; 2 updated.",
+            now=now - 3600,
+        )
+    if nf is not None:
+        astore.insert_firing(
+            store, int(nf["id"]), str(nf["name"]), "schedule", "2026-11-27T02:00", "demo:nightly_fix:1",
+            status="skipped",
+            reason="Pick a project and enable this preset to run it on your own machine.",
+            now=now - 7200,
+        )
+
+
 def seed(store: Store, now: float | None = None) -> int:
     """Write one snapshot of the made-up computer, with a coverage line and a name. Returns the snapshot id."""
     now = time.time() if now is None else now
@@ -220,4 +243,5 @@ def seed(store: Store, now: float | None = None) -> int:
     snap_id = store.save_snapshot(rows, [], meta={"projects": [project_to_dict(p) for p in PROJECTS.values()],
                                                   "lanes": dict(Counter(d["lane"] for d in rows))})
     _seed_triage(store, now)
+    _seed_automations(store, now)
     return snap_id

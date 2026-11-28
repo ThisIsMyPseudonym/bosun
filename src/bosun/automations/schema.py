@@ -43,6 +43,7 @@ ALLOWLIST: frozenset[str] = frozenset({
 SYSTEM_ACTIONS: frozenset[str] = frozenset({"relaunch_app", "open_app"})
 MODEL_ACTIONS: frozenset[str] = frozenset({"start_fix", "explain_item"})
 GRANT_TTL_S: int = 90 * 86400
+UNSET_PROJECT: str = "__pick_project__"
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 _WEEKDAY_ORDER = {d: i for i, d in enumerate(("mon", "tue", "wed", "thu", "fri", "sat", "sun"))}
@@ -223,6 +224,14 @@ class AutomationDef(_Strict):
     cooldown_s: int = Field(default=900, ge=0, le=86400)
     model_jobs_per_day: int = Field(default=3, ge=0, le=48)
 
+    @field_validator("name")
+    @classmethod
+    def _non_blank_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("name must not be blank")
+        return cleaned
+
     @model_validator(mode="before")
     @classmethod
     def _coerce_nested(cls, data: Any) -> Any:
@@ -260,6 +269,17 @@ class AutomationDef(_Strict):
 def is_install_action(action: str) -> bool:
     spec = SPECS.get(action)
     return spec is not None and spec.risk == Risk.INSTALL
+
+
+def has_unset_project(defn: AutomationDef) -> bool:
+    """True when any scope or condition still carries the `UNSET_PROJECT` placeholder sentinel."""
+    scope = defn.scope
+    if isinstance(scope, (StartFixScope, ExplainItemScope)) and scope.project == UNSET_PROJECT:
+        return True
+    if isinstance(scope, RecheckProjectScope) and scope.mode == "project" and scope.project == UNSET_PROJECT:
+        return True
+    cond = defn.conditions
+    return isinstance(cond, (ScheduleConditions, VerdictConditions)) and cond.project == UNSET_PROJECT
 
 
 def grant_digest(defn: AutomationDef) -> str:
@@ -318,12 +338,14 @@ def describe_scope(defn: AutomationDef) -> str:
         target = "the failed run's project" if scope.mode == "failed_project" else scope.project
         return f"Re-check project {target}, {cap}."
     if isinstance(scope, ExplainItemScope):
-        return f"Run 'Will this break?' on {scope.lane} items in {scope.project}, {cap} (up to {defn.model_jobs_per_day} AI jobs/day)."
+        proj = "a chosen project" if scope.project == UNSET_PROJECT else scope.project
+        return f"Run 'Will this break?' on {scope.lane} items in {proj}, {cap} (up to {defn.model_jobs_per_day} AI jobs/day)."
     if isinstance(scope, UpgradeScope):
         what = "the failed item, same version" if scope.mode == "failed_item" else f"{len(scope.keys)} listed item(s)"
         return f"Upgrade {what}, {cap}; Bosun's waiting period and checks still apply."
     if isinstance(scope, StartFixScope):
-        return f"Run Branch + test on {scope.lane} items in {scope.project}, {cap} (sandboxed, never pushes; up to {defn.model_jobs_per_day} AI jobs/day)."
+        proj = "a chosen project" if scope.project == UNSET_PROJECT else scope.project
+        return f"Run Branch + test on {scope.lane} items in {proj}, {cap} (sandboxed, never pushes; up to {defn.model_jobs_per_day} AI jobs/day)."
     if isinstance(scope, PinMcpScope):
         return f"Pin {len(scope.keys)} listed MCP server(s), {cap}; the 3-day waiting period still applies."
     return f"Offer to {defn.action.replace('_', ' ')} {scope.app} (asks for your approval each time)."

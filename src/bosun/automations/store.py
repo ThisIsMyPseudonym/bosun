@@ -64,11 +64,13 @@ def _set_refresh_cursor(db: sqlite3.Connection, automation_id: int, when: float)
 def save(
     store: Store, defn: AutomationDef, *, automation_id: int | None = None, preset: str | None = None,
     enabled: bool = False, grant_digest: str = "", granted_by: str = "", granted_at: float | None = None,
-    now: float | None = None,
+    clear_paused: bool = False, now: float | None = None,
 ) -> int:
     """Create or update an automation; updating cancels waiting firings/offers while preserving history."""
     when = time.time() if now is None else now
     name = redact.text(defn.name).strip()[:120]
+    if not name:
+        raise ValueError("automation name must not be blank")
     trig = _canon_json(defn.trigger.model_dump(mode="json"))
     cond = _canon_json(defn.conditions.model_dump(mode="json"))
     scope = _canon_json(defn.scope.model_dump(mode="json"))
@@ -85,8 +87,9 @@ def save(
             )
             aid = int(cur.lastrowid or 0)
         else:
+            paused_sql = "paused_reason='', " if clear_paused else ""
             db.execute(
-                "UPDATE automations SET name=?, enabled=?, paused_reason='', trigger=?, conditions=?, action=?, scope=?, "
+                f"UPDATE automations SET name=?, enabled=?, {paused_sql}trigger=?, conditions=?, action=?, scope=?, "
                 "mode=?, delay_s=?, max_per_day=?, cooldown_s=?, model_jobs_per_day=?, grant_digest=?, granted_by=?, "
                 "granted_at=?, updated=? WHERE id=?", (*vals, automation_id),
             )
@@ -118,14 +121,16 @@ def list_all(store: Store) -> list[dict[str, Any]]:
 
 def delete(store: Store, automation_id: int, *, now: float | None = None) -> bool:
     """Delete an automation, cancelling waiting firings/offers while preserving firing history."""
+    from . import presets
     when = time.time() if now is None else now
     with store._tx(write=True) as db:
-        db.execute(
-            "UPDATE automation_firings SET status='skipped', reason='automation deleted', finished=? "
-            "WHERE automation_id=? AND status IN ('scheduled', 'waiting_quota', 'offered')",
-            (when, automation_id),
-        )
-        return db.execute("DELETE FROM automations WHERE id=?", (automation_id,)).rowcount > 0
+        row = db.execute("SELECT preset FROM automations WHERE id=?", (automation_id,)).fetchone()
+        db.execute("UPDATE automation_firings SET status='skipped', reason='automation deleted', finished=? "
+                   "WHERE automation_id=? AND status IN ('scheduled', 'waiting_quota', 'offered')", (when, automation_id))
+        deleted = db.execute("DELETE FROM automations WHERE id=?", (automation_id,)).rowcount > 0
+        if deleted and row and row["preset"]:
+            presets.record_deleted_preset(db, str(row["preset"]))
+        return deleted
 
 
 def set_enabled(store: Store, automation_id: int, enabled: bool, *, now: float | None = None) -> bool:

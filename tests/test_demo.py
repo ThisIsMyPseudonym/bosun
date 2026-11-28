@@ -53,7 +53,15 @@ def test_demo_refuses_actions_that_open_or_look_at_the_machine(client):
                        ("/api/ai/logins", {"provider": "claude", "id": "work", "label": "Work", "home": "/tmp"}),
                        ("/api/ai/logins/claude/default", {"excluded": True}),
                        ("/api/ai/routing", {"mode": "balance"}),
-                       ("/api/ai/override", {"bucket": "claude", "on": True})):
+                       ("/api/ai/override", {"bucket": "claude", "on": True}),
+                       ("/api/automations", {
+                           "name": "Digest", "trigger": {"kind": "refresh"}, "conditions": {},
+                           "action": "notify", "scope": {"digest": "what_changed"}, "mode": "run", "enabled": True,
+                       }),
+                       ("/api/automations/1/enabled", {"enabled": True}),
+                       ("/api/automations/1/renew", {}),
+                       ("/api/automations/1/delete", {}),
+                       ("/api/automations/pause", {"on": True})):
         r = client.post(path, json=body)
         assert r.status_code == 403 and "This is demo data" in r.text
     for path in ("/api/ai/logins", "/api/ai/routing"):
@@ -163,3 +171,15 @@ def test_demo_seeds_rules_only_triage_verdicts_and_never_starts_a_cli(tmp_path, 
     failed_jobs = [j for j in c.get("/api/jobs").json() if j["status"] == "failed"]
     assert len(failed_jobs) >= 2
     assert all(j["triage"] is not None and j["triage"]["source"] == "rules" for j in failed_jobs)
+
+
+def test_demo_serves_seeded_automations_and_firings(client):
+    r = client.get("/api/automations")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["demo"] is True and body["paused"] is False
+    by_preset = {a["preset"]: a for a in body["automations"]}
+    assert {"what_changed", "nightly_fix"} <= set(by_preset)
+    assert all(a["enabled"] is False for a in body["automations"])
+    rf = client.get("/api/automations/firings")
+    assert rf.status_code == 200 and rf.json()["demo"] is True and len(rf.json()["firings"]) >= 2

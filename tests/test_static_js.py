@@ -949,3 +949,845 @@ def test_usage_triage_switch_refetches_and_restores_server_state_on_failed_save(
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
 
+
+
+def test_runs_view_renders_actor_label_as_text():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    runs_js = str(STATIC / "runs.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      body: mkNode("body"),
+      querySelector: () => ({{ content: "tok" }}),
+      getElementById: () => null,
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    let lastTree = null;
+    MC.api = async (path) => {{
+      if (path.startsWith("/api/runs?")) {{
+        return [{{
+          trace_id: "aabbccdd1122", kind: "action", subject: "start_fix", status: "ok",
+          actor: "automation:7", actor_label: "Automation: <img onerror=alert(1)>", started: 1700000000, duration_ms: 120,
+        }}];
+      }}
+      return {{}};
+    }};
+    MC.route = {{ parse: () => ({{ page: "runs" }}) }};
+    MC.nameOf = (_S, k) => k;
+    MC.ago = () => "1m ago";
+    MC.jobLabel = (j) => j.status;
+    MC.ask = () => {{}};
+    MC.banner = () => {{}};
+    MC.actions = {{ upgrade: () => {{}}, fix: () => {{}}, recheckProject: () => {{}}, copyPrompt: () => {{}} }};
+    MC.render = () => {{ lastTree = MC.views.runs({{}}); }};
+    eval(fs.readFileSync({json.dumps(runs_js)}, "utf8"));
+
+    (async () => {{
+      MC.views.runs({{}});
+      await new Promise((r) => setTimeout(r, 10));
+      if (!lastTree || !lastTree.textContent.includes("Automation: <img onerror=alert(1)>")) {{
+        throw new Error("runs list did not render actor_label as plain text: " + (lastTree && lastTree.textContent));
+      }}
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_automations_route_sidebar_developer_only_and_no_innerhtml():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    index_html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert '/static/automations.css' in index_html
+    assert '/static/automations.js' in index_html
+    auto_js_path = STATIC / "automations.js"
+    assert auto_js_path.is_file()
+    assert "innerHTML" not in code_only(auto_js_path.read_text(encoding="utf-8"))
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    nav_js = str(STATIC / "nav.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.location = {{ hash: "#/automations" }};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const parsed = MC.route.parse();
+    if (parsed.page !== "automations") throw new Error("expected page automations, got " + JSON.stringify(parsed));
+
+    MC.needsYou = () => [];
+    MC.actions = {{ setView: () => {{}}, showIgnored: () => {{}} }};
+    eval(fs.readFileSync({json.dumps(nav_js)}, "utf8"));
+    const scopes = {{
+      pc: {{ id: "pc", kind: "pc", sum: {{ counts: {{ now: 0, plan: 0 }}, total: 0, kev: 0 }} }},
+      active: [], dormant: [], ignoredProjects: [],
+    }};
+    const S = {{ dormantOpen: false, showIgnored: false }};
+
+    MC.SIMPLE = false;
+    const devText = MC.views.nav(S, scopes, {{ page: "automations" }}).filter(Boolean).map((n) => n.textContent).join(" ");
+    if (!devText.includes("Automations")) throw new Error("developer nav missing Automations: " + devText);
+
+    MC.SIMPLE = true;
+    const simpleText = MC.views.nav(S, scopes, {{ page: "today" }}).filter(Boolean).map((n) => n.textContent).join(" ");
+    if (simpleText.includes("Automations")) throw new Error("simple nav must hide Automations: " + simpleText);
+
+    console.log("OK");
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_automations_page_helpers_render_kill_switch_rules_renewal_history_and_escape():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false, href: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "href") this.href = String(v);
+          if (k === "value") this.value = String(v);
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.confirm = () => true;
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{ calls.push({{ path, opts }}); return {{}}; }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "5 min ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+
+    const H = MC.automationsHelpers;
+    if (!H) throw new Error("MC.automationsHelpers missing");
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+
+    // 1. Kill switch header: active -> Pause all automations; paused -> Resume automations; disabled in demo
+    const hdrActive = H.headerBar({{ paused: false, demo: false }}, () => {{}});
+    const pauseBtn = allNodes(hdrActive).find((n) => n.tagName === "BUTTON" && n.textContent === "Pause all automations");
+    if (!pauseBtn || pauseBtn.disabled) throw new Error("expected enabled Pause all automations button");
+    const hdrPaused = H.headerBar({{ paused: true, demo: false }}, () => {{}});
+    if (!hdrPaused.textContent.includes("Resume automations")) throw new Error("expected Resume automations when paused");
+    const hdrDemo = H.headerBar({{ paused: false, demo: true }}, () => {{}});
+    const demoBtns = allNodes(hdrDemo).filter((n) => n.tagName === "BUTTON");
+    if (!demoBtns.length || !demoBtns.every((b) => b.disabled)) throw new Error("header buttons must be disabled in demo mode");
+
+    // 2. Rule card: sentence, mode chip, counts, renewal notice, escaping, demo disabled switch
+    const rule = {{
+      id: 7, name: "<b>Nightly</b>", preset: "nightly_fix", enabled: true, paused_reason: "",
+      mode: "run", action: "start_fix", sentence: "Daily at 02:00, run Branch + test on App.",
+      scope_sentence: "Run Branch + test on now items in p1.",
+      grant_expired: true, grant_expires_at: 1700000000, needs_project: false, needs_grant: true,
+      today_count: 2, max_per_day: 6, last_fired: 1700000000, next_due: 1700090000,
+    }};
+    const card = H.ruleCard(rule, false, () => {{}});
+    const ctext = card.textContent;
+    if (!ctext.includes("<b>Nightly</b>") || !ctext.includes("Daily at 02:00") || !ctext.includes("Runs on its own")) {{
+      throw new Error("rule card missing escaped name, sentence, or mode: " + ctext);
+    }}
+    if (!ctext.includes("2 / 6") || !ctext.includes("5 min ago") || !ctext.includes("02:00")) {{
+      throw new Error("rule card missing today count, last fired, or next due: " + ctext);
+    }}
+    if (!ctext.includes("Still want this?") || !ctext.includes("Renew")) {{
+      throw new Error("expired rule card missing Still want this? / Renew: " + ctext);
+    }}
+    const renewBtn = allNodes(card).find((n) => n.tagName === "BUTTON" && n.textContent === "Renew");
+    const demoCard = H.ruleCard(rule, true, () => {{}});
+    const demoSwitch = allNodes(demoCard).find((n) => n.tagName === "INPUT" && n.attrs.type === "checkbox");
+    if (!demoSwitch || !demoSwitch.disabled) throw new Error("rule switch must be disabled in demo mode");
+
+    // 3. Firing history: event, status/reason, trace link, escaping
+    const hist = H.historyPanel([{{
+      id: 11, automation_id: 7, automation_name: "<script>bad()</script>", event_kind: "schedule",
+      event_ref: "2026-11-27T02:00", status: "done", reason: "Fixed <img src=x>", trace_id: "deadbeef1234",
+      created: 1700000000, finished: 1700000005,
+    }}]);
+    if (!hist.textContent.includes("<script>bad()</script>") || !hist.textContent.includes("Fixed <img src=x>")) {{
+      throw new Error("history did not escape hostile name/reason: " + hist.textContent);
+    }}
+    const runLink = allNodes(hist).find((n) => n.tagName === "A" && n.href === "#/runs/deadbeef1234");
+    if (!runLink) throw new Error("history missing #/runs/<trace_id> link");
+
+    (async () => {{
+      for (const fn of pauseBtn.listeners.click || []) await fn();
+      for (const fn of renewBtn.listeners.click || []) await fn();
+      if (!calls.some((c) => c.path === "/api/automations/pause" && JSON.parse(c.opts.body).on === true)) {{
+        throw new Error("pause click did not POST /api/automations/pause: " + JSON.stringify(calls));
+      }}
+      if (!calls.some((c) => c.path === "/api/automations/7/renew" && c.opts.method === "POST")) {{
+        throw new Error("renew click did not POST /api/automations/7/renew: " + JSON.stringify(calls));
+      }}
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_dropdowns_grant_confirmation_and_system_mode():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    index_html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert '/static/automations_editor.js' in index_html
+    editor_js_path = STATIC / "automations_editor.js"
+    assert editor_js_path.is_file()
+    assert "innerHTML" not in code_only(editor_js_path.read_text(encoding="utf-8"))
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(editor_js_path)
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{ calls.push({{ path, opts }}); return {{ id: 99 }}; }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const H = MC.automationsHelpers;
+    if (!H || typeof H.editorPanel !== "function") throw new Error("MC.automationsHelpers.editorPanel missing");
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const projects = [{{ key: "p1", name: "orchard-api", active: true }}, {{ key: "p2", name: "tidepool-web", active: true }}];
+
+    // 1. Nightly Branch + test preset: needs project pick and INSTALL + run grant checkbox
+    const nightly = {{
+      id: 2, name: "Nightly Branch + test", preset: "nightly_fix", enabled: false,
+      trigger: {{ kind: "schedule", time: "02:00", days: [] }},
+      conditions: {{ project: "__pick_project__", lane: "now" }},
+      action: "start_fix",
+      scope: {{ project: "__pick_project__", lane: "now" }},
+      mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+    }};
+    let savedCount = 0;
+    const panel = H.editorPanel(nightly, projects, false, () => {{}}, () => {{ savedCount += 1; }});
+    const selects = allNodes(panel).filter((n) => n.tagName === "SELECT");
+    if (selects.length < 4) throw new Error("expected dropdown selects for trigger, condition/scope, action, mode; got " + selects.length);
+
+    const findSave = () => allNodes(panel).find((n) => n.tagName === "BUTTON" && n.textContent === "Save");
+    const findByLabel = (lbl) => allNodes(panel).find((n) => n.attrs["aria-label"] === lbl);
+
+    // Save disabled until project picked; turning on requires INSTALL grant checkbox
+    if (!findSave().disabled) throw new Error("Save must be disabled before project is picked");
+    const projSel = findByLabel("Project");
+    if (!projSel) throw new Error("missing Project dropdown");
+    projSel.value = "p1";
+    (projSel.listeners.change || []).forEach((fn) => fn({{ target: projSel }}));
+    const turnOnBox = findByLabel("Turn on after saving");
+    if (!turnOnBox || turnOnBox.checked) throw new Error("Turn on after saving must start unchecked for disabled preset");
+    turnOnBox.checked = true;
+    (turnOnBox.listeners.change || []).forEach((fn) => fn({{ target: turnOnBox }}));
+    if (!findSave().disabled) throw new Error("Save must stay disabled until INSTALL grant checkbox is checked");
+    if (!panel.textContent.includes("Branch + test") || !panel.textContent.includes("orchard-api")) {{
+      throw new Error("grant sentence missing action or project: " + panel.textContent);
+    }}
+    const grantBox = findByLabel("Confirm scope grant");
+    if (!grantBox) throw new Error("missing Confirm scope grant checkbox");
+    grantBox.checked = true;
+    (grantBox.listeners.change || []).forEach((fn) => fn({{ target: grantBox }}));
+    if (findSave().disabled) throw new Error("Save should be enabled after picking project and checking grant");
+
+    // 2. SYSTEM action forbids choosing mode="run"
+    const sysRule = {{
+      id: null, name: "Offer relaunch", enabled: false,
+      trigger: {{ kind: "refresh" }}, conditions: {{}},
+      action: "relaunch_app", scope: {{ app: "chrome" }}, mode: "ask",
+    }};
+    const sysPanel = H.editorPanel(sysRule, projects, false, () => {{}}, () => {{}});
+    const modeSel = allNodes(sysPanel).find((n) => n.attrs["aria-label"] === "Approval mode");
+    if (!modeSel) throw new Error("missing Approval mode dropdown");
+    const modeValues = allNodes(modeSel).filter((n) => n.tagName === "OPTION").map((o) => o.value);
+    if (modeValues.includes("run") || !modeValues.includes("ask")) {{
+      throw new Error("SYSTEM action must forbid mode=run, got options: " + JSON.stringify(modeValues));
+    }}
+
+    // 3. Submitting posts /api/automations with wait_s and confirm_grant (never delay_s)
+    (async () => {{
+      const btn = findSave();
+      for (const fn of btn.listeners.click || []) await fn();
+      if (calls.length !== 1 || calls[0].path !== "/api/automations" || calls[0].opts.method !== "POST") {{
+        throw new Error("bad save request: " + JSON.stringify(calls));
+      }}
+      const sent = JSON.parse(calls[0].opts.body);
+      if ("delay_s" in sent || sent.wait_s !== 0 || sent.confirm_grant !== true) {{
+        throw new Error("bad save body (must use wait_s and confirm_grant): " + JSON.stringify(sent));
+      }}
+      if (sent.scope.project !== "p1" || sent.conditions.project !== "p1" || sent.action !== "start_fix") {{
+        throw new Error("bad scope/conditions in save body: " + JSON.stringify(sent));
+      }}
+      if (savedCount !== 1) throw new Error("onSaved callback was not called");
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_preserves_enabled_state_and_has_turn_on_control():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(STATIC / "automations_editor.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        removeAttribute(k) {{
+          delete this.attrs[k];
+          if (k === "disabled") this.disabled = false;
+          if (k === "checked") this.checked = false;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{ calls.push({{ path, opts }}); return {{ id: 1 }}; }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const H = MC.automationsHelpers;
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const findByLabel = (root, lbl) => allNodes(root).find((n) => n.attrs["aria-label"] === lbl);
+    const findSave = (root) => allNodes(root).find((n) => n.tagName === "BUTTON" && n.textContent === "Save");
+
+    // 1. Disabled preset: "Turn on after saving" starts unchecked; renaming and saving sends enabled: false
+    const disabledRule = {{
+      id: 1, name: "What changed", preset: "what_changed", enabled: false,
+      trigger: {{ kind: "refresh" }}, conditions: {{}},
+      action: "notify", scope: {{ digest: "what_changed" }},
+      mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+    }};
+    const p1 = H.editorPanel(disabledRule, [], false, () => {{}}, () => {{}});
+    const turnOn1 = findByLabel(p1, "Turn on after saving");
+    if (!turnOn1 || turnOn1.checked) throw new Error("Turn on after saving must exist and start unchecked for disabled rule");
+    const name1 = findByLabel(p1, "Automation name");
+    name1.value = "Renamed digest";
+    (name1.listeners.input || []).forEach((fn) => fn({{ target: name1 }}));
+
+    // 2. Already-enabled rule: starts checked and sends enabled: true
+    const enabledRule = {{ ...disabledRule, id: 2, enabled: true }};
+    const p2 = H.editorPanel(enabledRule, [], false, () => {{}}, () => {{}});
+    const turnOn2 = findByLabel(p2, "Turn on after saving");
+    if (!turnOn2 || !turnOn2.checked) throw new Error("Turn on after saving must start checked for already-enabled rule");
+
+    // 3. Disabled rule with "Turn on after saving" explicitly checked sends enabled: true
+    const p3 = H.editorPanel(disabledRule, [], false, () => {{}}, () => {{}});
+    const turnOn3 = findByLabel(p3, "Turn on after saving");
+    turnOn3.checked = true;
+    (turnOn3.listeners.change || []).forEach((fn) => fn({{ target: turnOn3 }}));
+
+    (async () => {{
+      for (const fn of findSave(p1).listeners.click || []) await fn();
+      for (const fn of findSave(p2).listeners.click || []) await fn();
+      for (const fn of findSave(p3).listeners.click || []) await fn();
+      if (calls.length !== 3) throw new Error("expected 3 saves, got " + calls.length);
+      const b1 = JSON.parse(calls[0].opts.body);
+      const b2 = JSON.parse(calls[1].opts.body);
+      const b3 = JSON.parse(calls[2].opts.body);
+      if (b1.enabled !== false || b1.name !== "Renamed digest") throw new Error("disabled rule flipped on: " + JSON.stringify(b1));
+      if (b2.enabled !== true) throw new Error("enabled rule flipped off: " + JSON.stringify(b2));
+      if (b3.enabled !== true) throw new Error("explicitly turned-on rule stayed off: " + JSON.stringify(b3));
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_keeps_unsaved_edits_across_rerender():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(STATIC / "automations_editor.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        removeAttribute(k) {{
+          delete this.attrs[k];
+          if (k === "disabled") this.disabled = false;
+          if (k === "checked") this.checked = false;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const rules = [
+      {{
+        id: 1, name: "What changed", preset: "what_changed", enabled: false,
+        trigger: {{ kind: "refresh" }}, conditions: {{}},
+        action: "notify", scope: {{ digest: "what_changed" }},
+        mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+      }},
+      {{
+        id: 2, name: "Nightly", preset: null, enabled: false,
+        trigger: {{ kind: "schedule", time: "02:00", days: [] }}, conditions: {{}},
+        action: "refresh", scope: {{ only: null }},
+        mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+      }},
+    ];
+    MC.api = async (path) => {{
+      if (path === "/api/automations") return {{ paused: false, demo: false, automations: rules.map((r) => ({{ ...r }})), projects: [] }};
+      if (path.startsWith("/api/automations/firings")) return {{ firings: [] }};
+      return {{ id: 1 }};
+    }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    let tree = null;
+    MC.render = () => {{ tree = MC.views.automations(); }};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const findByLabel = (lbl) => allNodes(tree).find((n) => n.attrs["aria-label"] === lbl);
+    const editBtns = () => allNodes(tree).filter((n) => n.tagName === "BUTTON" && n.textContent === "Edit");
+
+    (async () => {{
+      MC.render();
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Open editor on rule 1 and fill fields
+      const b1 = editBtns()[1]; // presets come after custom rules
+      for (const fn of b1.listeners.click || []) fn();
+      const nameIn = findByLabel("Automation name");
+      nameIn.value = "Unsaved edit";
+      (nameIn.listeners.input || []).forEach((fn) => fn({{ target: nameIn }}));
+      const maxSel = findByLabel("Max per day");
+      maxSel.value = "12";
+      (maxSel.listeners.change || []).forEach((fn) => fn({{ target: maxSel }}));
+      const turnOn = findByLabel("Turn on after saving");
+      turnOn.checked = true;
+      (turnOn.listeners.change || []).forEach((fn) => fn({{ target: turnOn }}));
+
+      // Simulate 15-second background fetch + full MC.render()
+      await MC.automationsHelpers.fetchAutomations(true);
+      MC.render();
+
+      const afterName = findByLabel("Automation name");
+      const afterMax = findByLabel("Max per day");
+      const afterTurnOn = findByLabel("Turn on after saving");
+      if (!afterName || afterName.value !== "Unsaved edit") throw new Error("name wiped on re-render: " + (afterName && afterName.value));
+      const selectedMax = allNodes(afterMax).find((o) => o.tagName === "OPTION" && o.attrs.selected !== undefined);
+      if (!selectedMax || selectedMax.value !== "12") throw new Error("maxPerDay wiped on re-render");
+      if (!afterTurnOn || !afterTurnOn.checked) throw new Error("turnOn wiped on re-render");
+
+      // Switching to another rule drops old edits
+      const b2 = editBtns()[0];
+      for (const fn of b2.listeners.click || []) fn();
+      if (findByLabel("Automation name").value !== "Nightly") throw new Error("switching rules did not reset state");
+
+      // Cancel drops edits
+      const name2 = findByLabel("Automation name");
+      name2.value = "Temp";
+      (name2.listeners.input || []).forEach((fn) => fn({{ target: name2 }}));
+      const cancelBtn = allNodes(tree).find((n) => n.tagName === "BUTTON" && n.textContent === "Cancel");
+      for (const fn of cancelBtn.listeners.click || []) fn();
+      for (const fn of editBtns()[0].listeners.click || []) fn();
+      if (findByLabel("Automation name").value !== "Nightly") throw new Error("cancel did not drop state");
+
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_name_input_keeps_same_node_while_typing():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(STATIC / "automations_editor.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        removeAttribute(k) {{
+          delete this.attrs[k];
+          if (k === "disabled") this.disabled = false;
+          if (k === "checked") this.checked = false;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{ calls.push({{ path, opts }}); return {{ id: 1 }}; }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const rule = {{
+      id: 1, name: "Digest", enabled: false,
+      trigger: {{ kind: "refresh" }}, conditions: {{}},
+      action: "notify", scope: {{ digest: "what_changed" }},
+      mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+    }};
+    const panel = MC.automationsHelpers.editorPanel(rule, [], false, () => {{}}, () => {{}});
+    const findInput = () => allNodes(panel).find((n) => n.attrs["aria-label"] === "Automation name");
+    const findSave = () => allNodes(panel).find((n) => n.tagName === "BUTTON" && n.textContent === "Save");
+
+    const origInput = findInput();
+    if (!origInput) throw new Error("missing name input");
+    for (const nextVal of ["D", "Di", "Dig", "   ", "My Digest"]) {{
+      origInput.value = nextVal;
+      (origInput.listeners.input || []).forEach((fn) => fn({{ target: origInput }}));
+      const nowInput = findInput();
+      if (nowInput !== origInput) throw new Error("name input node was rebuilt while typing: " + nextVal);
+      const wantDisabled = !nextVal.trim();
+      if (!!findSave().disabled !== wantDisabled) {{
+        throw new Error(`Save disabled mismatch for "${{nextVal}}": got ${{findSave().disabled}}`);
+      }}
+    }}
+
+    (async () => {{
+      for (const fn of findSave().listeners.click || []) await fn();
+      if (calls.length !== 1 || JSON.parse(calls[0].opts.body).name !== "My Digest") {{
+        throw new Error("save did not send typed name: " + JSON.stringify(calls));
+      }}
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_opens_unrepresentable_rules_readonly_and_grant_includes_cadence():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(STATIC / "automations_editor.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        removeAttribute(k) {{
+          delete this.attrs[k];
+          if (k === "disabled") this.disabled = false;
+          if (k === "checked") this.checked = false;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    MC.api = async () => ({{}});
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const H = MC.automationsHelpers;
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const projects = [{{ key: "p1", name: "orchard-api", active: true }}];
+
+    // Unrepresentable rules must open read-only with the note and no Save button
+    const uneditableRules = [
+      {{
+        id: 10, name: "Mon/Wed scan", enabled: false, sentence: "On Mon, Wed at 02:00, re-scan everything.",
+        trigger: {{ kind: "schedule", time: "02:00", days: ["mon", "wed"] }}, conditions: {{}},
+        action: "refresh", scope: {{ only: null }}, mode: "run",
+      }},
+      {{
+        id: 11, name: "Two refresh conditions", enabled: false, sentence: "After a full refresh, notify.",
+        trigger: {{ kind: "refresh" }}, conditions: {{ newly_exploited: true, any_failed: true, new_in_lanes: [] }},
+        action: "notify", scope: {{ digest: "what_changed" }}, mode: "run",
+      }},
+      {{
+        id: 12, name: "Plan lane condition", enabled: false, sentence: "After a full refresh, notify.",
+        trigger: {{ kind: "refresh" }}, conditions: {{ newly_exploited: false, any_failed: false, new_in_lanes: ["plan"] }},
+        action: "notify", scope: {{ digest: "what_changed" }}, mode: "run",
+      }},
+      {{
+        id: 13, name: "Two collectors", enabled: false, sentence: "After a full refresh, re-scan brew, repos.",
+        trigger: {{ kind: "refresh" }}, conditions: {{}},
+        action: "refresh", scope: {{ only: ["brew", "repos"] }}, mode: "run",
+      }},
+      {{
+        id: 14, name: "Verdict rule", enabled: false, sentence: "When a failure verdict arrives, upgrade.",
+        trigger: {{ kind: "verdict" }}, conditions: {{ transient: true }},
+        action: "upgrade", scope: {{ mode: "failed_item", keys: [] }}, mode: "run",
+      }},
+    ];
+    for (const r of uneditableRules) {{
+      let closed = 0;
+      const p = H.editorPanel(r, projects, false, () => {{ closed += 1; }}, () => {{}});
+      if (!p.textContent.includes("Edit isn't available for this automation here")) {{
+        throw new Error(`rule ${{r.id}} missing read-only note: ` + p.textContent);
+      }}
+      const nodes = allNodes(p);
+      if (nodes.some((n) => n.tagName === "BUTTON" && n.textContent === "Save")) {{
+        throw new Error(`rule ${{r.id}} must not render Save button`);
+      }}
+      if (nodes.some((n) => n.tagName === "SELECT" || n.tagName === "INPUT")) {{
+        throw new Error(`rule ${{r.id}} must not render editable controls`);
+      }}
+      const closeBtn = nodes.find((n) => n.tagName === "BUTTON");
+      if (!closeBtn) throw new Error(`rule ${{r.id}} missing Close button`);
+      for (const fn of closeBtn.listeners.click || []) fn();
+      if (closed !== 1) throw new Error(`rule ${{r.id}} Close did not invoke onCancel`);
+    }}
+
+    // Editable schedule rule: grant sentence includes trigger and cadence
+    const schedRule = {{
+      id: 20, name: "Weekday fix", enabled: true,
+      trigger: {{ kind: "schedule", time: "02:00", days: ["mon", "tue", "wed", "thu", "fri"] }},
+      conditions: {{ project: "p1", lane: "now" }},
+      action: "start_fix", scope: {{ project: "p1", lane: "now" }},
+      mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+    }};
+    const p = H.editorPanel(schedRule, projects, false, () => {{}}, () => {{}});
+    const grantBox = allNodes(p).find((n) => n.className === "auto-grant");
+    if (!grantBox || !grantBox.textContent.includes("Weekdays") || !grantBox.textContent.includes("02:00")) {{
+      throw new Error("grant sentence missing schedule cadence/time: " + (grantBox && grantBox.textContent));
+    }}
+    const trigSel = allNodes(p).find((n) => n.attrs["aria-label"] === "Trigger");
+    trigSel.value = "refresh";
+    (trigSel.listeners.change || []).forEach((fn) => fn({{ target: trigSel }}));
+    if (!grantBox.textContent.includes("full refresh")) {{
+      throw new Error("grant sentence missing refresh trigger after switch: " + grantBox.textContent);
+    }}
+    console.log("OK");
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"

@@ -64,7 +64,7 @@ MC.views.runs = function runs(S) {
           el("span", { class: "rkind", text: KIND_LABEL[r.kind] || r.kind }),
           el("span", { class: "rsubj" }, el("span", { text: subjectName(S, r) }),
             r.status !== "ok" && r.error ? el("span", { class: "rerr", text: firstLine(r.error) }) : r.summary ? el("span", { class: "rsum", text: firstLine(r.summary) }) : null),
-          el("span", { class: "ractor", text: r.actor }),
+          el("span", { class: "ractor", text: r.actor_label || r.actor }),
           el("span", { class: "rtook", text: r.status === "running" ? "running…" : took(r.duration_ms) }),
           el("span", { class: "rwhen", text: MC.ago(r.started) })))));
 };
@@ -368,7 +368,7 @@ MC.views.trace = function traceView(S, id) {
   return el("div", { class: "runs" }, back,
     el("div", { class: "pagehead" },
       el("h1", {}, el("span", { text: `${KIND_LABEL[r.kind] || r.kind}: ${subjectName(S, r) || "—"} ` }), statusChip(r.status)),
-      el("p", { class: "hint", text: `${new Date(r.started * 1000).toLocaleString()} · ${r.status === "running" ? "running…" : took(r.duration_ms)} · by ${r.actor} · trace ${r.trace_id.slice(0, 8)}` })),
+      el("p", { class: "hint", text: `${new Date(r.started * 1000).toLocaleString()} · ${r.status === "running" ? "running…" : took(r.duration_ms)} · by ${r.actor_label || r.actor} · trace ${r.trace_id.slice(0, 8)}` })),
     t.triage ? verdictCard(t.triage, t, S) : null,
     r.error ? el("div", { class: `callout${r.status === "partial" ? "" : " crit"}`, text: r.error }) : r.summary ? el("p", { text: r.summary }) : null,
     el("div", { class: "actions" },

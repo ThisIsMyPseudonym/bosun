@@ -15,6 +15,7 @@ from ..serialize import item_from_dict
 from ..store import Store
 from . import store as astore
 from .schema import (
+    UNSET_PROJECT,
     AppActionScope,
     AutomationDef,
     ExplainItemScope,
@@ -26,6 +27,7 @@ from .schema import (
     ScheduleConditions,
     StartFixScope,
     UpgradeScope,
+    has_unset_project,
 )
 
 _FIXABLE_SOURCES = frozenset({"repo", "container"})
@@ -123,6 +125,8 @@ def matches_schedule(
     store: Store, conditions: ScheduleConditions, action: str, *, now: float | None = None,
 ) -> bool:
     """Evaluate `schedule` conditions against the latest snapshot for the target action."""
+    if conditions.project == UNSET_PROJECT:
+        return False
     if conditions.project is None and conditions.lane is None:
         return True
     items = list(_snap_items_by_key(store).values())
@@ -196,6 +200,8 @@ def resolve_input(
     store: Store, defn: AutomationDef, *, event: Mapping[str, Any], now: float | None = None,
 ) -> dict[str, Any] | None:
     """Resolve the exact action input dict for `defn` and `event`, or None when there is nothing to do."""
+    if has_unset_project(defn):
+        return None
     scope = defn.scope
     if isinstance(scope, NotifyScope):
         return {
@@ -254,6 +260,8 @@ def input_in_scope(
     store: Store, defn: AutomationDef, body: BaseModel, *, firing_id: int | None = None,
 ) -> bool:
     """Verify at `Actions.permit` time that `body` stays strictly inside `defn.scope`."""
+    if has_unset_project(defn):
+        return False
     scope = defn.scope
     if isinstance(scope, RefreshScope):
         if not isinstance(body, RefreshIn) or body.auto_upgrade is not False:

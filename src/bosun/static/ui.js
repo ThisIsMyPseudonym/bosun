@@ -269,6 +269,7 @@ MC.route = {
     if (h === "packages") return { page: "packages" };
     if (h === "runs") return { page: "runs" };
     if (h === "usage") return { page: "usage" };
+    if (h === "automations") return { page: "automations" };
     if (h.startsWith("runs/")) return { page: "trace", id: h.slice(5) };
     return { page: "today" };  // also the old #/overview links
   },

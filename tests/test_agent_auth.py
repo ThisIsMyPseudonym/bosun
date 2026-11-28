@@ -32,7 +32,15 @@ USER_ONLY = {"set_autopilot": {"on": True},
              "dismiss_ai_notice": {},
              "triage": {"trace_id": "abcdef01", "deep": False},
              "triage_feedback": {"trace_id": "abcdef01", "feedback": "helpful"},
-             "set_triage_settings": {"auto": False, "daily_limit": 5}}
+             "set_triage_settings": {"auto": False, "daily_limit": 5},
+             "save_automation": {
+                 "name": "Digest", "trigger": {"kind": "refresh"}, "conditions": {},
+                 "action": "notify", "scope": {"digest": "what_changed"}, "mode": "run", "enabled": True,
+             },
+             "set_automation_enabled": {"automation_id": 1, "enabled": True},
+             "renew_automation": {"automation_id": 1},
+             "delete_automation": {"automation_id": 1},
+             "pause_automations": {"on": True}}
 YOURS_ALONE = {"restore_app"}  # not a limit: it replaces an app with an older copy, which only a person decides
 PANEL = {n for n, sp in SPECS.items() if sp.panel}  # the Ask Bosun panel's own actions: tests/test_assistant.py
 
@@ -195,6 +203,14 @@ def test_nobody_but_the_user_loosens_a_limit(app, agent, user, name):
         tstore.save_verdict(app.store, f"run:{tid}", tid, "sig-auth", "rules", Verdict(
             category="unknown", cause="boom", confidence="low", evidence=[],
             next_step=NextStep(kind="none", why="ok"), needs_person=False, transient=False))
+    if name == "renew_automation":  # renewing requires an existing grant matching the rule
+        from bosun.automations import store as astore
+        from bosun.automations.schema import grant_digest
+        row = astore.get(app.store, USER_ONLY[name]["automation_id"])
+        assert row is not None
+        with app.store._tx(write=True) as db:
+            db.execute("UPDATE automations SET grant_digest=?, granted_by='user', granted_at=1.0 WHERE id=?",
+                       (grant_digest(astore.parse_def(row)), row["id"]))
     assert user.post(path, json=USER_ONLY[name], headers=USER).status_code == 200
 
 
