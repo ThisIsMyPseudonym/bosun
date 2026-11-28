@@ -25,7 +25,7 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
-RESULT_CHARS = 30_000  # of one tool result given to the model: a panel answer shouldn't cost a whole refresh's trace
+RESULT_CHARS = 50_000  # of one tool result given to the model: fits data-model.md without costing a whole refresh's trace
 STORED_CHARS = 4_000  # of a tool result kept in messages
 SHOWN_CHARS = 1_500  # of a tool result sent to the panel
 # Cards one conversation may have waiting over MCP. Each waits on a server thread, so a model told to fire many
