@@ -52,6 +52,7 @@ from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPol
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, router as ai_router, routing as ai_routing, usage as ai_usage
+from .automations import engine as aengine, store as astore
 from .triage import model as tmodel, settings as tsettings, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
@@ -115,6 +116,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     threading.Thread(target=notifier.run, daemon=True, name="notify").start()
     running = selfupdate.version()
     assistant: Assistant | None = None
+    automator: aengine.Automator | None = None
     if s.self_update:  # once the daily refresh pulls new code, move onto it when nothing is running
         def _not_started(why: str) -> None:
             store.set_setting(selfupdate.STATUS, json.dumps({"status": "failed", "detail": why, "at": time.time(),
@@ -122,7 +124,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
 
         def _selfupdate_busy() -> bool:
             return (refresh_state["running"] or store.busy() or selfupdate.is_pending(store)
-                    or (assistant is not None and assistant.busy()))
+                    or (assistant is not None and assistant.busy())
+                    or (automator is not None and automator.busy()))
 
         threading.Thread(target=selfupdate.restart_when_idle, args=(_selfupdate_busy,),
                          kwargs={"report": _not_started},
@@ -135,6 +138,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     reset = tstore.reset_running(store)
     if reset:
         log.info("returned %d interrupted triage rows to queued", reset)
+    if not store.read_only:
+        recovered = astore.recover_running(store)
+        if recovered:
+            log.info("recovered %d interrupted automation firings", recovered)
     fixer = Fixer(store, s)
     explainer = Explainer(store, s.model, s.claude_sandbox)
     allowed_hosts = {f"127.0.0.1:{s.port}", f"localhost:{s.port}"}
@@ -430,6 +437,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     app.state.triage_tokens, app.state.triager = triage_tokens, triager
     if not s.demo and not store.read_only:
         threading.Thread(target=triager.run, daemon=True, name="triage").start()
+    automator = aengine.Automator(store, s, actions)
+    app.state.automator = automator
+    if not s.demo and not store.read_only:
+        threading.Thread(target=automator.run, daemon=True, name="automations").start()
     app.state.terminals, app.state.upgrader = terminals, upgrader
     if store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")

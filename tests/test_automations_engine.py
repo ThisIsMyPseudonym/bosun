@@ -259,3 +259,36 @@ def test_engine_circuit_breaker_autopilot_skip_kill_switch_missed_and_restart(tm
         assert rep_err.errors == 1
     finally:
         trace.configure(None)
+
+
+def test_server_startup_recovers_running_firings_and_demo_never_starts_engine(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    defn = AutomationDef(
+        name="Digest",
+        trigger=RefreshTrigger(kind="refresh"),
+        conditions=RefreshConditions(),
+        action="notify",
+        scope=NotifyScope(digest="what_changed"),
+        mode="run",
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=100.0)
+    fid = astore.insert_firing(
+        st, aid, defn.name, "refresh", "snap:1", "refresh:snap:1",
+        status="running", due=100.0, now=100.0,
+    )
+    assert fid is not None
+    app = create_app(load_settings(), st, "t" * 32)
+    assert app.state.automator is not None
+    assert astore.get_firing(st, fid)["status"] == "scheduled"
+
+    demo_s = load_settings()
+    demo_s = type(demo_s)(**{**demo_s.__dict__, "demo": True, "self_update": False, "data_dir": tmp_path})
+    demo_st = Store(tmp_path / "demo.db")
+    demo_aid = astore.save(demo_st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=100.0)
+    astore.insert_firing(
+        demo_st, demo_aid, defn.name, "refresh", "snap:1", "refresh:snap:1",
+        status="scheduled", due=100.0, now=100.0,
+    )
+    demo_app = create_app(demo_s, demo_st, "t" * 32)
+    assert demo_app.state.automator.tick(now=200.0).ran == 0
+
