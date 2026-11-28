@@ -690,3 +690,24 @@ def test_the_assistant_can_point_at_a_recipe_and_cannot_start_one(tmp_path, monk
         assert len(started) == 1  # the user's click is what starts it
     finally:
         trace.configure(None)
+
+
+def test_result_chars_stays_30k_for_tools_while_read_guide_fits_data_model(panel):
+    from bosun import assistant_tools
+
+    assert assistant_tools.RESULT_CHARS == 30_000
+
+    @panel.actions.bind("status")
+    def huge_status(ctx, body):
+        return {"blob": "x" * 35_000}
+
+    async def script(model):
+        model.big = await model.call("status", {})
+        model.guide = await model.call("read_guide", {"topic": "data-model"})
+        await model.say("done")
+
+    panel.script(script)
+    panel.wait(panel.ask("check limits")["conversation_id"])
+    m = panel.fakes[0].model
+    assert m.big["ok"] and m.big.get("truncated")  # untrusted tool output is capped at 30_000
+    assert m.guide["ok"] and "truncated" not in m.guide and "v_current_items" in m.guide["result"]
