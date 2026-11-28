@@ -207,7 +207,7 @@ class Automator:
                         status="missed", reason="missed schedule slot (>2 h late)", now=when,
                     )
                 elif isinstance(defn.conditions, ScheduleConditions) and amatch.matches_schedule(
-                    self.store, defn.conditions, defn.action,
+                    self.store, defn.conditions, defn.action, now=when,
                 ):
                     fid = astore.insert_firing(
                         self.store, aid, defn.name, "schedule", slot.slot_key, dedup,
@@ -302,11 +302,11 @@ class Automator:
             astore.set_firing(self.store, fid, due=when + INSTALL_WAIT_BACKOFF_S, now=when)
             return "waiting"
         if isinstance(defn.conditions, ScheduleConditions) and not amatch.matches_schedule(
-            self.store, defn.conditions, defn.action,
+            self.store, defn.conditions, defn.action, now=when,
         ):
             astore.set_firing(self.store, fid, status="skipped", reason="conditions no longer hold", now=when)
             return "skipped"
-        resolved = amatch.resolve_input(self.store, defn, event=_parse_json(firing.get("input")))
+        resolved = amatch.resolve_input(self.store, defn, event=_parse_json(firing.get("input")), now=when)
         if resolved is None:
             astore.set_firing(self.store, fid, status="skipped", reason="nothing to do", now=when)
             return "skipped"

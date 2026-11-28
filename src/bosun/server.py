@@ -972,14 +972,39 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     def pin_mcp(ctx: ActionContext, body: PinIn):
         """Pin unpinned MCP servers to the newest version that has been out three days (Bosun edits the config; see mcp_pin)."""
         known = _items_by_key()
-        items = [known[k] for k in dict.fromkeys(body.keys)
-                 if k in known and known[k]["source"] == "mcp" and known[k].get("fix_kind") == "pin"
-                 and not store.active_job_for(k)]
+        pinnable = [known[k] for k in dict.fromkeys(body.keys)
+                    if k in known and known[k]["source"] == "mcp" and known[k].get("fix_kind") == "pin"
+                    and not store.active_job_for(k)]
+        items, held = list(pinnable), []
+        auto_actor = registry.is_automation(ctx.actor)
+        if auto_actor and pinnable:
+            prefs = store.prefs()
+            skip = autopilot.hands_off(store, list(known.values()))
+            items = []
+            for it in pinnable:
+                k = it["key"]
+                until = (None if (not it.get("available") and "offered" not in it)
+                         else autopilot.held_until(it, ctx.now))
+                if k in skip:
+                    held.append({"key": k, "reason": f"Left to you: {skip[k]}"})
+                elif not attention.autopilot_may(it, prefs, ctx.now):
+                    held.append({"key": k, "reason": "Ignored or snoozed; automations leave it to you."})
+                elif until is not None:
+                    held.append({"key": k, "reason": f"This release is new: Bosun installs nothing unattended until it "
+                                 f"has been on offer {autopilot.wait_label(it)}."})
+                else:
+                    items.append(it)
         if not items:
+            if auto_actor and held:
+                return {"queued": [], "skipped": held}
             raise Invalid("Nothing here Bosun can pin; refresh and try again")
-        job_ids = [store.create_job(i["key"], ["pin", i["package_id"]]) for i in items]
+        actor = None if ctx.actor == "user" else ctx.actor
+        job_ids = [store.create_job(i["key"], ["pin", i["package_id"]], actor=actor) for i in items]
         trace.thread(_run_pins, (items, job_ids), name="mcp-pin")
-        return {"queued": job_ids, "skipped": [k for k in body.keys if k not in {i["key"] for i in items}]}
+        queued_keys = {i["key"] for i in items}
+        held_keys = {h["key"] for h in held}
+        other_skipped = [k for k in body.keys if k not in queued_keys and k not in held_keys]
+        return {"queued": job_ids, "skipped": [*other_skipped, *held]}
 
     @actions.bind("start_fix")
     def fix(ctx: ActionContext, body: FixIn):

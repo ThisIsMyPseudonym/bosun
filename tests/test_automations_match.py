@@ -194,3 +194,59 @@ def test_failed_origin_scopes_and_schedule_action_filters(tmp_path):
     assert input_in_scope(st, frc, ProjectIn(project="p1"), firing_id=rfid)
     assert not input_in_scope(st, frc, ProjectIn(project="p2"), firing_id=rfid)
 
+
+def test_resolve_input_skips_held_hands_off_ignored_and_snoozed_for_every_action(tmp_path, monkeypatch):
+    import time
+    from bosun import autopilot
+
+    monkeypatch.setattr(autopilot, "WAIT_DAYS", 3)
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+
+    # Build 5 items per action category: held (fresh), hands_off, ignored, snoozed, ok (aged)
+    def _group(make):
+        return [make(tag) for tag in ("fresh", "ho", "ign", "snz", "ok")]
+
+    brews = _group(lambda t: Item(Source.BREW, f"b-{t}", f"b-{t}", "1.0.0", "1.0.1", lane="batch"))
+    mcps = _group(lambda t: Item(Source.MCP, f"Cursor/m-{t}/unpinned", f"m-{t}", "npx p@latest", "1.0.0", lane="now", fix_kind="pin"))
+    repos = _group(lambda t: Item(Source.REPO, f"r-{t}", f"r-{t}", "1.0.0", "1.0.1", ecosystem="npm", project="p1", lane="now"))
+    all_items = [*brews, *mcps, *repos]
+    st.save_snapshot([item_to_dict(x) for x in all_items], [])
+
+    for grp in (brews, mcps, repos):
+        _fresh, ho, ign, snz, ok = grp
+        jid = st.create_job(ho.key, ["upgrade", ho.key])
+        st.finish_job(jid, "failed", "sudo: a password is required")
+        st.set_pref(ign.key, ignored=True)
+        st.set_state(snz.key, "snoozed", until_ts=now + 86400)
+        with st._tx(write=True) as db:
+            for it in (ho, ign, snz, ok):
+                db.execute("UPDATE offers SET first_seen = ? WHERE item_key = ?", (now - 5 * 86400, it.key))
+    st.save_snapshot([item_to_dict(x) for x in all_items], [])
+
+    up_def = AutomationDef(
+        name="Up", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="upgrade", scope=UpgradeScope(mode="keys", keys=tuple(x.key for x in brews)), mode="run",
+    )
+    assert resolve_input(st, up_def, event={}, now=now) == {"keys": [brews[4].key]}
+
+    pin_def = AutomationDef(
+        name="Pin", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="pin_mcp", scope=PinMcpScope(keys=tuple(x.key for x in mcps)), mode="run",
+    )
+    assert resolve_input(st, pin_def, event={}, now=now) == {"keys": [mcps[4].key]}
+
+    fix_def = AutomationDef(
+        name="Fix", trigger=ScheduleTrigger(kind="schedule", time="02:00"),
+        conditions=ScheduleConditions(project="p1", lane="now"),
+        action="start_fix", scope=StartFixScope(project="p1", lane="now"), mode="run",
+    )
+    assert resolve_input(st, fix_def, event={}, now=now) == {"keys": [repos[4].key]}
+
+    exp_def = AutomationDef(
+        name="Explain", trigger=ScheduleTrigger(kind="schedule", time="02:00"),
+        conditions=ScheduleConditions(project="p1", lane="now"),
+        action="explain_item", scope=ExplainItemScope(project="p1", lane="now"), mode="run",
+    )
+    assert resolve_input(st, exp_def, event={}, now=now) == {"keys": [repos[4].key]}
+

@@ -100,15 +100,38 @@ def _uncached_explain(store: Store, item: dict[str, Any]) -> bool:
     return store.cache_get("explain", explain.cache_key(item_from_dict(item))) is None
 
 
-def matches_schedule(store: Store, conditions: ScheduleConditions, action: str) -> bool:
+def _item_held(item: dict[str, Any], now: float | None = None) -> bool:
+    if item.get("source") == "mcp" and item.get("fix_kind") == "pin" and not item.get("available") and "offered" not in item:
+        return False  # mcp_pin.settled() enforces autopilot.WAIT_DAYS against registry publish times
+    return autopilot.held_until(item, now) is not None
+
+
+def _item_allowed(
+    item: dict[str, Any], prefs: dict[str, dict[str, Any]], skip: Mapping[str, str], now: float | None = None,
+) -> bool:
+    """Autopilot parity guard for automation scope resolution: skip hands-off, ignored, snoozed, and held items."""
+    if item["key"] in skip:
+        return False
+    if not attention.autopilot_may(item, prefs, now):
+        return False
+    if item.get("project") and prefs.get(f"{attention.PROJECT}{item['project']}", {}).get("ignored"):
+        return False
+    return not _item_held(item, now)
+
+
+def matches_schedule(
+    store: Store, conditions: ScheduleConditions, action: str, *, now: float | None = None,
+) -> bool:
     """Evaluate `schedule` conditions against the latest snapshot for the target action."""
     if conditions.project is None and conditions.lane is None:
         return True
     items = list(_snap_items_by_key(store).values())
     prefs = store.prefs()
+    skip = autopilot.hands_off(store, items)
     candidates = [
         i for i in items
-        if attention.in_front(i, prefs)
+        if attention.in_front(i, prefs, now)
+        and _item_allowed(i, prefs, skip, now)
         and (conditions.project is None or i.get("project") == conditions.project)
         and (conditions.lane is None or i.get("lane") == conditions.lane)
     ]
@@ -117,35 +140,41 @@ def matches_schedule(store: Store, conditions: ScheduleConditions, action: str) 
     if action == "explain_item":
         return any(_uncached_explain(store, i) for i in candidates)
     if action == "upgrade":
-        skip = autopilot.hands_off(store, items)
-        return any(autopilot.eligible(i, prefs, skip) for i in candidates)
+        return any(autopilot.eligible(i, prefs, skip, now) for i in candidates)
     return bool(candidates)
 
 
-def _resolve_fix_keys(store: Store, scope: StartFixScope) -> list[str]:
-    prefs = store.prefs()
+def _resolve_fix_keys(store: Store, scope: StartFixScope, now: float | None = None) -> list[str]:
+    known = _snap_items_by_key(store)
+    prefs, skip = store.prefs(), autopilot.hands_off(store, list(known.values()))
     return [
-        k for k, i in _snap_items_by_key(store).items()
+        k for k, i in known.items()
         if i.get("project") == scope.project and i.get("lane") == scope.lane
-        and _is_fixable(i) and attention.in_front(i, prefs) and not store.active_fix_for(k)
+        and _is_fixable(i) and attention.in_front(i, prefs, now)
+        and _item_allowed(i, prefs, skip, now) and not store.active_fix_for(k)
     ][:100]
 
 
-def _resolve_explain_keys(store: Store, scope: ExplainItemScope) -> list[str]:
-    prefs = store.prefs()
-    for k, i in _snap_items_by_key(store).items():
+def _resolve_explain_keys(store: Store, scope: ExplainItemScope, now: float | None = None) -> list[str]:
+    known = _snap_items_by_key(store)
+    prefs, skip = store.prefs(), autopilot.hands_off(store, list(known.values()))
+    for k, i in known.items():
         if (i.get("project") == scope.project and i.get("lane") == scope.lane
-                and attention.in_front(i, prefs) and _uncached_explain(store, i)):
+                and attention.in_front(i, prefs, now) and _item_allowed(i, prefs, skip, now)
+                and _uncached_explain(store, i)):
             return [k]
     return []
 
 
-def _resolve_upgrade_keys(store: Store, scope: UpgradeScope, event: Mapping[str, Any]) -> list[str]:
+def _resolve_upgrade_keys(
+    store: Store, scope: UpgradeScope, event: Mapping[str, Any], now: float | None = None,
+) -> list[str]:
     known = _snap_items_by_key(store)
+    prefs, skip = store.prefs(), autopilot.hands_off(store, list(known.values()))
     if scope.mode == "keys":
-        return [k for k in scope.keys if k in known]
+        return [k for k in scope.keys if k in known and _item_allowed(known[k], prefs, skip, now)]
     key = event.get("item_key")
-    if not isinstance(key, str) or key not in known:
+    if not isinstance(key, str) or key not in known or not _item_allowed(known[key], prefs, skip, now):
         return []
     wanted_ver = event.get("available")
     if isinstance(wanted_ver, str) and wanted_ver and known[key].get("available") != wanted_ver:
@@ -153,7 +182,19 @@ def _resolve_upgrade_keys(store: Store, scope: UpgradeScope, event: Mapping[str,
     return [key]
 
 
-def resolve_input(store: Store, defn: AutomationDef, *, event: Mapping[str, Any]) -> dict[str, Any] | None:
+def _resolve_pin_keys(store: Store, scope: PinMcpScope, now: float | None = None) -> list[str]:
+    known = _snap_items_by_key(store)
+    prefs, skip = store.prefs(), autopilot.hands_off(store, list(known.values()))
+    return [
+        k for k in scope.keys
+        if k in known and known[k].get("source") == "mcp" and known[k].get("fix_kind") == "pin"
+        and _item_allowed(known[k], prefs, skip, now) and not store.active_job_for(k)
+    ]
+
+
+def resolve_input(
+    store: Store, defn: AutomationDef, *, event: Mapping[str, Any], now: float | None = None,
+) -> dict[str, Any] | None:
     """Resolve the exact action input dict for `defn` and `event`, or None when there is nothing to do."""
     scope = defn.scope
     if isinstance(scope, NotifyScope):
@@ -168,21 +209,16 @@ def resolve_input(store: Store, defn: AutomationDef, *, event: Mapping[str, Any]
         proj = scope.project if scope.mode == "project" else event.get("project")
         return {"project": proj} if isinstance(proj, str) and proj else None
     if isinstance(scope, StartFixScope):
-        keys = _resolve_fix_keys(store, scope)
+        keys = _resolve_fix_keys(store, scope, now)
         return {"keys": keys} if keys else None
     if isinstance(scope, ExplainItemScope):
-        keys = _resolve_explain_keys(store, scope)
+        keys = _resolve_explain_keys(store, scope, now)
         return {"keys": keys} if keys else None
     if isinstance(scope, UpgradeScope):
-        keys = _resolve_upgrade_keys(store, scope, event)
+        keys = _resolve_upgrade_keys(store, scope, event, now)
         return {"keys": keys} if keys else None
     if isinstance(scope, PinMcpScope):
-        known = _snap_items_by_key(store)
-        keys = [
-            k for k in scope.keys
-            if k in known and known[k].get("source") == "mcp" and known[k].get("fix_kind") == "pin"
-            and not store.active_job_for(k)
-        ]
+        keys = _resolve_pin_keys(store, scope, now)
         return {"keys": keys} if keys else None
     if isinstance(scope, AppActionScope):
         return {"app": scope.app} if defn.action == "relaunch_app" else {"key": scope.app}

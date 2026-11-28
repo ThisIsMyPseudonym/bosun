@@ -409,11 +409,11 @@ def test_engine_isolates_per_firing_exceptions_without_starving_queue(tmp_path, 
             return real_precheck(aid, row, defn, when)
         monkeypatch.setattr(eng, "_precheck_limits", boom_precheck)
     elif spot == "resolve_input":
-        def boom_resolve(store, defn, *, event):
+        def boom_resolve(store, defn, *, event, now=None):
             if defn.name == "Rule A":
                 calls["bad"] += 1
                 raise RuntimeError(f"resolve boom token={secret}")
-            return real_resolve(store, defn, event=event)
+            return real_resolve(store, defn, event=event, now=now)
         monkeypatch.setattr(amatch, "resolve_input", boom_resolve)
     elif spot == "same_work_recent":
         def boom_same(store, action, input_data, **kw):
