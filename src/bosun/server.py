@@ -694,16 +694,24 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if not trace_id:
             return None
         row = tstore.get_by_trace(store, trace_id)
-        if row is None or row.get("status") != "done" or not row.get("verdict"):
+        if not isinstance(row, dict) or row.get("status") != "done":
             return None
-        v = row["verdict"]
+        v = row.get("verdict")
+        if not isinstance(v, dict):
+            return None
+        category, cause, confidence, next_step = (
+            v.get("category"), v.get("cause"), v.get("confidence"), v.get("next_step"),
+        )
+        if not (isinstance(category, str) and isinstance(cause, str) and isinstance(confidence, str)
+                and isinstance(next_step, dict) and isinstance(next_step.get("kind"), str)):
+            return None
         return {
-            "status": row["status"],
-            "source": row["source"],
-            "category": v["category"],
-            "cause": v["cause"],
-            "confidence": v["confidence"],
-            "next_step": v["next_step"],
+            "status": str(row.get("status") or ""),
+            "source": str(row.get("source") or ""),
+            "category": category,
+            "cause": cause,
+            "confidence": confidence,
+            "next_step": next_step,
         }
 
     @actions.bind("list_jobs")

@@ -121,7 +121,7 @@ def facts(item: Item, assessment: dict | None = None, verdict: dict | None = Non
 
 def _quoted(parts) -> str:
     """Text a model wrote from release notes anyone could have written: quoted, so it reads as a claim."""
-    return "; ".join('"' + str(p).replace('"', "'").replace("\n", " ")[:400] + '"' for p in parts)
+    return "; ".join('"' + str(p).replace('"', "'").replace("`", "").replace("\n", " ")[:400] + '"' for p in parts)
 
 
 SECTIONS = {

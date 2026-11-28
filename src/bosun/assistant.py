@@ -181,6 +181,7 @@ class Assistant:
         v = tri.get("verdict")
         if tri.get("status") not in ("done", "disputed") or not isinstance(v, dict):
             return None
+        disputed = tri.get("status") == "disputed" or tri.get("feedback") in ("wrong", "disputed")
         summary: dict[str, Any] = redact.value({
             "status": tri["status"],
             "source": tri["source"],
@@ -188,6 +189,7 @@ class Assistant:
             "cause": v.get("cause"),
             "confidence": v.get("confidence"),
             "next_step": v.get("next_step"),
+            **({"disputed": True, "note": "The user marked this wrong."} if disputed else {}),
         })
         return summary
 
