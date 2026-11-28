@@ -1,0 +1,356 @@
+"""Single-writer 30-second tick engine for Bosun automations."""
+
+from __future__ import annotations
+
+import json
+import logging
+import secrets
+import threading
+import time
+from dataclasses import dataclass
+from datetime import tzinfo
+from typing import Any
+
+from pydantic import ValidationError
+
+from .. import notify
+from ..config import Settings
+from ..providers.router import QuotaHeld
+from ..registry import ActionContext, ActionError, Actions, Forbidden
+from ..store import Store
+from . import digest, match as amatch, schedule, store as astore
+from .schema import (
+    MODEL_ACTIONS,
+    AutomationDef,
+    RefreshConditions,
+    ScheduleConditions,
+    ScheduleTrigger,
+    grant_digest,
+    grant_expired,
+    is_install_action,
+)
+
+log = logging.getLogger(__name__)
+
+TICK_S = 30.0
+GLOBAL_DAILY_CAP = 30
+SCHEDULE_DEADLINE_S = 6 * 3600.0
+RETRY_DEADLINE_S = 2 * 3600.0
+CIRCUIT_BREAKER_FAILURES = 3
+MAX_PER_TICK = 10
+REFRESH_CURSOR = "refresh"
+
+
+@dataclass(frozen=True)
+class TickReport:
+    scanned: int = 0
+    ran: int = 0
+    skipped: int = 0
+    waiting: int = 0
+    failed: int = 0
+    paused: bool = False
+    errors: int = 0
+
+
+def _skip_summary(skipped: Any) -> str:
+    if not isinstance(skipped, list) or not skipped:
+        return "skipped by safety checks"
+    first = skipped[0]
+    if isinstance(first, dict) and first.get("reason"):
+        return str(first["reason"])[:300]
+    return "skipped by safety checks"
+
+
+def _parse_json(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+class Automator:
+    """Single-writer automation engine running in the dashboard process only."""
+
+    def __init__(
+        self,
+        store: Store,
+        settings: Settings,
+        actions: Actions,
+        *,
+        tz: tzinfo | None = None,
+    ) -> None:
+        self.store = store
+        self.settings = settings
+        self.actions = actions
+        self.tz = tz
+        self._tick_lock = threading.Lock()
+        self._busy = False
+
+    def busy(self) -> bool:
+        return self._busy
+
+    def run(self, interval: float = TICK_S) -> None:
+        """Daemon thread loop; never exits on a single bad tick."""
+        while True:
+            time.sleep(interval)
+            self.tick()
+
+    def tick(self, *, now: float | None = None) -> TickReport:
+        """Scan triggers and execute due firings (bounded, single-writer, never re-raises)."""
+        if self.settings.demo or self.store.read_only:
+            return TickReport()
+        if not self._tick_lock.acquire(blocking=False):
+            return TickReport()
+        self._busy = True
+        try:
+            return self._tick_locked(time.time() if now is None else now)
+        except Exception:
+            log.exception("automation tick failed")
+            return TickReport(errors=1)
+        finally:
+            self._busy = False
+            self._tick_lock.release()
+
+    def _tick_locked(self, when: float) -> TickReport:
+        if astore.is_paused(self.store):
+            return TickReport(paused=True)
+        rules = self._active_rules()
+        scanned = self._scan_refreshes(rules, when) + self._scan_schedules(rules, when)
+        ran, skipped, waiting, failed = self._execute_due(rules, when)
+        return TickReport(scanned=scanned, ran=ran, skipped=skipped, waiting=waiting, failed=failed)
+
+    def _active_rules(self) -> dict[int, tuple[dict[str, Any], AutomationDef]]:
+        out: dict[int, tuple[dict[str, Any], AutomationDef]] = {}
+        for row in astore.list_all(self.store):
+            if not row["enabled"] or row["paused_reason"]:
+                continue
+            try:
+                out[int(row["id"])] = (row, astore.parse_def(row))
+            except (ValueError, ValidationError):
+                log.warning("skipping malformed automation %s", row.get("id"))
+        return out
+
+    def _snapshot_for_run(self, started: float, finished: float) -> tuple[int, int | None] | None:
+        with self.store._tx() as db:
+            row = db.execute(
+                "SELECT snapshot_id FROM snapshot_log WHERE ts >= ? AND ts <= ? ORDER BY snapshot_id DESC LIMIT 1",
+                (started - 5.0, finished + 5.0),
+            ).fetchone()
+            if row is None:
+                return None
+            snap_id = int(row["snapshot_id"])
+            prev = db.execute(
+                "SELECT MAX(snapshot_id) FROM snapshot_log WHERE snapshot_id < ?",
+                (snap_id,),
+            ).fetchone()
+        prev_id = int(prev[0]) if prev and prev[0] is not None else None
+        return snap_id, prev_id
+
+    def _scan_refreshes(self, rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float) -> int:
+        ref_rules = [(aid, r, d) for aid, (r, d) in rules.items() if d.trigger.kind == "refresh"]
+        if not ref_rules:
+            return 0
+        raw_cur = astore.cursor(self.store, REFRESH_CURSOR)
+        since = float(raw_cur) if raw_cur is not None else 0.0
+        with self.store._tx() as db:
+            runs = db.execute(
+                "SELECT trace_id, started, COALESCE(finished, started) AS ended FROM runs "
+                "WHERE kind='refresh' AND subject='everything' AND status IN ('ok', 'partial') "
+                "AND COALESCE(finished, started) > ? ORDER BY ended ASC LIMIT 20",
+                (since,),
+            ).fetchall()
+        created = 0
+        max_ended = since
+        for run in runs:
+            ended = float(run["ended"])
+            max_ended = max(max_ended, ended)
+            snaps = self._snapshot_for_run(float(run["started"]), ended)
+            if snaps is None:
+                continue
+            snap_id, prev_id = snaps
+            for aid, _row, defn in ref_rules:
+                if not isinstance(defn.conditions, RefreshConditions):
+                    continue
+                if not amatch.matches_refresh(self.store, defn.conditions, snapshot_id=snap_id, prev_snapshot_id=prev_id):
+                    continue
+                fid = astore.insert_firing(
+                    self.store, aid, defn.name, "refresh", f"snap:{snap_id}", f"refresh:snap:{snap_id}",
+                    status="scheduled", due=when + defn.delay_s,
+                    input_data={"snapshot_id": snap_id, "prev_snapshot_id": prev_id}, now=when,
+                )
+                if fid is not None:
+                    created += 1
+        if max_ended > since:
+            astore.set_cursor(self.store, REFRESH_CURSOR, repr(max_ended))
+        return created
+
+    def _scan_schedules(self, rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float) -> int:
+        created = 0
+        for aid, _row, defn in ((a, r, d) for a, (r, d) in rules.items() if isinstance(d.trigger, ScheduleTrigger)):
+            assert isinstance(defn.trigger, ScheduleTrigger)
+            for slot in schedule.due_slots(defn.trigger, now=when, tz=self.tz):
+                dedup = f"schedule:{slot.slot_key}"
+                if slot.missed:
+                    fid = astore.insert_firing(
+                        self.store, aid, defn.name, "schedule", slot.slot_key, dedup,
+                        status="missed", reason="missed schedule slot (>2 h late)", now=when,
+                    )
+                elif isinstance(defn.conditions, ScheduleConditions) and amatch.matches_schedule(
+                    self.store, defn.conditions, defn.action,
+                ):
+                    fid = astore.insert_firing(
+                        self.store, aid, defn.name, "schedule", slot.slot_key, dedup,
+                        status="scheduled", due=when + defn.delay_s,
+                        deadline=slot.scheduled_ts + SCHEDULE_DEADLINE_S, now=when,
+                    )
+                else:
+                    fid = None
+                if fid is not None:
+                    created += 1
+        return created
+
+    def _expire_past_deadline(self, when: float) -> int:
+        with self.store._tx(write=True) as db:
+            cur = db.execute(
+                "UPDATE automation_firings SET status='skipped', reason='past deadline', finished=? "
+                "WHERE status IN ('scheduled', 'waiting_quota') AND deadline IS NOT NULL AND deadline <= ?",
+                (when, when),
+            )
+            return cur.rowcount
+
+    def _precheck_limits(
+        self, aid: int, row: dict[str, Any], defn: AutomationDef, when: float,
+    ) -> tuple[str, str] | None:
+        """Return `(status, reason)` to stop this firing before execution, or None to proceed."""
+        if not secrets.compare_digest(str(row["grant_digest"] or ""), grant_digest(defn)):
+            return ("refused", "grant digest does not match current definition")
+        if grant_expired(defn.action, defn.mode, row["granted_at"], now=when):
+            return ("refused", "90-day INSTALL grant expired; renew in the dashboard")
+        if astore.global_fired_today(self.store, now=when) >= GLOBAL_DAILY_CAP:
+            return ("skipped", f"global daily limit reached ({GLOBAL_DAILY_CAP}/day)")
+        if astore.fired_today(self.store, aid, now=when) >= defn.max_per_day:
+            return ("skipped", f"daily limit reached ({defn.max_per_day}/day)")
+        if defn.cooldown_s > 0:
+            last = astore.last_fired_at(self.store, aid)
+            if last is not None and when - last < defn.cooldown_s:
+                return ("skipped", f"cooldown active ({defn.cooldown_s} s)")
+        if defn.action in MODEL_ACTIONS and astore.model_jobs_today(self.store, aid, now=when) >= defn.model_jobs_per_day:
+            return ("skipped", f"daily model job limit reached ({defn.model_jobs_per_day}/day)")
+        return None
+
+    def _execute_due(
+        self, rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float,
+    ) -> tuple[int, int, int, int]:
+        ran = waiting = failed = 0
+        skipped = self._expire_past_deadline(when)
+        for firing in astore.due_firings(self.store, now=when, limit=MAX_PER_TICK):
+            outcome = self._run_one(firing, rules, when)
+            if outcome == "done":
+                ran += 1
+            elif outcome == "skipped":
+                skipped += 1
+            elif outcome == "waiting":
+                waiting += 1
+            elif outcome == "failed":
+                failed += 1
+        return ran, skipped, waiting, failed
+
+    def _run_one(
+        self, firing: dict[str, Any], rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float,
+    ) -> str:
+        fid, aid = int(firing["id"]), int(firing["automation_id"])
+        pair = rules.get(aid)
+        if pair is None:
+            astore.set_firing(self.store, fid, status="skipped", reason="automation disabled or paused", now=when)
+            return "skipped"
+        row, defn = pair
+        stop = self._precheck_limits(aid, row, defn, when)
+        if stop is not None:
+            astore.set_firing(self.store, fid, status=stop[0], reason=stop[1], now=when)
+            return "skipped"
+        if is_install_action(defn.action) and astore.active_install_firing(self.store) is not None:
+            return "waiting"
+        if isinstance(defn.conditions, ScheduleConditions) and not amatch.matches_schedule(
+            self.store, defn.conditions, defn.action,
+        ):
+            astore.set_firing(self.store, fid, status="skipped", reason="conditions no longer hold", now=when)
+            return "skipped"
+        resolved = amatch.resolve_input(self.store, defn, event=_parse_json(firing.get("input")))
+        if resolved is None:
+            astore.set_firing(self.store, fid, status="skipped", reason="nothing to do", now=when)
+            return "skipped"
+        dup = astore.same_work_recent(self.store, defn.action, resolved, exclude_automation_id=aid, now=when)
+        if dup is not None:
+            astore.set_firing(
+                self.store, fid, status="skipped",
+                reason=f"already handled by {dup['automation_name']} within the last hour", now=when,
+            )
+            return "skipped"
+        if defn.action == "notify":
+            return self._run_notify(fid, defn, resolved, when)
+        return self._run_action(firing, aid, defn, resolved, when)
+
+    def _run_notify(self, fid: int, defn: AutomationDef, resolved: dict[str, Any], when: float) -> str:
+        snap_id = resolved.get("snapshot_id")
+        if not isinstance(snap_id, int):
+            latest = self.store.latest_snapshot()
+            snap_id = int(latest["id"]) if latest else None
+        if snap_id is None:
+            astore.set_firing(self.store, fid, status="skipped", reason="no snapshot yet", now=when)
+            return "skipped"
+        prev_id = resolved.get("prev_snapshot_id")
+        astore.set_firing(self.store, fid, status="running", input_data=resolved, now=when)
+        line = digest.build_digest(self.store, snapshot_id=snap_id, prev_snapshot_id=prev_id if isinstance(prev_id, int) else None)
+        notify.enqueue_automation(self.store, defn.name, line)
+        astore.set_firing(self.store, fid, status="done", reason=line, finished=when, now=when)
+        return "done"
+
+    def _run_action(
+        self, firing: dict[str, Any], aid: int, defn: AutomationDef, resolved: dict[str, Any], when: float,
+    ) -> str:
+        fid = int(firing["id"])
+        ctx = ActionContext(actor=f"automation:{aid}", surface="automation", firing_id=fid, now=when)
+        astore.set_firing(self.store, fid, status="running", input_data=resolved, trace_id=ctx.trace_id, now=when)
+        try:
+            result = self.actions.call(defn.action, resolved, ctx)
+        except QuotaHeld as exc:
+            return self._handle_quota_held(firing, exc, when)
+        except Forbidden as exc:
+            astore.set_firing(self.store, fid, status="refused", reason=exc.message, finished=when, now=when)
+            return "skipped"
+        except (ActionError, Exception) as exc:
+            astore.set_firing(self.store, fid, status="failed", reason=str(exc), finished=when, now=when)
+            self._check_circuit_breaker(aid, defn.name, when)
+            return "failed"
+        if isinstance(result, dict) and defn.action in ("upgrade", "pin_mcp"):
+            if not result.get("queued") and result.get("skipped"):
+                astore.set_firing(
+                    self.store, fid, status="skipped", reason=_skip_summary(result["skipped"]),
+                    finished=when, now=when,
+                )
+                return "skipped"
+        astore.set_firing(self.store, fid, status="done", finished=when, now=when)
+        return "done"
+
+    def _handle_quota_held(self, firing: dict[str, Any], exc: QuotaHeld, when: float) -> str:
+        fid = int(firing["id"])
+        deadline = firing.get("deadline")
+        reset = exc.earliest_reset
+        if deadline is not None and (when >= deadline or (reset is not None and reset >= deadline)):
+            astore.set_firing(
+                self.store, fid, status="skipped", reason=f"quota held past deadline: {exc.reason}",
+                finished=when, now=when,
+            )
+            return "skipped"
+        next_due = reset if (reset is not None and reset > when) else when + TICK_S
+        astore.set_firing(self.store, fid, status="waiting_quota", due=next_due, reason=exc.reason, now=when)
+        return "waiting"
+
+    def _check_circuit_breaker(self, aid: int, name: str, when: float) -> None:
+        if astore.consecutive_failures(self.store, aid) >= CIRCUIT_BREAKER_FAILURES:
+            msg = f"Paused after {CIRCUIT_BREAKER_FAILURES} consecutive failures"
+            astore.set_paused_reason(self.store, aid, msg, now=when)
+            notify.enqueue_automation(self.store, f"Automation paused: {name}", msg)
