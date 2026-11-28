@@ -263,6 +263,17 @@ def is_install_action(action: str) -> bool:
     return spec is not None and spec.risk == Risk.INSTALL
 
 
+def has_unset_project(defn: AutomationDef) -> bool:
+    """True when any scope or condition still carries the `UNSET_PROJECT` placeholder sentinel."""
+    scope = defn.scope
+    if isinstance(scope, (StartFixScope, ExplainItemScope)) and scope.project == UNSET_PROJECT:
+        return True
+    if isinstance(scope, RecheckProjectScope) and scope.mode == "project" and scope.project == UNSET_PROJECT:
+        return True
+    cond = defn.conditions
+    return isinstance(cond, (ScheduleConditions, VerdictConditions)) and cond.project == UNSET_PROJECT
+
+
 def grant_digest(defn: AutomationDef) -> str:
     """Canonical SHA-256 over the owner's rule definition (trigger, conditions, action, scope, mode, limits)."""
     payload = {

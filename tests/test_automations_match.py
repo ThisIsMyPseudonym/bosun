@@ -250,3 +250,20 @@ def test_resolve_input_skips_held_hands_off_ignored_and_snoozed_for_every_action
     )
     assert resolve_input(st, exp_def, event={}, now=now) == {"keys": [repos[4].key]}
 
+
+def test_unset_project_sentinel_never_matches_resolves_or_passes_scope(tmp_path):
+    from bosun.automations.schema import UNSET_PROJECT
+
+    st = Store(tmp_path / "bosun.db")
+    it = Item(Source.REPO, "lodash", "lodash", "4.0", "4.17.21", ecosystem="npm", project=UNSET_PROJECT, lane="now")
+    st.save_snapshot([item_to_dict(it)], [])
+
+    defn = AutomationDef(
+        name="Unset nightly", trigger=ScheduleTrigger(kind="schedule", time="02:00"),
+        conditions=ScheduleConditions(project=UNSET_PROJECT, lane="now"),
+        action="start_fix", scope=StartFixScope(project=UNSET_PROJECT, lane="now"), mode="run",
+    )
+    assert matches_schedule(st, defn.conditions, defn.action) is False
+    assert resolve_input(st, defn, event={}) is None
+    assert input_in_scope(st, defn, FixIn(keys=[it.key])) is False
+

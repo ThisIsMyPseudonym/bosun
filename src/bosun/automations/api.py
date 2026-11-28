@@ -14,7 +14,7 @@ from . import schedule, store as astore
 from .schema import (UNSET_PROJECT, AppActionScope, AutomationDef, ExplainItemScope, NotifyScope, PinMcpScope,
                      RecheckProjectScope, RefreshConditions, RefreshScope, ScheduleConditions, ScheduleTrigger,
                      StartFixScope, UpgradeScope, describe_scope, grant_digest, grant_digest_matches, grant_expired,
-                     grant_expires_at)
+                     grant_expires_at, has_unset_project)
 
 _LANE_WORDS = {"now": "Do-now", "plan": "Plan", "watch": "Watch", "batch": "Batch"}
 _DAY_WORDS = {"mon": "Mon", "tue": "Tue", "wed": "Wed", "thu": "Thu", "fri": "Fri", "sat": "Sat", "sun": "Sun"}
@@ -117,12 +117,7 @@ def describe_sentence(defn: AutomationDef, projects: dict[str, str]) -> str:
 
 
 def needs_project_pick(defn: AutomationDef) -> bool:
-    scope = defn.scope
-    if isinstance(scope, (StartFixScope, ExplainItemScope)) and scope.project == UNSET_PROJECT:
-        return True
-    if isinstance(scope, RecheckProjectScope) and scope.mode == "project" and scope.project == UNSET_PROJECT:
-        return True
-    return False
+    return has_unset_project(defn)
 
 
 def needs_grant_confirmation(action: str, mode: str) -> bool:

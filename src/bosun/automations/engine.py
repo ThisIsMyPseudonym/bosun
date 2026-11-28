@@ -18,17 +18,8 @@ from ..providers.router import QuotaHeld
 from ..registry import ActionContext, ActionError, Actions, Forbidden
 from ..store import Store
 from . import digest, match as amatch, schedule, store as astore
-from .schema import (
-    MODEL_ACTIONS,
-    AutomationDef,
-    RefreshConditions,
-    ScheduleConditions,
-    ScheduleTrigger,
-    grant_digest,
-    grant_digest_matches,
-    grant_expired,
-    is_install_action,
-)
+from .schema import (MODEL_ACTIONS, AutomationDef, RefreshConditions, ScheduleConditions, ScheduleTrigger,
+                     grant_digest, grant_digest_matches, grant_expired, has_unset_project, is_install_action)
 
 log = logging.getLogger(__name__)
 
@@ -131,7 +122,9 @@ class Automator:
             if not row["enabled"] or row["paused_reason"]:
                 continue
             try:
-                out[int(row["id"])] = (row, astore.parse_def(row))
+                defn = astore.parse_def(row)
+                if not has_unset_project(defn):
+                    out[int(row["id"])] = (row, defn)
             except (ValueError, ValidationError):
                 log.warning("skipping malformed automation %s", row.get("id"))
         return out
@@ -238,6 +231,8 @@ class Automator:
         self, aid: int, row: dict[str, Any], defn: AutomationDef, when: float,
     ) -> tuple[str, str] | None:
         """Return `(status, reason)` to stop this firing before execution, or None to proceed."""
+        if has_unset_project(defn):
+            return ("refused", "automation has no project selected")
         if not grant_digest_matches(row["grant_digest"], grant_digest(defn)):
             return ("refused", "grant digest does not match current definition")
         if grant_expired(defn.action, defn.mode, row["granted_at"], now=when):

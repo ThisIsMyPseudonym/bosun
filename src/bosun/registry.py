@@ -693,7 +693,7 @@ class Actions:
 
     def _verify_automation_rule(self, action_name: str, ctx: ActionContext) -> tuple[int, Any]:
         from .automations import store as astore
-        from .automations.schema import ALLOWLIST, grant_digest, grant_digest_matches, grant_expired
+        from .automations.schema import ALLOWLIST, grant_digest, grant_digest_matches, grant_expired, has_unset_project
 
         if self.store is None:
             raise Forbidden(f"{action_name} is refused for automation: no store")
@@ -709,6 +709,8 @@ class Actions:
             defn = astore.parse_def(row)
         except (ValueError, ValidationError):
             raise Forbidden(f"{action_name} is refused: automation {aid} has an invalid definition") from None
+        if has_unset_project(defn):
+            raise Forbidden(f"{action_name} is refused: automation {aid} has no project selected")
         if not grant_digest_matches(row["grant_digest"], grant_digest(defn)):
             raise Forbidden(f"{action_name} is refused: automation {aid} grant does not match its current definition")
         if grant_expired(defn.action, defn.mode, row["granted_at"], now=ctx.now):

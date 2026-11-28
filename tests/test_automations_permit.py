@@ -277,3 +277,59 @@ def test_forbidden_action_table_covers_every_user_only_and_external_spec():
     required = {name for name, spec in SPECS.items() if spec.user_only or spec.risk >= Risk.EXTERNAL}
     assert required <= covered, f"missing forbidden action assertions for: {sorted(required - covered)}"
     assert not (covered & ALLOWLIST)
+
+
+def test_permit_and_engine_refuse_unset_project_sentinel_even_with_valid_grant(tmp_path):
+    from datetime import datetime, timezone
+    from bosun.automations.engine import Automator
+    from bosun.automations.schema import UNSET_PROJECT, RecheckProjectScope
+    from bosun.config import load_settings
+    from bosun.registry import ProjectIn
+    from bosun.server import create_app
+
+    st = Store(tmp_path / "bosun.db")
+    now = datetime(2026, 11, 27, 2, 5, tzinfo=timezone.utc).timestamp()
+    it = Item(Source.REPO, "lodash", "lodash", "4.0", "4.17.21", ecosystem="npm", project=UNSET_PROJECT, lane="now")
+    st.save_snapshot([item_to_dict(it)], [])
+
+    # Hand-edited enabled DB row with UNSET_PROJECT and valid matching grant_digest
+    fix_def = AutomationDef(
+        name="Hand-edited nightly",
+        trigger=ScheduleTrigger(kind="schedule", time="02:00", days=()),
+        conditions=ScheduleConditions(project=UNSET_PROJECT, lane="now"),
+        action="start_fix",
+        scope=StartFixScope(project=UNSET_PROJECT, lane="now"),
+        mode="run",
+    )
+    aid = astore.save(st, fix_def, enabled=True, grant_digest=grant_digest(fix_def), granted_by="user", now=now)
+    actions = Actions(store=st)
+    ctx = ActionContext(actor=f"automation:{aid}", surface="automation", now=now)
+    with pytest.raises(Forbidden, match="project"):
+        actions.permit(SPECS["start_fix"], ctx, FixIn(keys=[it.key]))
+
+    rc_def = AutomationDef(
+        name="Hand-edited recheck",
+        trigger=RefreshTrigger(kind="refresh"),
+        conditions=RefreshConditions(),
+        action="recheck_project",
+        scope=RecheckProjectScope(mode="project", project=UNSET_PROJECT),
+        mode="run",
+    )
+    rid = astore.save(st, rc_def, enabled=True, grant_digest=grant_digest(rc_def), granted_by="user", now=now)
+    rctx = ActionContext(actor=f"automation:{rid}", surface="automation", now=now)
+    with pytest.raises(Forbidden, match="project"):
+        actions.permit(SPECS["recheck_project"], rctx, ProjectIn(project=UNSET_PROJECT))
+
+    # Engine neither scans/schedules the sentinel rule nor runs a pre-existing due firing
+    app = create_app(load_settings(), st, "t" * 32)
+    eng = Automator(st, load_settings(), app.state.actions, tz=timezone.utc)
+    rep1 = eng.tick(now=now)
+    assert rep1.scanned == 0 and rep1.ran == 0
+    assert astore.list_firings(st, automation_id=aid) == []
+
+    fid = astore.insert_firing(st, aid, fix_def.name, "schedule", "2026-11-27T02:00", "sched:unset", status="scheduled", due=now, now=now)
+    assert fid is not None
+    rep2 = eng.tick(now=now + 1)
+    assert rep2.ran == 0
+    row = astore.get_firing(st, fid)
+    assert row is not None and row["status"] == "refused"
