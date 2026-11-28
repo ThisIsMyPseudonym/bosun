@@ -286,11 +286,10 @@ def _verified_firing_keys(
         in_keys = {k for k in raw_keys if isinstance(k, str) and k} if isinstance(raw_keys, list) else set()
         if row["event_kind"] == "verdict":
             found, rec_key, _ = averdict.recorded_failure_target(store, str(row["event_ref"] or ""))
-            if found:
-                if not rec_key or (in_keys and rec_key not in in_keys):
-                    return None
-                allowed.add(rec_key)
-                continue
+            if not found or not rec_key or (in_keys and rec_key not in in_keys):
+                return None
+            allowed.add(rec_key)
+            continue
         if not in_keys:
             return None
         allowed |= in_keys
@@ -310,10 +309,9 @@ def _verified_firing_project(
     in_proj = _parse_firing_input(row).get("project")
     if row["event_kind"] == "verdict":
         found, _, rec_proj = averdict.recorded_failure_target(store, str(row["event_ref"] or ""))
-        if found:
-            if not rec_proj or (isinstance(in_proj, str) and in_proj and in_proj != rec_proj):
-                return None
-            return rec_proj
+        if not found or not rec_proj or (isinstance(in_proj, str) and in_proj and in_proj != rec_proj):
+            return None
+        return rec_proj
     return in_proj if isinstance(in_proj, str) and in_proj else None
 
 

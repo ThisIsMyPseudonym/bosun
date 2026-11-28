@@ -171,8 +171,9 @@ def test_failed_origin_scopes_and_schedule_action_filters(tmp_path):
     assert resolve_input(st, fup, event={"item_key": brew_ok.key, "available": "1.7.2"}) is None
     assert resolve_input(st, fup, event={"item_key": "brew:missing"}) is None
     aid = astore.save(st, fup, enabled=True, grant_digest=grant_digest(fup), granted_by="user", now=100.0)
+    jid = st.create_job(brew_ok.key, ["brew", "upgrade", "jq"])
     fid = astore.insert_firing(
-        st, aid, fup.name, "verdict", "job:1", "v:1",
+        st, aid, fup.name, "verdict", f"job:{jid}", "v:1",
         status="scheduled", input_data={"keys": [brew_ok.key]}, now=100.0,
     )
     assert input_in_scope(st, fup, KeysIn(keys=[brew_ok.key]), firing_id=fid)
@@ -187,8 +188,9 @@ def test_failed_origin_scopes_and_schedule_action_filters(tmp_path):
     assert resolve_input(st, frc, event={"project": "p1"}) == {"project": "p1"}
     assert resolve_input(st, frc, event={}) is None
     raid = astore.save(st, frc, enabled=True, grant_digest=grant_digest(frc), granted_by="user", now=100.0)
+    fix_id = st.create_fix(repo_now.key, "p1")
     rfid = astore.insert_firing(
-        st, raid, frc.name, "verdict", "fix:1", "v:2",
+        st, raid, frc.name, "verdict", f"fix:{fix_id}", "v:2",
         status="scheduled", input_data={"project": "p1"}, now=100.0,
     )
     assert input_in_scope(st, frc, ProjectIn(project="p1"), firing_id=rfid)
