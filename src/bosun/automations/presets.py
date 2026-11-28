@@ -70,6 +70,7 @@ PRESETS: tuple[PresetSpec, ...] = (
                 transient=True,
                 needs_person=False,
                 run_kind="upgrade",
+                verdict_source="rules",
             ),
             action="upgrade",
             scope=UpgradeScope(mode="failed_item"),

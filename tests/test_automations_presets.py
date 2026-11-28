@@ -19,6 +19,7 @@ def test_presets_ship_disabled_and_seeding_keeps_user_edits(tmp_path):
     assert rwb.conditions.transient is True
     assert rwb.conditions.needs_person is False
     assert rwb.conditions.run_kind == "upgrade"
+    assert rwb.conditions.verdict_source == "rules"
     assert rwb.action == "upgrade" and rwb.scope.mode == "failed_item" and rwb.mode == "run"
     assert rwb.delay_s == 900 and rwb.max_per_day == 6 and rwb.cooldown_s == 900
     # Every seeded preset parses cleanly through AutomationDef (extra='forbid')
@@ -57,3 +58,35 @@ def test_deleted_preset_is_tombstoned_and_not_reseeded_on_restart(tmp_path):
     assert astore.get_by_preset(st, "what_changed") is None
     assert astore.get_by_preset(st, "nightly_fix") is not None
     assert "what_changed" in presets.deleted_presets(st)
+
+
+def test_retry_when_busy_preset_ignores_model_verdicts_and_matches_rules_only(tmp_path):
+    from bosun.automations.verdict import VerdictEvent, matches_verdict
+    from bosun.triage.schema import Evidence, NextStep, Verdict
+
+    st = Store(tmp_path / "bosun.db")
+    presets.seed(st)
+    rwb_row = astore.get_by_preset(st, "retry_when_busy")
+    assert rwb_row is not None
+    rwb = astore.parse_def(rwb_row)
+    v = Verdict(
+        category="busy_or_locked",
+        cause="Homebrew lock held",
+        confidence="high",
+        evidence=[Evidence(source="output", ref="", line="Error: another brew process is running")],
+        next_step=NextStep(kind="retry", why="Try again shortly"),
+        needs_person=False,
+        transient=True,
+    )
+    model_ev = VerdictEvent(
+        triage_id=1, failure="job:1", trace_id="t1", triage_source="model", verdict=v,
+        ended=100.0, run_kind="upgrade", item_key="brew:jq", item_source="brew",
+        project="", available="1.7.1", actor="user",
+    )
+    rules_ev = VerdictEvent(
+        triage_id=2, failure="job:2", trace_id="t2", triage_source="rules", verdict=v,
+        ended=101.0, run_kind="upgrade", item_key="brew:jq", item_source="brew",
+        project="", available="1.7.1", actor="user",
+    )
+    assert matches_verdict(rwb.conditions, model_ev) is False
+    assert matches_verdict(rwb.conditions, rules_ev) is True
