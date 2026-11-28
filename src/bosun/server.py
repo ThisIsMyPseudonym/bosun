@@ -52,7 +52,7 @@ from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPol
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, router as ai_router, routing as ai_routing, usage as ai_usage
-from .automations import engine as aengine, store as astore
+from .automations import engine as aengine, presets as apresets, store as astore
 from .triage import model as tmodel, settings as tsettings, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
@@ -142,6 +142,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         recovered = astore.recover_running(store)
         if recovered:
             log.info("recovered %d interrupted automation firings", recovered)
+        apresets.seed(store)
     fixer = Fixer(store, s)
     explainer = Explainer(store, s.model, s.claude_sandbox)
     allowed_hosts = {f"127.0.0.1:{s.port}", f"localhost:{s.port}"}

@@ -43,6 +43,7 @@ ALLOWLIST: frozenset[str] = frozenset({
 SYSTEM_ACTIONS: frozenset[str] = frozenset({"relaunch_app", "open_app"})
 MODEL_ACTIONS: frozenset[str] = frozenset({"start_fix", "explain_item"})
 GRANT_TTL_S: int = 90 * 86400
+UNSET_PROJECT: str = "__pick_project__"
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 _WEEKDAY_ORDER = {d: i for i, d in enumerate(("mon", "tue", "wed", "thu", "fri", "sat", "sun"))}
@@ -318,12 +319,14 @@ def describe_scope(defn: AutomationDef) -> str:
         target = "the failed run's project" if scope.mode == "failed_project" else scope.project
         return f"Re-check project {target}, {cap}."
     if isinstance(scope, ExplainItemScope):
-        return f"Run 'Will this break?' on {scope.lane} items in {scope.project}, {cap} (up to {defn.model_jobs_per_day} AI jobs/day)."
+        proj = "a chosen project" if scope.project == UNSET_PROJECT else scope.project
+        return f"Run 'Will this break?' on {scope.lane} items in {proj}, {cap} (up to {defn.model_jobs_per_day} AI jobs/day)."
     if isinstance(scope, UpgradeScope):
         what = "the failed item, same version" if scope.mode == "failed_item" else f"{len(scope.keys)} listed item(s)"
         return f"Upgrade {what}, {cap}; Bosun's waiting period and checks still apply."
     if isinstance(scope, StartFixScope):
-        return f"Run Branch + test on {scope.lane} items in {scope.project}, {cap} (sandboxed, never pushes; up to {defn.model_jobs_per_day} AI jobs/day)."
+        proj = "a chosen project" if scope.project == UNSET_PROJECT else scope.project
+        return f"Run Branch + test on {scope.lane} items in {proj}, {cap} (sandboxed, never pushes; up to {defn.model_jobs_per_day} AI jobs/day)."
     if isinstance(scope, PinMcpScope):
         return f"Pin {len(scope.keys)} listed MCP server(s), {cap}; the 3-day waiting period still applies."
     return f"Offer to {defn.action.replace('_', ' ')} {scope.app} (asks for your approval each time)."
