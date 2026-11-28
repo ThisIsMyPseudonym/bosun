@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import plistlib
 import shlex
 import shutil
 import subprocess
@@ -147,6 +148,11 @@ MAC_INFO = {"CFBundleName": "Bosun", "CFBundleDisplayName": "Bosun", "CFBundleId
 # Bosun's own window: a real app with a Dock icon. It only ever loads the dashboard on this machine.
 MAC_INFO_NATIVE = {**{k: v for k, v in MAC_INFO.items() if k != "LSUIElement"}, "NSHighResolutionCapable": True,
                    "LSMinimumSystemVersion": "12.0", "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True}}
+HELPER_SOURCE = Path(__file__).with_name("mac") / "BosunHelper.swift"
+HELPER_INFO = {"CFBundleName": "Bosun Helper", "CFBundleDisplayName": "Bosun Helper",
+               "CFBundleIdentifier": "com.bosun.helper", "CFBundleExecutable": "bosun-helper",
+               "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.0", "LSUIElement": True,
+               "LSMinimumSystemVersion": "13.0"}
 
 
 def swiftc() -> str | None:
@@ -182,16 +188,78 @@ def build_native(app: Path, compiler: str) -> str:
     return ""
 
 
+def helper_app(app: Path | None = None) -> Path:
+    return (app or MAC_APP) / "Contents" / "Helpers" / "Bosun Helper.app"
+
+
+def helper_source_hash() -> str:
+    h = hashlib.sha256(HELPER_SOURCE.read_bytes())
+    h.update(plistlib.dumps(HELPER_INFO, sort_keys=True))
+    return h.hexdigest()
+
+
+def helper_up_to_date(app: Path | None = None) -> bool:
+    """True when `Bosun Helper.app` matches the repo source hash and its recorded binary hash."""
+    bundle = helper_app(app)
+    binary, res = bundle / "Contents" / "MacOS" / "bosun-helper", bundle / "Contents" / "Resources"
+    if binary.is_symlink() or not binary.is_file() or not (bundle / "Contents" / "Info.plist").is_file():
+        return False
+    try:
+        if (res / "helper.sha256").read_text(encoding="utf-8").strip() != helper_source_hash():
+            return False
+        bin_marker = res / "binary.sha256"
+        return (not bin_marker.is_file()
+                or bin_marker.read_text(encoding="utf-8").strip() == hashlib.sha256(binary.read_bytes()).hexdigest())
+    except OSError:
+        return False
+
+
+def ensure_helper(app: Path | None = None) -> str:
+    """Build and ad-hoc sign `Bosun Helper.app` only when its source or binary hash changed. "" on success."""
+    if not machine.IS_MAC or helper_up_to_date(app):
+        return ""
+    compiler = swiftc()
+    if not compiler:
+        return "the Xcode command line tools aren't installed"
+    bundle = helper_app(app)
+    contents = bundle / "Contents"
+    (contents / "MacOS").mkdir(parents=True, exist_ok=True)
+    (contents / "Resources").mkdir(exist_ok=True)
+    binary, tmp = contents / "MacOS" / "bosun-helper", contents / "MacOS" / "bosun-helper.build"
+    r = proc.run(["xcrun", compiler, "-swift-version", "5", "-O", "-o", str(tmp), str(HELPER_SOURCE),
+                  "-framework", "Cocoa", "-framework", "ApplicationServices", "-framework", "CryptoKit"], timeout=300)
+    if not r.ok:
+        tmp.unlink(missing_ok=True)
+        return (r.stderr or r.stdout).strip()[-400:] or f"swiftc exit {r.returncode}"
+    (contents / "Info.plist").write_bytes(plistlib.dumps(HELPER_INFO, sort_keys=True))
+    os.replace(tmp, binary)
+    binary.chmod(0o755)
+    sign = proc.run(["/usr/bin/codesign", "--force", "--sign", "-", "--identifier", "com.bosun.helper", str(bundle)],
+                    timeout=60)
+    if not sign.ok:
+        for p in (binary, contents / "Resources" / "helper.sha256", contents / "Resources" / "binary.sha256"):
+            p.unlink(missing_ok=True)
+        return (sign.stderr or sign.stdout).strip()[-400:] or f"codesign exit {sign.returncode}"
+    (contents / "Resources" / "helper.sha256").write_text(helper_source_hash(), encoding="utf-8")
+    (contents / "Resources" / "binary.sha256").write_text(hashlib.sha256(binary.read_bytes()).hexdigest(), encoding="utf-8")
+    return ""
+
+
 def refresh_mac_app(data_dir: Path, app: Path | None = None) -> None:
     """After Bosun updates itself, the window app may be built from older source: rebuild it. Never raises."""
     try:
         app = app or MAC_APP
-        marker = app / "Contents" / "Resources" / "source.sha256"
-        if not machine.IS_MAC or not marker.is_file() or marker.read_text(encoding="utf-8").strip() == source_hash():
+        if not machine.IS_MAC:
             return
-        compiler = swiftc()
-        problem = build_native(app, compiler) if compiler else "the Xcode command line tools are gone"
-        log.info("Bosun's window app rebuilt for the new version" if not problem else f"window app not rebuilt: {problem}")
+        marker = app / "Contents" / "Resources" / "source.sha256"
+        if marker.is_file() and marker.read_text(encoding="utf-8").strip() != source_hash():
+            compiler = swiftc()
+            problem = build_native(app, compiler) if compiler else "the Xcode command line tools are gone"
+            log.info("Bosun's window app rebuilt for the new version" if not problem else f"window app not rebuilt: {problem}")
+        hmarker = helper_app(app) / "Contents" / "Resources" / "helper.sha256"
+        if hmarker.is_file() and not helper_up_to_date(app):
+            hproblem = ensure_helper(app)
+            log.info("Bosun Helper rebuilt for the new version" if not hproblem else f"Bosun Helper not rebuilt: {hproblem}")
     except Exception:
         log.exception("refreshing Bosun's window app failed")
 
@@ -222,8 +290,6 @@ def _mac_icon(dest: Path) -> bool:
 
 
 def _install_mac(uv: str, data_dir: Path) -> list[str]:
-    import plistlib
-
     app = MAC_APP
     contents = app / "Contents"
     (contents / "MacOS").mkdir(parents=True, exist_ok=True)
@@ -250,8 +316,12 @@ def _install_mac(uv: str, data_dir: Path) -> list[str]:
     proc.run([lsregister, "-f", str(app)], timeout=60)  # Spotlight and Launchpad see it now, not later
     how = ("its own window and Dock icon" if native else
            f"opens in a browser window; no Dock icon of its own because {problem.splitlines()[-1][:160]}")
-    return [f"App: {app}{'' if icon else ' (without its icon: sips/iconutil failed)'}: {how} "
-            "(Spotlight or Launchpad: Bosun; drag it to the Dock to keep it there)"]
+    lines = [f"App: {app}{'' if icon else ' (without its icon: sips/iconutil failed)'}: {how} "
+             "(Spotlight or Launchpad: Bosun; drag it to the Dock to keep it there)"]
+    helper_err = ensure_helper(app)
+    if helper_err:
+        lines.append(f"Helper: Bosun Helper.app was not built ({helper_err.splitlines()[-1][:160]})")
+    return lines
 
 
 WIN_SHORTCUT = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:BOSUN_LNK); "

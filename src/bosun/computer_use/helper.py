@@ -235,8 +235,10 @@ def call(
     clean_id, clean_path = _validate_target(verb, bundle_id, bundle_path)
     app = helper_app or helper_app_path()
     binary = app / "Contents" / "MacOS" / "bosun-helper"
-    if not app.is_dir() or not binary.is_file():
+    if not app.is_dir() or not binary.is_file() or binary.is_symlink():
         raise HelperUnavailable("Bosun Helper.app is not installed; run `uv run bosun install-launcher`")
+    if helper_app is None and not launcher.helper_up_to_date(launcher.MAC_APP):
+        raise HelperUnavailable("Bosun Helper.app does not match this Bosun version; run `uv run bosun install-launcher`")
     attempts = max(1, retries)
     for attempt in range(attempts):
         reply = _call_once(app, verb, clean_id, clean_path, params, run, timeout, verify_peer)
