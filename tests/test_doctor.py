@@ -16,11 +16,14 @@ class FakeMachine(doctor.Probe):
     """A machine described in a few fields: by default one with everything Bosun uses."""
 
     def __init__(self, tools=None, python=(3, 13, 1), uv="/bin/uv", pip="pip 26.0", folder="writable", busy=False,
-                 bosun_up=False, service=(True, True), signing=()):
+                 bosun_up=False, service=(True, True), signing=(), helper_state=None):
         self._t = tools if tools is not None else {"uv": "uv 0.9", "git": "git version 2.50", "brew": "Homebrew 5",
                                                    "npm": "11.0", "claude": "2.1 (Claude Code)", "codex": "0.1",
                                                    "gemini": "0.1", "grok": "1.0", "agy": "1.5", "muse": "1.4"}
-        self._a = dict(python=python, uv=uv, pip=pip, folder=folder, busy=busy, up=bosun_up, service=service, signing=list(signing))
+        self._a = dict(python=python, uv=uv, pip=pip, folder=folder, busy=busy, up=bosun_up, service=service,
+                       signing=list(signing),
+                       helper_state=helper_state if helper_state is not None
+                       else {"installed": True, "trusted": True, "hash_changed": False})
 
     def python(self): return self._a["python"]
     def tools(self): return self._t
@@ -32,6 +35,7 @@ class FakeMachine(doctor.Probe):
     def service(self): return self._a["service"]
     def signing(self, root): return self._a["signing"]
     def ai_clis(self): return {p: f"/bin/{sp.binary}" for p, sp in CATALOG.items() if sp.binary in self._t}
+    def helper_trust(self, s): return self._a["helper_state"]
 
 
 @pytest.fixture

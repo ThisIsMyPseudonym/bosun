@@ -114,6 +114,24 @@ class Probe:
         """Opt-in live check (`bosun doctor --providers`): one tiny call per login, recording its readings."""
         return check_providers(s)
 
+    def helper_trust(self, s: Settings) -> dict:
+        """Read-only check of Bosun Helper.app installation, source hash, and Accessibility grant (never prompts)."""
+        if not machine.IS_MAC:
+            return {"installed": False, "trusted": False, "hash_changed": False}
+        from .computer_use import helper
+
+        bundle = launcher.helper_app()
+        binary = bundle / "Contents" / "MacOS" / "bosun-helper"
+        if binary.is_symlink() or not binary.is_file() or not (bundle / "Contents" / "Info.plist").is_file():
+            return {"installed": False, "trusted": False, "hash_changed": False}
+        if not launcher.helper_up_to_date():
+            return {"installed": True, "trusted": False, "hash_changed": True}
+        try:
+            res = helper.call(s.data_dir, "trusted", params={"prompt": False})
+            return {"installed": True, "trusted": bool(res.get("trusted")), "hash_changed": False}
+        except helper.HelperError as exc:
+            return {"installed": True, "trusted": False, "hash_changed": False, "error": str(exc)}
+
     def signing(self, root: Path) -> list[str]:
         """What stops self-update from verifying a commit here; empty when nothing does."""
         problems = []
@@ -188,6 +206,28 @@ def _retired_budget_env() -> list[Line]:
                    if k.startswith("BOSUN_") and k.endswith("_BUDGET_USD") and v.strip())
     return [Line(OPTIONAL, f"{name} is set and ignored: AI use is now measured by your plans' windows",
                  f"unset {name} in your shell or service environment") for name in found]
+
+
+def _helper_lines(probe: Probe, s: Settings) -> list[Line]:
+    """On macOS, report whether Bosun Helper.app is built, hash-matched, and granted Accessibility."""
+    if not machine.IS_MAC:
+        return []
+    st = probe.helper_trust(s)
+    if not st.get("installed"):
+        return [Line(OPTIONAL, "Bosun Helper: not installed",
+                     "run `uv run bosun install-launcher` to build Bosun Helper.app for in-app updates")]
+    if st.get("hash_changed"):
+        return [Line(OPTIONAL, "Bosun Helper: installed, source hash mismatch (rebuild needed)",
+                     "run `uv run bosun install-launcher` to rebuild Bosun Helper.app; if System Settings still "
+                     "shows it on, remove Bosun Helper from the list and add it again")]
+    if st.get("error"):
+        return [Line(OPTIONAL, f"Bosun Helper: installed, could not check Accessibility ({st['error']})",
+                     "run `uv run bosun install-launcher` or check System Settings > Privacy & Security > Accessibility")]
+    if st.get("trusted"):
+        return [Line(OK, "Bosun Helper: installed, hash matches, Accessibility granted")]
+    return [Line(OPTIONAL, "Bosun Helper: installed, hash matches, Accessibility not granted",
+                 "grant Accessibility to Bosun Helper in System Settings > Privacy & Security > Accessibility "
+                 "(if it is already listed and on, remove Bosun Helper from the list and add it again)")]
 
 
 def _reading_summary(readings: tuple[windows.Reading, ...]) -> str:
@@ -279,6 +319,7 @@ def check(s: Settings, probe: Probe | None = None, root: Path = PROJECT_ROOT, *,
     out.append(Line(OK, "self-update can verify commit signatures") if not why else
                Line(OPTIONAL, "self-update can't verify commit signatures: " + "; ".join(why),
                     "without this Bosun installs no update by itself; pull and review changes yourself (see 'Staying current')"))
+    out += _helper_lines(p, s)
     return out
 
 
