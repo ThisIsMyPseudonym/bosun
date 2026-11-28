@@ -61,7 +61,8 @@ def test_demo_refuses_actions_that_open_or_look_at_the_machine(client):
                        ("/api/automations/1/enabled", {"enabled": True}),
                        ("/api/automations/1/renew", {}),
                        ("/api/automations/1/delete", {}),
-                       ("/api/automations/pause", {"on": True})):
+                       ("/api/automations/pause", {"on": True}),
+                       ("/api/automations/firings/1/decide", {"approve": True})):
         r = client.post(path, json=body)
         assert r.status_code == 403 and "This is demo data" in r.text
     for path in ("/api/ai/logins", "/api/ai/routing"):

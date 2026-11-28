@@ -352,6 +352,12 @@ class AutomationToggleIn(AutomationIdIn):
     confirm_grant: bool = Field(default=False, description="Owner confirmed the scope grant when enabling")
 
 
+class OfferDecideIn(_In):
+    firing_id: int = Field(ge=1, description="Offer firing id")
+    approve: bool = Field(description="True to approve and run once; False to decline")
+    reason: str = Field("", max_length=500, exclude=True, description="Optional note when declining")
+
+
 # --- specs ---------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ActionSpec:
@@ -428,6 +434,8 @@ SPECS: dict[str, ActionSpec] = _specs(
                Risk.LOCAL, AutomationIdIn, "POST", "/api/automations/{automation_id}/delete", user_only=True),
     ActionSpec("pause_automations", "Pause or resume all automations at once (global kill switch)",
                Risk.LOCAL, OnIn, "POST", "/api/automations/pause", user_only=True),
+    ActionSpec("decide_offer", "Approve or decline a waiting automation offer",
+               Risk.LOCAL, OfferDecideIn, "POST", "/api/automations/firings/{firing_id}/decide", user_only=True),
     # Bosun's own state
     ActionSpec("set_pref", "Acknowledge, snooze or ignore an item (or ignore a project), bring it back, or opt it "
                "into automatic upgrades", Risk.LOCAL, PrefIn, "POST", "/api/prefs",
@@ -558,7 +566,7 @@ DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "triage"
                           "ai_logins", "add_ai_login", "set_ai_login",
                           "ai_routing", "set_ai_routing", "set_quota_override",
                           "save_automation", "set_automation_enabled", "renew_automation",
-                          "delete_automation", "pause_automations"})
+                          "delete_automation", "pause_automations", "decide_offer"})
 
 
 def is_agent(actor: Actor) -> bool:

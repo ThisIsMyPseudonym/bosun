@@ -199,11 +199,13 @@ def serialize_firing(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_automations(store: Store, *, demo: bool = False, now: float | None = None) -> dict[str, Any]:
+    from . import offer_decide
+
     when = time.time() if now is None else now
     projects = _snapshot_projects(store)
     proj_map = {p["key"]: p["name"] for p in projects}
     items = [serialize_automation(store, r, projects=proj_map, now=when) for r in astore.list_all(store)]
-    offers = [serialize_firing(f) for f in astore.list_firings(store, status="offered", limit=50)]
+    offers = offer_decide.waiting_offers(store, now=when, limit=50)
     return {
         "paused": astore.is_paused(store),
         "demo": demo,

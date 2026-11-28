@@ -228,3 +228,126 @@ def test_merged_offers_follow_phase3_rules_and_expire_when_item_fixed(tmp_path):
     rep2 = eng.tick(now=base + 120.0)
     assert rep2.expired == 1
     assert astore.get_firing(st, lead["id"])["status"] == "expired"
+
+
+def test_decide_offer_approve_spends_approval_once_and_records_audit(tmp_path, monkeypatch):
+    import time
+    from fastapi.testclient import TestClient
+
+    from conftest import signed_in
+
+    from bosun import trace
+    from bosun.server import create_app
+
+    st = Store(tmp_path / "bosun.db")
+    base = time.time() - 60.0
+    chrome = Item(Source.BREW_CASK, "google-chrome", "Google Chrome", "130.0", "131.0", self_updates=True)
+    snap1 = st.save_snapshot([item_to_dict(chrome)], [])
+    relaunches: list[str] = []
+    monkeypatch.setattr("bosun.relaunch.relaunch", lambda app_id: relaunches.append(app_id) or (True, "ok"))
+    monkeypatch.setattr("bosun.server.trace.thread", lambda fn, args=(), name="": fn(*args))
+    trace.configure(st.path, "serve")
+    try:
+        app = create_app(load_settings(), st, "t" * 32)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+        hdr = {"x-bosun-token": "t" * 32}
+
+        defn = AutomationDef(
+            name="Offer Chrome relaunch",
+            trigger=RefreshTrigger(kind="refresh"),
+            conditions=RefreshConditions(),
+            action="relaunch_app",
+            scope=AppActionScope(app="chrome"),
+            mode="ask",
+        )
+        aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=base)
+        _record_refresh_run(st, snap1, base + 10.0, "c" * 32)
+        assert app.state.automator.tick(now=base + 20.0).offered == 1
+        fid = astore.list_firings(st, automation_id=aid, status="offered")[0]["id"]
+        assert relaunches == []
+
+        # Approve runs exactly once through Actions.permit with a spent approval
+        r1 = user.post(f"/api/automations/firings/{fid}/decide", json={"approve": True}, headers=hdr)
+        assert r1.status_code == 200, r1.text
+        body = r1.json()
+        assert body["status"] == "done" and body["decided_by"] == "user" and body["approval_id"]
+        assert relaunches == ["chrome"]
+
+        row = next(a for a in st.audit(limit=10) if a["action"] == "relaunch_app")
+        assert row["actor"] == f"automation:{aid}"
+        assert row["approved_by"] == "user" and row["approval_id"] == body["approval_id"]
+        assert astore.get_firing(st, fid)["decided_by"] == "user"
+
+        # Replay / second approve is refused and does not re-run
+        r2 = user.post(f"/api/automations/firings/{fid}/decide", json={"approve": True}, headers=hdr)
+        assert r2.status_code == 409
+        assert relaunches == ["chrome"]
+    finally:
+        trace.configure(None)
+
+
+def test_decide_offer_decline_expiry_and_rechecks(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from conftest import signed_in
+
+    from bosun import autopilot
+    from bosun.server import create_app
+
+    st = Store(tmp_path / "bosun.db")
+    now = 1_700_000_000.0
+    jq = Item(Source.BREW, "jq", "jq", "1.7", "1.8", lane="now")
+    st.save_snapshot([item_to_dict(jq)], [])
+    upgrades: list[str] = []
+    monkeypatch.setattr(
+        "bosun.actions.Upgrader.start",
+        lambda self, item, allow_password=False, actor=None: upgrades.append(item.key) or 1,
+    )
+    app = create_app(load_settings(), st, "t" * 32)
+    user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+    hdr = {"x-bosun-token": "t" * 32}
+
+    defn = AutomationDef(
+        name="Ask jq upgrade",
+        trigger=RefreshTrigger(kind="refresh"),
+        conditions=RefreshConditions(),
+        action="upgrade",
+        scope=UpgradeScope(mode="keys", keys=(jq.key,)),
+        mode="ask",
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=now)
+
+    # Decline flow
+    f_dec = astore.insert_firing(
+        st, aid, defn.name, "refresh", "snap:1", "dec:1",
+        status="offered", deadline=now + 86400.0 + 10**9, input_data={"keys": [jq.key]}, now=now,
+    )
+    rd = user.post(f"/api/automations/firings/{f_dec}/decide", json={"approve": False, "reason": "not now"}, headers=hdr)
+    assert rd.status_code == 200 and rd.json()["status"] == "declined"
+    assert astore.get_firing(st, f_dec)["decided_by"] == "user"
+    assert user.post(f"/api/automations/firings/{f_dec}/decide", json={"approve": True}, headers=hdr).status_code == 409
+
+    # Expired offer cannot be approved
+    f_exp = astore.insert_firing(
+        st, aid, defn.name, "refresh", "snap:2", "exp:1",
+        status="offered", deadline=100.0, input_data={"keys": [jq.key]}, now=10.0,
+    )
+    rexp = user.post(f"/api/automations/firings/{f_exp}/decide", json={"approve": True}, headers=hdr)
+    assert rexp.status_code == 409 and "expired" in rexp.json()["detail"].lower()
+    assert astore.get_firing(st, f_exp)["status"] == "expired"
+
+    # Kill switch blocks approve
+    f_live = astore.insert_firing(
+        st, aid, defn.name, "refresh", "snap:3", "live:1",
+        status="offered", deadline=now + 10**9, input_data={"keys": [jq.key]}, now=now,
+    )
+    astore.set_paused(st, True)
+    assert user.post(f"/api/automations/firings/{f_live}/decide", json={"approve": True}, headers=hdr).status_code == 403
+    astore.set_paused(st, False)
+
+    # Held item (3-day wait) refuses approve and expires offer
+    monkeypatch.setattr(autopilot, "WAIT_DAYS", 3)
+    rh = user.post(f"/api/automations/firings/{f_live}/decide", json={"approve": True}, headers=hdr)
+    assert rh.status_code == 409 and "waiting" in rh.json()["detail"].lower()
+    assert upgrades == []
+

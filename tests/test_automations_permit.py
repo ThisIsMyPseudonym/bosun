@@ -42,6 +42,7 @@ from bosun.registry import (
     JobIn,
     KeyIn,
     ListPrefsIn,
+    OfferDecideIn,
     OnIn,
     PrefIn,
     QueryIn,
@@ -228,6 +229,7 @@ FORBIDDEN_AUTOMATION_ACTIONS = [
     ("renew_automation", AutomationIdIn(automation_id=1)),
     ("delete_automation", AutomationIdIn(automation_id=1)),
     ("pause_automations", OnIn(on=True)),
+    ("decide_offer", OfferDecideIn(firing_id=1, approve=True)),
     # EXTERNAL action
     ("open_pr", FixIdIn(fix_id=1)),
     # Panel actions (terminal & Ask Bosun)
