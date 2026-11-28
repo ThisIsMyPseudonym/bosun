@@ -57,14 +57,7 @@ def _skip_summary(skipped: Any) -> str:
 class Automator:
     """Single-writer automation engine running in the dashboard process only."""
 
-    def __init__(
-        self,
-        store: Store,
-        settings: Settings,
-        actions: Actions,
-        *,
-        tz: tzinfo | None = None,
-    ) -> None:
+    def __init__(self, store: Store, settings: Settings, actions: Actions, *, tz: tzinfo | None = None) -> None:
         self.store = store
         self.settings = settings
         self.actions = actions
