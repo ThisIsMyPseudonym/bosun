@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
@@ -17,7 +16,7 @@ from ..config import Settings
 from ..providers.router import QuotaHeld
 from ..registry import ActionContext, ActionError, Actions, Forbidden
 from ..store import Store
-from . import digest, match as amatch, schedule, store as astore, verdict as averdict
+from . import digest, match as amatch, recheck, schedule, store as astore, verdict as averdict
 from .schema import (MODEL_ACTIONS, AutomationDef, RefreshConditions, ScheduleConditions, ScheduleTrigger,
                      grant_digest, grant_digest_matches, grant_expired, has_unset_project, is_install_action)
 
@@ -53,16 +52,6 @@ def _skip_summary(skipped: Any) -> str:
     if isinstance(first, dict) and first.get("reason"):
         return str(first["reason"])[:300]
     return "skipped by safety checks"
-
-
-def _parse_json(raw: str | None) -> dict[str, Any]:
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 class Automator:
@@ -305,14 +294,9 @@ class Automator:
         if is_install_action(defn.action) and astore.active_install_firing(self.store) is not None:
             astore.set_firing(self.store, fid, due=when + INSTALL_WAIT_BACKOFF_S, now=when)
             return "waiting"
-        if isinstance(defn.conditions, ScheduleConditions) and not amatch.matches_schedule(
-            self.store, defn.conditions, defn.action, now=when,
-        ):
-            astore.set_firing(self.store, fid, status="skipped", reason="conditions no longer hold", now=when)
-            return "skipped"
-        resolved = amatch.resolve_input(self.store, defn, event=_parse_json(firing.get("input")), now=when)
+        resolved, skip_reason = recheck.resolve_for_firing(self.store, defn, firing, when)
         if resolved is None:
-            astore.set_firing(self.store, fid, status="skipped", reason="nothing to do", now=when)
+            astore.set_firing(self.store, fid, status="skipped", reason=skip_reason, now=when)
             return "skipped"
         dup = astore.same_work_recent(self.store, defn.action, resolved, exclude_automation_id=aid, now=when)
         if dup is not None:
