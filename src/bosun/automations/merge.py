@@ -216,3 +216,26 @@ def run_merged(
     outcome = _apply_result(store, batch, result, when)
     deferred, immediate = _defer_overflow(store, aid, defn, batch.overflow_ids, by_id, when)
     return outcome, handled | deferred, immediate
+
+
+def offer_merged(
+    store: Store, aid: int, defn: AutomationDef, lead_firing: dict[str, Any], when: float,
+) -> tuple[str, set[int], tuple[int, ...]]:
+    """Coalesce due firings for an asks-first rule within 1 minute into one offer (up to MERGE_CAP items)."""
+    from . import offers
+
+    siblings = collect_due_siblings(store, aid, lead_firing, when)
+    by_id = {int(r["id"]): r for r in siblings}
+    batch = build_batch(store, defn, aid, siblings, when)
+    handled: set[int] = set()
+    for sfid, sreason in batch.skipped:
+        astore.set_firing(store, sfid, status="skipped", reason=sreason, finished=when, now=when)
+        handled.add(sfid)
+    if not batch.firing_ids:
+        return "skipped", handled, ()
+    handled.update(batch.firing_ids)
+    lead = by_id[batch.firing_ids[0]]
+    outcome, _ = offers.create_offer(
+        store, aid, defn, lead, {"keys": list(batch.keys)}, when, sibling_fids=batch.firing_ids[1:],
+    )
+    return outcome, handled, batch.overflow_ids
