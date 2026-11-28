@@ -84,9 +84,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     cookie = auth.cookie_name(s.port)
     refresh_file_lock = lock.FileLock(store.path.parent / "refresh.lock")
     # with a `bosun refresh` running on its own, only what no process is doing any more: some may be its own
-    stale = store.abandon_stale_jobs(keep_live=lock.is_locked(refresh_file_lock.path))
-    if stale:
-        log.info("marked %d jobs from a previous run as abandoned", stale)
+    if not store.read_only:
+        stale = store.abandon_stale_jobs(keep_live=lock.is_locked(refresh_file_lock.path))
+        if stale:
+            log.info("marked %d jobs from a previous run as abandoned", stale)
     token = token or secrets.token_urlsafe(32)
     refresh_state: dict = {"running": False, "last_result": None, "error": None, "rechecking": [], "trace_id": None}
     refresh_lock = threading.Lock()
@@ -132,15 +133,15 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         threading.Thread(target=selfupdate.restart_when_idle, args=(_selfupdate_busy,),
                          kwargs={"report": _not_started},
                          daemon=True, name="self-update").start()
-    if store.abandon_stale_fixes():
-        log.info("marked interrupted fixes as failed")
-    interrupted = store.mark_interrupted_runs("serve")
-    if interrupted:
-        log.info("marked %d runs from a previous dashboard as interrupted", interrupted)
-    reset = tstore.reset_running(store)
-    if reset:
-        log.info("returned %d interrupted triage rows to queued", reset)
     if not store.read_only:
+        if store.abandon_stale_fixes():
+            log.info("marked interrupted fixes as failed")
+        interrupted = store.mark_interrupted_runs("serve")
+        if interrupted:
+            log.info("marked %d runs from a previous dashboard as interrupted", interrupted)
+        reset = tstore.reset_running(store)
+        if reset:
+            log.info("returned %d interrupted triage rows to queued", reset)
         recovered = astore.recover_running(store)
         if recovered:
             log.info("recovered %d interrupted automation firings", recovered)
@@ -445,7 +446,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     if not s.demo and not store.read_only:
         threading.Thread(target=automator.run, daemon=True, name="automations").start()
     app.state.terminals, app.state.upgrader = terminals, upgrader
-    if store.close_open_messages():
+    if not store.read_only and store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")
 
     @actions.bind("assistant_ask")

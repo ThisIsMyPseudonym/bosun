@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
 import time
 from typing import Any
 
 from pydantic import ValidationError
 
-from ..registry import SPECS, Invalid, NotFound, Risk, SaveAutomationIn, automation_id
+from ..registry import SPECS, Conflict, Invalid, NotFound, Risk, SaveAutomationIn, automation_id
 from ..store import Store
 from . import schedule, store as astore
 from .schema import (UNSET_PROJECT, AppActionScope, AutomationDef, ExplainItemScope, NotifyScope, PinMcpScope,
@@ -224,107 +226,120 @@ def _serialize_one(store: Store, aid: int, now: float) -> dict[str, Any]:
     return serialize_automation(store, row, projects=proj_map, now=now)
 
 
+_READ_ONLY_MSG = "Bosun's data is open read-only here (Store is read-only); change this from the dashboard"
+
+
+@contextmanager
+def _writable(store: Store) -> Iterator[None]:
+    if store.read_only:
+        raise Conflict(_READ_ONLY_MSG)
+    try:
+        yield
+    except RuntimeError as exc:
+        if "read-only" in str(exc).lower():
+            raise Conflict(_READ_ONLY_MSG) from None
+        raise
+
+
 def save_automation(
     store: Store, body: SaveAutomationIn, *, actor: str = "user", now: float | None = None,
 ) -> dict[str, Any]:
-    when = time.time() if now is None else now
-    existing = astore.get(store, body.id) if body.id is not None else None
-    if body.id is not None and existing is None:
-        raise NotFound("No automation with that id")
-    preset: str | None = existing.get("preset") if existing is not None else None
-    enabled = (bool(existing["enabled"]) if body.enabled is None else body.enabled) if existing is not None else bool(body.enabled)
-    try:
-        defn = AutomationDef.model_validate({
-            "name": body.name,
-            "trigger": body.trigger,
-            "conditions": body.conditions,
-            "action": body.action,
-            "scope": body.scope,
-            "mode": body.mode,
-            "delay_s": body.wait_s,
-            "max_per_day": body.max_per_day,
-            "cooldown_s": body.cooldown_s,
-            "model_jobs_per_day": body.model_jobs_per_day,
-        })
-    except ValidationError as exc:
-        raise Invalid(_format_validation_error(exc)) from None
-    if enabled and needs_project_pick(defn):
-        raise Invalid("Pick a project before enabling this automation")
-    need_confirm = needs_grant_confirmation(defn.action, defn.mode)
-    if enabled and need_confirm and not body.confirm_grant:
-        raise Invalid("Confirm the scope grant checkbox before enabling this automation")
-    grant_ok = (body.confirm_grant or (enabled and not need_confirm)) and not needs_project_pick(defn)
-    digest = grant_digest(defn) if grant_ok else ""
-    aid = astore.save(
-        store, defn, automation_id=body.id, preset=preset, enabled=enabled,
-        grant_digest=digest, granted_by=actor if digest else "",
-        granted_at=when if digest else None, now=when,
-    )
-    return _serialize_one(store, aid, when)
+    with _writable(store):
+        when = time.time() if now is None else now
+        existing = astore.get(store, body.id) if body.id is not None else None
+        if body.id is not None and existing is None:
+            raise NotFound("No automation with that id")
+        preset: str | None = existing.get("preset") if existing is not None else None
+        enabled = (bool(existing["enabled"]) if body.enabled is None else body.enabled) if existing is not None else bool(body.enabled)
+        try:
+            defn = AutomationDef.model_validate({
+                "name": body.name, "trigger": body.trigger, "conditions": body.conditions, "action": body.action,
+                "scope": body.scope, "mode": body.mode, "delay_s": body.wait_s, "max_per_day": body.max_per_day,
+                "cooldown_s": body.cooldown_s, "model_jobs_per_day": body.model_jobs_per_day,
+            })
+        except ValidationError as exc:
+            raise Invalid(_format_validation_error(exc)) from None
+        if enabled and needs_project_pick(defn):
+            raise Invalid("Pick a project before enabling this automation")
+        need_confirm = needs_grant_confirmation(defn.action, defn.mode)
+        if enabled and need_confirm and not body.confirm_grant:
+            raise Invalid("Confirm the scope grant checkbox before enabling this automation")
+        grant_ok = (body.confirm_grant or (enabled and not need_confirm)) and not needs_project_pick(defn)
+        digest = grant_digest(defn) if grant_ok else ""
+        aid = astore.save(
+            store, defn, automation_id=body.id, preset=preset, enabled=enabled,
+            grant_digest=digest, granted_by=actor if digest else "",
+            granted_at=when if digest else None, now=when,
+        )
+        return _serialize_one(store, aid, when)
 
 
 def set_automation_enabled(
     store: Store, automation_id: int, enabled: bool, *, confirm_grant: bool = False,
     actor: str = "user", now: float | None = None,
 ) -> dict[str, Any]:
-    when = time.time() if now is None else now
-    row = astore.get(store, automation_id)
-    if row is None:
-        raise NotFound("No automation with that id")
-    if not enabled:
-        astore.set_enabled(store, automation_id, False, now=when)
-        return _serialize_one(store, automation_id, when)
-    try:
-        defn = astore.parse_def(row)
-    except (ValueError, ValidationError) as exc:
-        raise Invalid(f"Automation definition is invalid: {exc}") from None
-    if needs_project_pick(defn):
-        raise Invalid("Pick a project in the editor before enabling this automation")
-    expected = grant_digest(defn)
-    has_valid_grant = (
-        grant_digest_matches(row.get("grant_digest"), expected)
-        and not grant_expired(defn.action, defn.mode, row.get("granted_at"), now=when)
-    )
-    if needs_grant_confirmation(defn.action, defn.mode) and not has_valid_grant and not confirm_grant:
-        raise Invalid("Confirm the scope grant before enabling this automation")
-    if has_valid_grant:
-        astore.set_enabled(store, automation_id, True, now=when)
-    else:
-        astore.save(
-            store, defn, automation_id=automation_id, preset=row.get("preset"), enabled=True,
-            grant_digest=expected, granted_by=actor, granted_at=when, clear_paused=True, now=when,
+    with _writable(store):
+        when = time.time() if now is None else now
+        row = astore.get(store, automation_id)
+        if row is None:
+            raise NotFound("No automation with that id")
+        if not enabled:
+            astore.set_enabled(store, automation_id, False, now=when)
+            return _serialize_one(store, automation_id, when)
+        try:
+            defn = astore.parse_def(row)
+        except (ValueError, ValidationError) as exc:
+            raise Invalid(f"Automation definition is invalid: {exc}") from None
+        if needs_project_pick(defn):
+            raise Invalid("Pick a project in the editor before enabling this automation")
+        expected = grant_digest(defn)
+        has_valid_grant = (
+            grant_digest_matches(row.get("grant_digest"), expected)
+            and not grant_expired(defn.action, defn.mode, row.get("granted_at"), now=when)
         )
-    return _serialize_one(store, automation_id, when)
+        if needs_grant_confirmation(defn.action, defn.mode) and not has_valid_grant and not confirm_grant:
+            raise Invalid("Confirm the scope grant before enabling this automation")
+        if has_valid_grant:
+            astore.set_enabled(store, automation_id, True, now=when)
+        else:
+            astore.save(
+                store, defn, automation_id=automation_id, preset=row.get("preset"), enabled=True,
+                grant_digest=expected, granted_by=actor, granted_at=when, clear_paused=True, now=when,
+            )
+        return _serialize_one(store, automation_id, when)
 
 
 def renew_automation(
     store: Store, automation_id: int, *, actor: str = "user", now: float | None = None,
 ) -> dict[str, Any]:
-    when = time.time() if now is None else now
-    row = astore.get(store, automation_id)
-    if row is None:
-        raise NotFound("No automation with that id")
-    try:
-        defn = astore.parse_def(row)
-    except (ValueError, ValidationError) as exc:
-        raise Invalid(f"Automation definition is invalid: {exc}") from None
-    if needs_project_pick(defn):
-        raise Invalid("Pick a project in the editor before renewing this automation")
-    if not grant_digest_matches(row.get("grant_digest"), grant_digest(defn)):
-        raise Invalid("Save and confirm this automation before renewing its grant")
-    astore.renew_grant(store, automation_id, granted_by=actor, now=when)
-    return _serialize_one(store, automation_id, when)
+    with _writable(store):
+        when = time.time() if now is None else now
+        row = astore.get(store, automation_id)
+        if row is None:
+            raise NotFound("No automation with that id")
+        try:
+            defn = astore.parse_def(row)
+        except (ValueError, ValidationError) as exc:
+            raise Invalid(f"Automation definition is invalid: {exc}") from None
+        if needs_project_pick(defn):
+            raise Invalid("Pick a project in the editor before renewing this automation")
+        if not grant_digest_matches(row.get("grant_digest"), grant_digest(defn)):
+            raise Invalid("Save and confirm this automation before renewing its grant")
+        astore.renew_grant(store, automation_id, granted_by=actor, now=when)
+        return _serialize_one(store, automation_id, when)
 
 
 def delete_automation(store: Store, automation_id: int, *, now: float | None = None) -> dict[str, Any]:
-    if not astore.delete(store, automation_id, now=now):
-        raise NotFound("No automation with that id")
-    return {"deleted": automation_id}
+    with _writable(store):
+        if not astore.delete(store, automation_id, now=now):
+            raise NotFound("No automation with that id")
+        return {"deleted": automation_id}
 
 
 def pause_automations(store: Store, paused: bool) -> dict[str, Any]:
-    astore.set_paused(store, paused)
-    return {"paused": astore.is_paused(store)}
+    with _writable(store):
+        astore.set_paused(store, paused)
+        return {"paused": astore.is_paused(store)}
 
 
 def _automation_names(store: Store, ids: set[int]) -> dict[int, str]:

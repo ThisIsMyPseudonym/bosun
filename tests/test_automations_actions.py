@@ -253,3 +253,46 @@ def test_blank_or_whitespace_only_name_is_refused_with_400(tmp_path):
             "enabled": False,
         }, headers=H)
         assert r.status_code == 400, f"expected 400 for {bad_name!r}, got {r.status_code}: {r.text}"
+
+
+def test_automation_writes_on_read_only_store_return_409_conflict(tmp_path):
+    from bosun.automations.schema import AutomationDef, NotifyScope, RefreshConditions, RefreshTrigger, grant_digest
+
+    db_path = tmp_path / "bosun.db"
+    with Store(db_path) as rw:
+        defn = AutomationDef(
+            name="Digest",
+            trigger=RefreshTrigger(kind="refresh"),
+            conditions=RefreshConditions(),
+            action="notify",
+            scope=NotifyScope(digest="what_changed"),
+            mode="run",
+        )
+        aid = astore.save(rw, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user")
+
+    with Store(db_path, read_only=True) as ro:
+        app = create_app(load_settings(), ro, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in(), raise_server_exceptions=False)
+
+        assert user.get("/api/automations").status_code == 200
+        assert user.get("/api/automations/firings").status_code == 200
+
+        payload = {
+            "name": "New digest",
+            "trigger": {"kind": "refresh"},
+            "conditions": {},
+            "action": "notify",
+            "scope": {"digest": "what_changed"},
+            "mode": "run",
+            "enabled": False,
+        }
+        for path, body in (
+            ("/api/automations", payload),
+            (f"/api/automations/{aid}/enabled", {"enabled": False}),
+            (f"/api/automations/{aid}/renew", {}),
+            (f"/api/automations/{aid}/delete", {}),
+            ("/api/automations/pause", {"on": True}),
+        ):
+            r = user.post(path, json=body, headers=H)
+            assert r.status_code == 409, f"{path}: expected 409, got {r.status_code}: {r.text}"
+            assert "read-only" in r.text.lower(), f"{path}: unclear message: {r.text}"
