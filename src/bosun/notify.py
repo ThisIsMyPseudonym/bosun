@@ -15,11 +15,11 @@ import logging
 import math
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import attention, autopilot, machine, proc, relaunch
+from . import attention, autopilot, machine, proc, redact, relaunch
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +27,8 @@ SETTING = "notify"  # "off" silences everything; on unless turned off
 SEEN = "notify_seen"  # what has already been said (or seen on screen), as a JSON list of marks
 SEEN_SIGS = "notify_triage_sigs"  # (signature, item_key) -> delivered timestamp; expires after SIG_TTL_S or a success
 CURSOR = "notify_cursor"  # jobs that finished after this time haven't been reported yet
+AUTOMATION_QUEUE = "notify_automations"  # pending (title, line) pairs queued by automations
+MAX_AUTOMATION_QUEUE = 50
 MAX_SEEN_SIGS = 500
 SIG_TTL_S = 7 * 86400.0
 TICK_S = 120.0
@@ -48,6 +50,30 @@ def is_on(store) -> bool:
 
 def set_on(store, on: bool) -> None:
     store.set_setting(SETTING, "on" if on else "off")
+
+
+def _read_automation_queue(store) -> list[tuple[str, str]]:
+    raw = store.setting(AUTOMATION_QUEUE)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: list[tuple[str, str]] = []
+    for entry in parsed:
+        if isinstance(entry, list) and len(entry) == 2 and all(isinstance(x, str) for x in entry):
+            out.append((entry[0], entry[1]))
+    return out
+
+
+def enqueue_automation(store, title: str, line: str) -> None:
+    """Queue one redacted automation notification line for the next Notifier tick."""
+    queued = _read_automation_queue(store)
+    queued.append((redact.text(title).strip()[:120], redact.text(line).strip()[:400]))
+    store.set_setting(AUTOMATION_QUEUE, json.dumps(queued[-MAX_AUTOMATION_QUEUE:]))
 
 
 # ---------- what needs a human ----------
@@ -108,7 +134,8 @@ def _failed_body(causes: tuple[str, ...] | list[str]) -> str:
 
 
 def compose(exploited: list[str], failed: list[str], ready: list[str], fresh: list[str], updated: int,
-            held: list[str] = (), failed_causes: tuple[str, ...] | list[str] = ()) -> Note | None:
+            held: list[str] = (), failed_causes: tuple[str, ...] | list[str] = (),
+            automations: Sequence[tuple[str, str]] = ()) -> Note | None:
     """One notification for everything new, headed by the most urgent part."""
     lines: list[tuple[str, str]] = []
     full: set[int] = set()  # lines said in full wherever they come: a hold asks for a choice
@@ -132,6 +159,10 @@ def compose(exploited: list[str], failed: list[str], ready: list[str], fresh: li
     if fresh:
         lines.append((f"{_names(fresh, 2)} need{'s' if len(fresh) == 1 else ''} you" if len(fresh) <= 2
                       else f"{len(fresh)} updates need you", f"{_names(fresh)}."))
+    for title, body in automations:
+        if title and body:
+            full.add(len(lines))
+            lines.append((title, body))
     if not lines:
         return None
     title, first = lines[0]
@@ -244,8 +275,9 @@ class Notifier:
         updated = sum(j["status"] == "succeeded" for j in finished)
         new = {m: v for m, v in current.items() if m not in seen and m.split("#")[0] not in failed}  # failed says it
 
+        auto_lines = _read_automation_queue(self.store)
         quiet = not is_on(self.store) or now - self.last_viewed < WATCHING_S
-        if not quiet and now - self.last_sent < GAP_S and (new or failed or set(ready) - seen or set(held) - seen):
+        if not quiet and now - self.last_sent < GAP_S and (new or failed or set(ready) - seen or set(held) - seen or auto_lines):
             return None  # too soon after the last one: keep it all for the next
         note = None if quiet else compose(
             exploited=[n for n, kev in new.values() if kev],
@@ -254,13 +286,16 @@ class Notifier:
             fresh=[n for n, kev in new.values() if not kev],
             updated=updated,
             held=[n for m, n in held.items() if m not in seen],
-            failed_causes=failed_causes)
+            failed_causes=failed_causes,
+            automations=auto_lines)
         delivered = False
         if note:
             if not self.say(note):
                 return None  # try again next tick rather than lose it
             self.last_sent = now
             delivered = True
+        if auto_lines:
+            self.store.set_setting(AUTOMATION_QUEUE, "[]")
         next_sigs: dict[str, float] | None = None
         if delivered and new_sigs:
             next_sigs = {**cleared_sigs, **{k: now for k in new_sigs}}
