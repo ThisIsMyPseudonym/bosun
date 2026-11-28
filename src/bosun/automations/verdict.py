@@ -191,21 +191,23 @@ def _parse_verdict(raw: str | None) -> Verdict | None:
         return None
 
 
-def build_event(store: Store, row: sqlite3.Row, *, check_disputed: bool = True) -> VerdictEvent | None:
-    """Build a VerdictEvent from one `triage` row and its recorded `v_failures` row."""
+def _build_event_status(
+    store: Store, row: sqlite3.Row, *, check_disputed: bool = True,
+) -> tuple[VerdictEvent | None, bool]:
+    """Build a VerdictEvent; second element is True only when the `v_failures` row is not present yet."""
     src = str(row["source"] or "")
     if src not in _VALID_SOURCES:
-        return None
+        return None, False
     verdict = _parse_verdict(row["verdict"])
     if verdict is None or is_downgraded_verdict(verdict, src):
-        return None
+        return None, False
     with store._tx() as db:
         disputed = _row_disputed(db, row)
         if check_disputed and disputed:
-            return None
+            return None, False
     rec = load_failure_by_key(store, str(row["failure"]), str(row["trace_id"] or ""))
     if rec is None:
-        return None
+        return None, True
     with store._tx() as db:
         item_key, project, available = _recorded_target(db, rec)
     item_source = item_key.split(":", 1)[0] if ":" in item_key else rec.item_source
@@ -224,7 +226,12 @@ def build_event(store: Store, row: sqlite3.Row, *, check_disputed: bool = True) 
         available=available,
         actor=rec.actor,
         disputed=disputed,
-    )
+    ), False
+
+
+def build_event(store: Store, row: sqlite3.Row, *, check_disputed: bool = True) -> VerdictEvent | None:
+    """Build a VerdictEvent from one `triage` row and its recorded `v_failures` row."""
+    return _build_event_status(store, row, check_disputed=check_disputed)[0]
 
 
 def matches_verdict(conditions: VerdictConditions, event: VerdictEvent) -> bool:
@@ -310,17 +317,21 @@ def scan_verdicts(
         return 0
     since_by_rule = _rule_cursors(store, verdict_rules, when)
     rows = _fetch_verdict_rows(store, since_by_rule)
-    created = 0
+    created, floor = 0, when - VERDICT_STALENESS_S
     max_cur: dict[int, tuple[float, int | None]] = dict(since_by_rule)
+    blocked: set[int] = set()
     for row in rows:
         ended, tid = float(row["ended"]), int(row["id"])
         eligible_rules = [entry for entry in verdict_rules if after_cursor(ended, tid, since_by_rule[entry[0]])]
         if not eligible_rules:
             continue
-        event = build_event(store, row)
+        event, missing_failure = _build_event_status(store, row)
+        if missing_failure and ended > floor:
+            blocked.update(aid for aid, _r, _d in eligible_rules)
+            continue
         origin = chain.resolve_origin(store, event.trace_id, actor=event.actor, failure=event.failure) if event else None
         for aid, _row, defn in eligible_rules:
-            if after_cursor(ended, tid, max_cur[aid]):
+            if aid not in blocked and after_cursor(ended, tid, max_cur[aid]):
                 max_cur[aid] = (ended, tid)
             if event is None or origin is None or not isinstance(defn.conditions, VerdictConditions):
                 continue

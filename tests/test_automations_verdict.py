@@ -403,3 +403,70 @@ def test_hostile_verdict_cannot_steer_action_or_widen_scope(tmp_path):
         assert amatch.resolve_input(st, k_def, event={"item_key": jq.key, "available": "1.7.1"}, now=base + 10.0) is None
     finally:
         trace.configure(None)
+
+
+def test_verdict_cursor_retries_missing_failure_row_and_bounds_by_staleness(tmp_path):
+    from bosun.automations.verdict import parse_cursor
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        jq = Item(Source.BREW, "jq", "jq", "1.7.0", "1.7.1", lane="batch")
+        fd = Item(Source.BREW, "fd", "fd", "9.0.0", "9.1.0", lane="batch")
+        st.save_snapshot([item_to_dict(jq), item_to_dict(fd)], [])
+        t0 = 700_000.0
+
+        defn = AutomationDef(
+            name="Retry locked",
+            trigger=VerdictTrigger(kind="verdict"),
+            conditions=VerdictConditions(categories=("busy_or_locked",), transient=True, needs_person=False),
+            action="upgrade",
+            scope=UpgradeScope(mode="failed_item"),
+            mode="run",
+            delay_s=900,
+        )
+        aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=t0)
+        app = create_app(load_settings(), st, "t" * 32)
+        eng = Automator(st, load_settings(), app.state.actions)
+
+        # 1. Verdict whose v_failures row isn't present yet holds cursor while a later valid verdict still scans
+        j_late = st.create_job(jq.key, ["brew", "upgrade", "jq"], status="running", actor="user")
+        late_job = st.job(j_late)
+        assert late_job is not None
+        tstore.save_verdict(st, f"job:{j_late}", str(late_job["trace_id"]), "sig-late", "rules", _verdict(), now=t0 + 10.0)
+        j_ok, tid_ok = _fail_upgrade_job(st, fd.key)
+        tstore.save_verdict(st, f"job:{j_ok}", tid_ok, "sig-ok", "rules", _verdict(), now=t0 + 15.0)
+
+        assert eng.tick(now=t0 + 20.0).scanned == 1
+        cur_ts, _ = parse_cursor(astore.cursor(st, f"verdict_{aid}"), 0.0)
+        assert cur_ts == t0  # did NOT advance past missing-failure row at t0 + 10
+
+        # Once the missing job row finishes failed (appears in v_failures), next tick picks it up and advances cursor
+        st.finish_job(j_late, "failed", "locked")
+        assert eng.tick(now=t0 + 30.0).scanned == 1
+        refs = {f["event_ref"] for f in astore.list_firings(st, automation_id=aid)}
+        assert refs == {f"job:{j_ok}", f"job:{j_late}"}
+        cur_ts2, _ = parse_cursor(astore.cursor(st, f"verdict_{aid}"), 0.0)
+        assert cur_ts2 == t0 + 15.0
+
+        # 2. Definitively excluded row (non-matching category) DOES advance the cursor
+        j_nm, tid_nm = _fail_upgrade_job(st, jq.key)
+        tstore.save_verdict(st, f"job:{j_nm}", tid_nm, "sig-nm", "rules", _verdict(category="network"), now=t0 + 50.0)
+        assert eng.tick(now=t0 + 60.0).scanned == 0
+        cur_ts3, _ = parse_cursor(astore.cursor(st, f"verdict_{aid}"), 0.0)
+        assert cur_ts3 == t0 + 50.0
+
+        # 3. Permanently missing failure row cannot hold cursor past the 6h staleness window
+        tstore.save_verdict(st, "job:8888", "trace-8888", "sig-bad", "rules", _verdict(), now=t0 + 100.0)
+        assert eng.tick(now=t0 + 120.0).scanned == 0
+        cur_ts4, _ = parse_cursor(astore.cursor(st, f"verdict_{aid}"), 0.0)
+        assert cur_ts4 == t0 + 50.0
+
+        t_after = t0 + 100.0 + VERDICT_STALENESS_S + 60.0
+        j_fresh, tid_fresh = _fail_upgrade_job(st, jq.key)
+        tstore.save_verdict(st, f"job:{j_fresh}", tid_fresh, "sig-fresh", "rules", _verdict(), now=t_after - 10.0)
+        assert eng.tick(now=t_after).scanned == 1
+        cur_ts5, _ = parse_cursor(astore.cursor(st, f"verdict_{aid}"), 0.0)
+        assert cur_ts5 == t_after - 10.0
+    finally:
+        trace.configure(None)
