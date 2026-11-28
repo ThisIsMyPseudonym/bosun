@@ -685,3 +685,58 @@ def test_schedule_slot_unmatched_in_window_never_becomes_spurious_missed(tmp_pat
     assert astore.list_firings(st, automation_id=eid) == []
 
 
+def test_refresh_delay_12h_sets_deadline_from_due_and_runs_after_wait(tmp_path):
+    from fastapi.testclient import TestClient
+    from conftest import signed_in
+    from bosun.automations.engine import REFRESH_DEADLINE_S
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        st.save_snapshot([], [])
+        app = create_app(load_settings(), st, "t" * 32)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+        wait_12h = 12 * 3600
+        saved = user.post(
+            "/api/automations",
+            json={
+                "name": "Delayed digest",
+                "trigger": {"kind": "refresh"},
+                "conditions": {},
+                "action": "notify",
+                "scope": {"digest": "what_changed"},
+                "mode": "run",
+                "enabled": True,
+                "wait_s": wait_12h,
+            },
+            headers={"x-bosun-token": "t" * 32},
+        )
+        assert saved.status_code == 200 and saved.json()["wait_s"] == wait_12h
+        aid = int(saved.json()["id"])
+
+        with trace.run("refresh", subject="everything", actor="schedule") as r:
+            st.save_snapshot([], [])
+        scan_now = r.root.started + 10.0
+        astore.set_cursor(st, f"refresh_{aid}", repr(r.root.started - 5.0))
+
+        eng = Automator(st, load_settings(), app.state.actions, tz=CHI)
+        rep1 = eng.tick(now=scan_now)
+        assert rep1.scanned == 1 and rep1.ran == 0
+        firings = astore.list_firings(st, automation_id=aid)
+        assert len(firings) == 1
+        f = firings[0]
+        assert f["due"] == scan_now + wait_12h
+        assert f["deadline"] == f["due"] + REFRESH_DEADLINE_S
+
+        # Tick at +7h (past old ended+6h deadline) must NOT expire the 12h-delayed firing
+        eng.tick(now=scan_now + 7 * 3600.0)
+        assert astore.get_firing(st, f["id"])["status"] == "scheduled"
+
+        # Tick after 12h wait executes the firing
+        rep2 = eng.tick(now=scan_now + wait_12h + 5.0)
+        assert rep2.ran == 1
+        assert astore.get_firing(st, f["id"])["status"] == "done"
+    finally:
+        trace.configure(None)
+
+

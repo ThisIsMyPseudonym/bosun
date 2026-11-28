@@ -165,9 +165,10 @@ class Automator:
                 depth = chain.next_depth(origin, aid)
                 if depth is None:
                     continue
+                due = when + defn.delay_s
                 fid = astore.insert_firing(
                     self.store, aid, defn.name, "refresh", f"snap:{snap_id}", f"refresh:snap:{snap_id}",
-                    status="scheduled", depth=depth, due=when + defn.delay_s, deadline=ended + REFRESH_DEADLINE_S,
+                    status="scheduled", depth=depth, due=due, deadline=due + REFRESH_DEADLINE_S,
                     input_data={"snapshot_id": snap_id, "prev_snapshot_id": prev_id}, now=when,
                 )
                 created += int(fid is not None)
