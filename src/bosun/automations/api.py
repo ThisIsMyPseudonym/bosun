@@ -130,57 +130,41 @@ def needs_grant_confirmation(action: str, mode: str) -> bool:
     return mode == "run" and spec is not None and spec.risk > Risk.LOCAL
 
 
+def _safe_parse_def(row: dict[str, Any]) -> AutomationDef | None:
+    try:
+        return astore.parse_def(row)
+    except (ValueError, ValidationError):
+        return None
+
+
 def serialize_automation(
     store: Store, row: dict[str, Any], *, projects: dict[str, str], now: float,
 ) -> dict[str, Any]:
-    aid = int(row["id"])
-    trigger = _parse_json_obj(row.get("trigger"))
-    conditions = _parse_json_obj(row.get("conditions"))
-    scope = _parse_json_obj(row.get("scope"))
-    action = str(row["action"])
-    mode = str(row["mode"])
+    aid, action, mode = int(row["id"]), str(row["action"]), str(row["mode"])
     granted_at = float(row["granted_at"]) if row.get("granted_at") is not None else None
-    try:
-        defn: AutomationDef | None = astore.parse_def(row)
-    except (ValueError, ValidationError):
-        defn = None
+    defn = _safe_parse_def(row)
     has_grant = bool(row.get("grant_digest"))
-    expired = bool(has_grant and grant_expired(action, mode, granted_at, now=now))
-    expires_at = grant_expires_at(action, mode, granted_at) if has_grant else None
-    next_ts = (
-        schedule.next_due(defn.trigger, now=now)
-        if defn is not None and isinstance(defn.trigger, ScheduleTrigger)
-        else None
-    )
+    next_ts = (schedule.next_due(defn.trigger, now=now)
+               if defn is not None and isinstance(defn.trigger, ScheduleTrigger) else None)
     return {
-        "id": aid,
-        "name": str(row["name"]),
-        "preset": row.get("preset"),
-        "enabled": bool(row["enabled"]),
-        "paused_reason": str(row.get("paused_reason") or ""),
-        "trigger": trigger,
-        "conditions": conditions,
-        "action": action,
-        "scope": scope,
-        "mode": mode,
-        "wait_s": int(row.get("delay_s") or 0),
-        "max_per_day": int(row.get("max_per_day") or 6),
+        "id": aid, "name": str(row["name"]), "preset": row.get("preset"),
+        "enabled": bool(row["enabled"]), "paused_reason": str(row.get("paused_reason") or ""),
+        "trigger": _parse_json_obj(row.get("trigger")), "conditions": _parse_json_obj(row.get("conditions")),
+        "action": action, "scope": _parse_json_obj(row.get("scope")), "mode": mode,
+        "wait_s": int(row.get("delay_s") or 0), "max_per_day": int(row.get("max_per_day") or 6),
         "cooldown_s": int(row.get("cooldown_s") or 900),
         "model_jobs_per_day": int(row.get("model_jobs_per_day") or 3),
-        "grant_digest": str(row.get("grant_digest") or ""),
-        "granted_by": str(row.get("granted_by") or ""),
+        "grant_digest": str(row.get("grant_digest") or ""), "granted_by": str(row.get("granted_by") or ""),
         "granted_at": granted_at,
-        "grant_expired": expired,
-        "grant_expires_at": expires_at,
+        "grant_expired": bool(has_grant and grant_expired(action, mode, granted_at, now=now)),
+        "grant_expires_at": grant_expires_at(action, mode, granted_at) if has_grant else None,
         "needs_grant": needs_grant_confirmation(action, mode),
         "needs_project": needs_project_pick(defn) if defn is not None else False,
         "sentence": describe_sentence(defn, projects) if defn is not None else str(row["name"]),
         "scope_sentence": describe_scope(defn) if defn is not None else "",
-        "next_due": next_ts,
-        "today_count": astore.fired_today(store, aid, now=now),
+        "next_due": next_ts, "today_count": astore.fired_today(store, aid, now=now),
         "last_fired": astore.last_fired_at(store, aid),
-        "created": row.get("created"),
-        "updated": row.get("updated"),
+        "created": row.get("created"), "updated": row.get("updated"),
     }
 
 
