@@ -334,7 +334,7 @@ def grant_digest(defn: AutomationDef) -> str:
         "trigger": defn.trigger.model_dump(mode="json"),
         "conditions": defn.conditions.model_dump(mode="json"),
         "action": defn.action,
-        "scope": defn.scope.model_dump(mode="json"),
+        "scope": defn.scope.model_dump(mode="json", exclude={"mode"} if isinstance(defn.scope, AppActionScope) and defn.scope.mode == "app" else None),
         "mode": defn.mode,
         "delay_s": defn.delay_s,
         "max_per_day": defn.max_per_day,

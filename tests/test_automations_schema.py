@@ -196,3 +196,52 @@ def test_trigger_condition_action_scope_validation_and_describe_scope():
             scope=RefreshScope(only=None),
             mode="run",
         )
+
+
+def test_app_action_scope_default_mode_preserves_phase3_grant_digest():
+    import hashlib
+    import json
+
+    defn_app = AutomationDef(
+        name="Offer Chrome relaunch",
+        trigger=RefreshTrigger(kind="refresh"),
+        conditions=RefreshConditions(),
+        action="relaunch_app",
+        scope=AppActionScope(app="chrome"),
+        mode="ask",
+    )
+    phase3_payload = {
+        "trigger": {"kind": "refresh"},
+        "conditions": {"any_failed": False, "new_in_lanes": [], "newly_exploited": False},
+        "action": "relaunch_app",
+        "scope": {"app": "chrome"},
+        "mode": "ask",
+        "delay_s": 0,
+        "max_per_day": 6,
+        "cooldown_s": 900,
+        "model_jobs_per_day": 3,
+    }
+    phase3_digest = hashlib.sha256(
+        json.dumps(phase3_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert grant_digest(defn_app) == phase3_digest
+
+    # Non-default mode='trigger_app' remains in the digest and produces a distinct hash
+    defn_trig = AutomationDef(
+        name="Offer in-app",
+        trigger=InAppUpdateTrigger(kind="in_app_update"),
+        conditions=InAppUpdateConditions(),
+        action="open_app",
+        scope=AppActionScope(mode="trigger_app"),
+        mode="ask",
+    )
+    defn_fixed = AutomationDef(
+        name="Offer in-app",
+        trigger=InAppUpdateTrigger(kind="in_app_update"),
+        conditions=InAppUpdateConditions(),
+        action="open_app",
+        scope=AppActionScope(mode="app", app="mac-app:slack"),
+        mode="ask",
+    )
+    assert grant_digest(defn_trig) != grant_digest(defn_fixed)
+
