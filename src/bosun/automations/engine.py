@@ -36,6 +36,8 @@ TICK_S = 30.0
 INSTALL_WAIT_BACKOFF_S = 60.0
 GLOBAL_DAILY_CAP = 30
 SCHEDULE_DEADLINE_S = 6 * 3600.0
+REFRESH_STALENESS_S = 6 * 3600.0
+REFRESH_DEADLINE_S = 6 * 3600.0
 RETRY_DEADLINE_S = 2 * 3600.0
 CIRCUIT_BREAKER_FAILURES = 3
 MAX_PER_TICK = 10
@@ -154,38 +156,43 @@ class Automator:
         ref_rules = [(aid, r, d) for aid, (r, d) in rules.items() if d.trigger.kind == "refresh"]
         if not ref_rules:
             return 0
-        raw_cur = astore.cursor(self.store, REFRESH_CURSOR)
-        since = float(raw_cur) if raw_cur is not None else 0.0
+        floor = when - REFRESH_STALENESS_S
+        since_by_rule: dict[int, float] = {}
+        for aid, row, _defn in ref_rules:
+            raw_cur = astore.cursor(self.store, f"{REFRESH_CURSOR}_{aid}")
+            cur_val = float(raw_cur) if raw_cur is not None else float(row.get("updated") or 0.0)
+            since_by_rule[aid] = max(cur_val, floor)
         with self.store._tx() as db:
             runs = db.execute(
                 "SELECT trace_id, started, COALESCE(finished, started) AS ended FROM runs "
                 "WHERE kind='refresh' AND subject='everything' AND status IN ('ok', 'partial') "
                 "AND COALESCE(finished, started) > ? ORDER BY ended ASC LIMIT 20",
-                (since,),
+                (min(since_by_rule.values()),),
             ).fetchall()
         created = 0
-        max_ended = since
+        max_ended = dict(since_by_rule)
         for run in runs:
             ended = float(run["ended"])
-            max_ended = max(max_ended, ended)
             snaps = self._snapshot_for_run(float(run["started"]), ended)
-            if snaps is None:
-                continue
-            snap_id, prev_id = snaps
             for aid, _row, defn in ref_rules:
-                if not isinstance(defn.conditions, RefreshConditions):
+                if ended <= since_by_rule[aid]:
                     continue
+                max_ended[aid] = max(max_ended[aid], ended)
+                if snaps is None or not isinstance(defn.conditions, RefreshConditions):
+                    continue
+                snap_id, prev_id = snaps
                 if not amatch.matches_refresh(self.store, defn.conditions, snapshot_id=snap_id, prev_snapshot_id=prev_id):
                     continue
                 fid = astore.insert_firing(
                     self.store, aid, defn.name, "refresh", f"snap:{snap_id}", f"refresh:snap:{snap_id}",
-                    status="scheduled", due=when + defn.delay_s,
+                    status="scheduled", due=when + defn.delay_s, deadline=ended + REFRESH_DEADLINE_S,
                     input_data={"snapshot_id": snap_id, "prev_snapshot_id": prev_id}, now=when,
                 )
                 if fid is not None:
                     created += 1
-        if max_ended > since:
-            astore.set_cursor(self.store, REFRESH_CURSOR, repr(max_ended))
+        for aid, ended in max_ended.items():
+            if ended > since_by_rule[aid]:
+                astore.set_cursor(self.store, f"{REFRESH_CURSOR}_{aid}", repr(ended))
         return created
 
     def _scan_schedules(self, rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float) -> int:

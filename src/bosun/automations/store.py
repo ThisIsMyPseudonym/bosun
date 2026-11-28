@@ -55,6 +55,11 @@ def parse_def(row: dict[str, Any]) -> AutomationDef:
     })
 
 
+def _set_refresh_cursor(db: sqlite3.Connection, automation_id: int, when: float) -> None:
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+               (f"{CURSOR_PREFIX}refresh_{automation_id}", repr(when)))
+
+
 def save(
     store: Store, defn: AutomationDef, *, automation_id: int | None = None, preset: str | None = None,
     enabled: bool = False, grant_digest: str = "", granted_by: str = "", granted_at: float | None = None,
@@ -67,29 +72,32 @@ def save(
     cond = _canon_json(defn.conditions.model_dump(mode="json"))
     scope = _canon_json(defn.scope.model_dump(mode="json"))
     g_at = when if (grant_digest and granted_at is None) else granted_at
+    vals = (name, int(bool(enabled)), trig, cond, defn.action, scope, defn.mode, defn.delay_s,
+            defn.max_per_day, defn.cooldown_s, defn.model_jobs_per_day, grant_digest, granted_by, g_at, when)
     with store._tx(write=True) as db:
         if automation_id is None:
             cur = db.execute(
                 "INSERT INTO automations (name, preset, enabled, paused_reason, trigger, conditions, action, scope, "
                 "mode, delay_s, max_per_day, cooldown_s, model_jobs_per_day, grant_digest, granted_by, granted_at, "
                 "created, updated) VALUES (?,?,?, '', ?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (name, preset, int(bool(enabled)), trig, cond, defn.action, scope, defn.mode, defn.delay_s,
-                 defn.max_per_day, defn.cooldown_s, defn.model_jobs_per_day, grant_digest, granted_by, g_at, when, when),
+                (vals[0], preset, *vals[1:], when),
             )
-            return int(cur.lastrowid or 0)
-        db.execute(
-            "UPDATE automations SET name=?, enabled=?, paused_reason='', trigger=?, conditions=?, action=?, scope=?, "
-            "mode=?, delay_s=?, max_per_day=?, cooldown_s=?, model_jobs_per_day=?, grant_digest=?, granted_by=?, "
-            "granted_at=?, updated=? WHERE id=?",
-            (name, int(bool(enabled)), trig, cond, defn.action, scope, defn.mode, defn.delay_s, defn.max_per_day,
-             defn.cooldown_s, defn.model_jobs_per_day, grant_digest, granted_by, g_at, when, automation_id),
-        )
-        db.execute(
-            "UPDATE automation_firings SET status='skipped', reason='automation edited', finished=? "
-            "WHERE automation_id=? AND status IN ('scheduled', 'waiting_quota', 'offered')",
-            (when, automation_id),
-        )
-        return automation_id
+            aid = int(cur.lastrowid or 0)
+        else:
+            db.execute(
+                "UPDATE automations SET name=?, enabled=?, paused_reason='', trigger=?, conditions=?, action=?, scope=?, "
+                "mode=?, delay_s=?, max_per_day=?, cooldown_s=?, model_jobs_per_day=?, grant_digest=?, granted_by=?, "
+                "granted_at=?, updated=? WHERE id=?", (*vals, automation_id),
+            )
+            db.execute(
+                "UPDATE automation_firings SET status='skipped', reason='automation edited', finished=? "
+                "WHERE automation_id=? AND status IN ('scheduled', 'waiting_quota', 'offered')",
+                (when, automation_id),
+            )
+            aid = automation_id
+        if defn.trigger.kind == "refresh":
+            _set_refresh_cursor(db, aid, when)
+        return aid
 
 
 def get(store: Store, automation_id: int) -> dict[str, Any] | None:
@@ -124,6 +132,8 @@ def set_enabled(store: Store, automation_id: int, enabled: bool, *, now: float |
     with store._tx(write=True) as db:
         if enabled:
             cur = db.execute("UPDATE automations SET enabled=1, paused_reason='', updated=? WHERE id=?", (when, automation_id))
+            if cur.rowcount > 0:
+                _set_refresh_cursor(db, automation_id, when)
         else:
             cur = db.execute("UPDATE automations SET enabled=0, updated=? WHERE id=?", (when, automation_id))
             db.execute(
@@ -151,6 +161,8 @@ def renew_grant(store: Store, automation_id: int, *, granted_by: str = "user", n
             "UPDATE automations SET granted_by=?, granted_at=?, updated=? WHERE id=?",
             (granted_by, when, when, automation_id),
         )
+        if cur.rowcount > 0:
+            _set_refresh_cursor(db, automation_id, when)
         return cur.rowcount > 0
 
 
@@ -287,34 +299,23 @@ def set_cursor(store: Store, name: str, value: str) -> None:
 
 def fired_today(store: Store, automation_id: int, *, now: float | None = None) -> int:
     when = time.time() if now is None else now
-    return _count(
-        store,
-        "SELECT COUNT(*) FROM automation_firings WHERE automation_id=? "
-        "AND status IN ('running', 'done', 'failed') AND COALESCE(finished, created) >= ?",
-        (automation_id, when - 86400.0),
-    )
+    return _count(store, "SELECT COUNT(*) FROM automation_firings WHERE automation_id=? "
+                  "AND status IN ('running', 'done', 'failed') AND COALESCE(finished, created) >= ?",
+                  (automation_id, when - 86400.0))
 
 
 def global_fired_today(store: Store, *, now: float | None = None) -> int:
     when = time.time() if now is None else now
-    return _count(
-        store,
-        "SELECT COUNT(*) FROM automation_firings WHERE status IN ('running', 'done', 'failed') "
-        "AND COALESCE(finished, created) >= ?",
-        (when - 86400.0,),
-    )
+    return _count(store, "SELECT COUNT(*) FROM automation_firings WHERE status IN ('running', 'done', 'failed') "
+                  "AND COALESCE(finished, created) >= ?", (when - 86400.0,))
 
 
 def model_jobs_today(store: Store, automation_id: int, *, now: float | None = None) -> int:
     when = time.time() if now is None else now
     ph = ",".join("?" * len(MODEL_ACTIONS))
-    return _count(
-        store,
-        f"SELECT COUNT(*) FROM automation_firings f JOIN automations a ON a.id = f.automation_id "
-        f"WHERE f.automation_id=? AND a.action IN ({ph}) "
-        f"AND f.status IN ('running', 'done', 'failed') AND COALESCE(f.finished, f.created) >= ?",
-        (automation_id, *sorted(MODEL_ACTIONS), when - 86400.0),
-    )
+    return _count(store, f"SELECT COUNT(*) FROM automation_firings f JOIN automations a ON a.id = f.automation_id "
+                  f"WHERE f.automation_id=? AND a.action IN ({ph}) AND f.status IN ('running', 'done', 'failed') "
+                  f"AND COALESCE(f.finished, f.created) >= ?", (automation_id, *sorted(MODEL_ACTIONS), when - 86400.0))
 
 
 def last_fired_at(store: Store, automation_id: int) -> float | None:

@@ -45,15 +45,7 @@ def test_engine_tick_runs_refresh_and_schedule_respects_quota_caps_and_circuit_b
             ecosystem="npm", project="p1", project_name="App", lane="now",
         )
         st.save_snapshot([], [])
-        # Recheck run must be ignored by refresh trigger
-        with trace.run("recheck", subject="brew", actor="user"):
-            pass
-        with trace.run("refresh", subject="everything", actor="schedule") as r:
-            st.save_snapshot([item_to_dict(it)], [])
-            r.note("refresh: 1 items, 0 errors")
-
-        app = create_app(load_settings(), st, "t" * 32)
-        # 1. Refresh automation runs notify once (recheck ignored)
+        # 1. Refresh automation created BEFORE the refresh runs notify once (recheck ignored)
         ref_def = AutomationDef(
             name="What changed",
             trigger=RefreshTrigger(kind="refresh"),
@@ -63,6 +55,14 @@ def test_engine_tick_runs_refresh_and_schedule_respects_quota_caps_and_circuit_b
             mode="run",
         )
         rid = astore.save(st, ref_def, enabled=True, grant_digest=grant_digest(ref_def), granted_by="user")
+        # Recheck run must be ignored by refresh trigger
+        with trace.run("recheck", subject="brew", actor="user"):
+            pass
+        with trace.run("refresh", subject="everything", actor="schedule") as r:
+            st.save_snapshot([item_to_dict(it)], [])
+            r.note("refresh: 1 items, 0 errors")
+
+        app = create_app(load_settings(), st, "t" * 32)
         eng = Automator(st, load_settings(), app.state.actions, tz=CHI)
         rep = eng.tick(now=r.root.started + 10.0)
         assert rep.ran == 1
@@ -495,5 +495,78 @@ def test_waiting_installs_push_due_forward_and_never_starve_digest(tmp_path):
     ]
     assert len(pushed) >= 1
     assert all(astore.get_firing(st, fid)["status"] == "scheduled" for fid in install_fids)
+
+
+def test_refresh_cursor_staleness_window_and_quota_deadline(tmp_path, monkeypatch):
+    from bosun.automations.engine import REFRESH_DEADLINE_S, REFRESH_STALENESS_S
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        it = Item(
+            Source.REPO, "lodash", "lodash", "4.0", "4.17.21",
+            ecosystem="npm", project="p1", project_name="App", lane="now",
+        )
+        st.save_snapshot([], [])
+        # An old refresh finishes before the rule exists / is enabled
+        with trace.run("refresh", subject="everything", actor="schedule") as old_run:
+            st.save_snapshot([item_to_dict(it)], [])
+        old_end = old_run.root.started + 2.0
+
+        app = create_app(load_settings(), st, "t" * 32)
+        eng = Automator(st, load_settings(), app.state.actions, tz=CHI)
+
+        # 1. Creating a disabled rule, then enabling it after a refresh -> must NOT fire on the old refresh
+        dig_def = AutomationDef(
+            name="What changed", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+            action="notify", scope=NotifyScope(digest="what_changed"), mode="run",
+        )
+        aid = astore.save(
+            st, dig_def, enabled=False, grant_digest=grant_digest(dig_def), granted_by="user", now=old_end - 10.0,
+        )
+        astore.set_enabled(st, aid, True, now=old_end + 5.0)
+        assert eng.tick(now=old_end + 10.0).ran == 0
+        assert astore.list_firings(st, automation_id=aid) == []
+
+        # 2. Refresh older than staleness window (6h) is ignored even if the rule's cursor is older
+        astore.set_cursor(st, f"refresh_{aid}", repr(old_end - 100.0))
+        assert eng.tick(now=old_end + REFRESH_STALENESS_S + 60.0).ran == 0
+        assert astore.list_firings(st, automation_id=aid) == []
+        astore.set_enabled(st, aid, False, now=old_end + REFRESH_STALENESS_S + 61.0)
+
+        # 3. Renewing a rule advances its refresh cursor so pre-renewal refreshes are skipped
+        renew_def = AutomationDef(
+            name="Fix on refresh", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+            action="start_fix", scope=StartFixScope(project="p1", lane="now"), mode="run",
+        )
+        rid = astore.save(
+            st, renew_def, enabled=True, grant_digest=grant_digest(renew_def), granted_by="user", now=old_end - 10.0,
+        )
+        astore.renew_grant(st, rid, granted_by="user", now=old_end + 5.0)
+        assert eng.tick(now=old_end + 10.0).ran == 0
+        assert astore.list_firings(st, automation_id=rid) == []
+
+        # 4. A fresh refresh after the cursor creates a firing WITH a deadline; waiting_quota expires past deadline
+        with trace.run("refresh", subject="everything", actor="schedule") as new_run:
+            st.save_snapshot([item_to_dict(it)], [])
+        fresh_now = new_run.root.started + 10.0
+        # Ensure rule cursor is strictly before new_run started
+        astore.set_cursor(st, f"refresh_{rid}", repr(new_run.root.started - 5.0))
+        ledger.save(
+            st, "claude",
+            (windows.Reading("five_hour", "allowed", 0.85, fresh_now + 3600, fresh_now, "output"),),
+            now=fresh_now,
+        )
+        FakeCli(monkeypatch)
+        eng.tick(now=fresh_now)
+        firings = astore.list_firings(st, automation_id=rid)
+        assert len(firings) == 1
+        assert firings[0]["status"] == "waiting_quota"
+        assert firings[0]["deadline"] is not None
+        eng.tick(now=fresh_now + REFRESH_DEADLINE_S + 60.0)
+        expired = astore.get_firing(st, firings[0]["id"])
+        assert expired is not None and expired["status"] == "skipped" and "deadline" in expired["reason"].lower()
+    finally:
+        trace.configure(None)
 
 
