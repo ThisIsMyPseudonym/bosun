@@ -544,3 +544,141 @@ def test_decide_offer_error_paths_and_skipped_handler_result(tmp_path):
     assert Invalid is not None
 
 
+def test_merged_siblings_finalized_on_decline_with_four_items(tmp_path):
+    from bosun import approvals as approving
+    from bosun.automations import offer_decide
+
+    st = Store(tmp_path / "bosun.db")
+    base = 1_700_000_000.0
+    items = [Item(Source.BREW, f"dec{i}", f"dec{i}", "1.0", "1.1", lane="now") for i in range(4)]
+    st.save_snapshot([item_to_dict(i) for i in items], [])
+    book = approving.Approvals()
+    actions = Actions(store=st, approvals=book)
+    actions.bind("upgrade")(lambda ctx, body: {"queued": [1], "skipped": []})
+
+    defn = AutomationDef(
+        name="Ask before retry decline",
+        trigger=VerdictTrigger(kind="verdict"),
+        conditions=VerdictConditions(categories=("busy_or_locked",), verdict_source="rules"),
+        action="upgrade",
+        scope=UpgradeScope(mode="failed_item"),
+        mode="ask",
+        cooldown_s=0,
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=base)
+    for idx in range(4):
+        _seed_failed_upgrade(st, f"brew:dec{idx}", f"{idx + 100:032x}", base + 10.0 + idx)
+
+    eng = Automator(st, load_settings(), actions)
+    assert eng.tick(now=base + 30.0).offered == 1
+    lead = astore.list_firings(st, automation_id=aid, status="offered")[0]
+    lead_id = int(lead["id"])
+    siblings = offers.merged_siblings(st, aid, lead_id)
+    assert len(siblings) == 3
+
+    res = offer_decide.decide_offer(st, actions, book, lead_id, False, actor="user", now=base + 60.0)
+    assert res["status"] == "declined"
+    lead_after = astore.get_firing(st, lead_id)
+    assert lead_after is not None and lead_after["status"] == "declined" and lead_after["decided_by"] == "user"
+    assert offers.merged_siblings(st, aid, lead_id) == ()
+    for sfid in siblings:
+        srow = astore.get_firing(st, sfid)
+        assert srow is not None
+        assert srow["status"] == "declined"
+        assert srow["reason"] == f"offer #{lead_id} declined"
+        assert srow["decided_by"] == "user"
+        assert srow["decided"] == base + 60.0
+        assert srow["finished"] == base + 60.0
+
+
+def test_merged_siblings_finalized_on_expiry_tick_and_decide_with_four_items(tmp_path):
+    import pytest
+    from bosun import approvals as approving
+    from bosun.automations import offer_decide
+    from bosun.registry import Conflict
+
+    st = Store(tmp_path / "bosun.db")
+    base = 1_700_000_000.0
+    items = [Item(Source.BREW, f"exp{i}", f"exp{i}", "1.0", "1.1", lane="now") for i in range(4)]
+    st.save_snapshot([item_to_dict(i) for i in items], [])
+    book = approving.Approvals()
+    actions = Actions(store=st, approvals=book)
+    actions.bind("upgrade")(lambda ctx, body: {"queued": [1], "skipped": []})
+
+    defn = AutomationDef(
+        name="Ask before retry expire",
+        trigger=VerdictTrigger(kind="verdict"),
+        conditions=VerdictConditions(categories=("busy_or_locked",), verdict_source="rules"),
+        action="upgrade",
+        scope=UpgradeScope(mode="failed_item"),
+        mode="ask",
+        cooldown_s=0,
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=base)
+    for idx in range(4):
+        _seed_failed_upgrade(st, f"brew:exp{idx}", f"{idx + 200:032x}", base + 10.0 + idx)
+
+    eng = Automator(st, load_settings(), actions)
+    assert eng.tick(now=base + 30.0).offered == 1
+    lead = astore.list_firings(st, automation_id=aid, status="offered")[0]
+    lead_id = int(lead["id"])
+    siblings = offers.merged_siblings(st, aid, lead_id)
+    assert len(siblings) == 3
+
+    # 1. Tick expiry after 24 hours finalizes lead and all 3 siblings
+    t_exp = base + 30.0 + offers.OFFER_TTL_S + 1.0
+    assert eng.tick(now=t_exp).expired == 1
+    assert astore.get_firing(st, lead_id)["status"] == "expired"
+    assert offers.merged_siblings(st, aid, lead_id) == ()
+    for sfid in siblings:
+        srow = astore.get_firing(st, sfid)
+        assert srow is not None
+        assert srow["status"] == "expired"
+        assert srow["reason"] == f"offer #{lead_id} expired"
+        assert srow["finished"] == t_exp
+
+    # 2. Decide-time expiry (_mark_expired on past deadline) also finalizes all 3 siblings
+    base2 = t_exp + 100.0
+    for idx in range(4):
+        _seed_failed_upgrade(st, f"brew:exp{idx}", f"{idx + 300:032x}", base2 + 10.0 + idx)
+    assert eng.tick(now=base2 + 30.0).offered == 1
+    lead2 = astore.list_firings(st, automation_id=aid, status="offered")[0]
+    lead2_id = int(lead2["id"])
+    sibs2 = offers.merged_siblings(st, aid, lead2_id)
+    assert len(sibs2) == 3
+
+    t_late = float(lead2["deadline"]) + 5.0
+    with pytest.raises(Conflict, match="expired"):
+        offer_decide.decide_offer(st, actions, book, lead2_id, True, actor="user", now=t_late)
+    assert astore.get_firing(st, lead2_id)["status"] == "expired"
+    for sfid in sibs2:
+        srow = astore.get_firing(st, sfid)
+        assert srow is not None
+        assert srow["status"] == "expired"
+        assert srow["reason"] == f"offer #{lead2_id} expired"
+        assert srow["finished"] == t_late
+
+    # 3. Decide-time expiry when item was fixed before tick also finalizes all 3 siblings
+    base3 = t_late + 100.0
+    for idx in range(4):
+        _seed_failed_upgrade(st, f"brew:exp{idx}", f"{idx + 400:032x}", base3 + 10.0 + idx)
+    assert eng.tick(now=base3 + 30.0).offered == 1
+    lead3 = astore.list_firings(st, automation_id=aid, status="offered")[0]
+    lead3_id = int(lead3["id"])
+    sibs3 = offers.merged_siblings(st, aid, lead3_id)
+    assert len(sibs3) == 3
+
+    st.save_snapshot([item_to_dict(i) for i in items[1:]], [])
+    t_fix = base3 + 60.0
+    with pytest.raises(Conflict, match="no longer applies"):
+        offer_decide.decide_offer(st, actions, book, lead3_id, True, actor="user", now=t_fix)
+    assert astore.get_firing(st, lead3_id)["status"] == "expired"
+    for sfid in sibs3:
+        srow = astore.get_firing(st, sfid)
+        assert srow is not None
+        assert srow["status"] == "expired"
+        assert srow["reason"] == f"offer #{lead3_id} expired"
+        assert srow["finished"] == t_fix
+
+
+

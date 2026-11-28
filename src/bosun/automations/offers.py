@@ -76,12 +76,8 @@ def _clean_ver(raw: Any) -> str:
 def _item_entry(key: str, item: Mapping[str, Any] | None) -> dict[str, str]:
     if item is None:
         return {"key": key[:200], "name": digest._clean_name(key.split(":", 1)[-1]), "installed": "", "available": ""}
-    return {
-        "key": str(item.get("key") or key)[:200],
-        "name": digest._clean_name(str(item.get("name") or key)),
-        "installed": _clean_ver(item.get("installed")),
-        "available": _clean_ver(item.get("available")),
-    }
+    return {"key": str(item.get("key") or key)[:200], "name": digest._clean_name(str(item.get("name") or key)),
+            "installed": _clean_ver(item.get("installed")), "available": _clean_ver(item.get("available"))}
 
 
 def offer_items(
@@ -340,24 +336,39 @@ def recheck_offer(
     return None
 
 
+def expire_offer_tx(store: Store, automation_id: int, firing_id: int, reason: str, when: float) -> bool:
+    """Atomically mark an open offer and any merged siblings `expired` in one transaction."""
+    marker = f"{MERGED_REASON_PREFIX}{firing_id}"
+    with store._tx(write=True) as db:
+        cur = db.execute(
+            "UPDATE automation_firings SET status='expired', reason=?, finished=? WHERE id=? AND status='offered'",
+            (astore._clean_reason(reason), when, firing_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        db.execute(
+            "UPDATE automation_firings SET status='expired', reason=?, finished=? "
+            "WHERE automation_id=? AND status='skipped' AND reason=?",
+            (f"offer #{firing_id} expired", when, automation_id, marker),
+        )
+        return True
+
+
 def expire_offers(store: Store, when: float) -> int:
     """Expire any open offer past 24 hours or whose rule/conditions/guards no longer hold."""
-    open_rows = astore.list_firings(store, status="offered", limit=200)
     expired = 0
-    for firing in open_rows:
+    for firing in astore.list_firings(store, status="offered", limit=200):
         fid, aid = int(firing["id"]), int(firing["automation_id"])
         row = astore.get(store, aid)
-        defn: AutomationDef | None = None
-        if row is not None:
-            try:
-                defn = astore.parse_def(row)
-            except (ValueError, ValidationError):
-                defn = None
+        try:
+            defn = astore.parse_def(row) if row is not None else None
+        except (ValueError, ValidationError):
+            defn = None
         why = recheck_offer(store, row, defn, firing, when)
         if why is not None:
             reason = why if why.startswith("expired") else f"no longer applies: {why}"
-            astore.set_firing(store, fid, status="expired", reason=reason, finished=when, now=when)
-            expired += 1
+            if expire_offer_tx(store, aid, fid, reason, when):
+                expired += 1
     return expired
 
 
@@ -374,17 +385,12 @@ def serialize_offer(
     items = offer_items(store, action, input_data, snapshot_items=snapshot_items)
     deadline = firing.get("deadline")
     is_expired = firing.get("status") == "expired" or (deadline is not None and when >= float(deadline))
+    label = (action_summary(action, input_data, items) if action
+             else digest._clean_name(str(firing.get("reason") or "Run automation"), limit=120))
     return {
-        "id": int(firing["id"]),
-        "automation_id": aid,
+        "id": int(firing["id"]), "automation_id": aid,
         "automation_name": digest._clean_name(str(firing.get("automation_name") or f"Automation #{aid}"), limit=80),
-        "action": action,
-        "action_label": action_summary(action, input_data, items) if action else digest._clean_name(str(firing.get("reason") or "Run automation"), limit=120),
-        "items": list(items),
-        "input": input_data,
-        "why": offer_why(firing),
-        "status": "expired" if is_expired else str(firing.get("status") or "offered"),
-        "expired": is_expired,
-        "created": firing.get("created"),
-        "deadline": deadline,
+        "action": action, "action_label": label, "items": list(items), "input": input_data,
+        "why": offer_why(firing), "status": "expired" if is_expired else str(firing.get("status") or "offered"),
+        "expired": is_expired, "created": firing.get("created"), "deadline": deadline,
     }

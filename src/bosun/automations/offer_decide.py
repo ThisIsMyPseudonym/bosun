@@ -22,14 +22,22 @@ def _skip_summary(skipped: Any) -> str:
     return "skipped by safety checks"
 
 
-def _claim_decline(store: Store, firing_id: int, when: float) -> bool:
+def _claim_decline(store: Store, automation_id: int, firing_id: int, when: float) -> bool:
+    marker = f"{offers.MERGED_REASON_PREFIX}{firing_id}"
     with store._tx(write=True) as db:
         cur = db.execute(
             "UPDATE automation_firings SET status='declined', decided_by='user', decided=?, finished=? "
             "WHERE id=? AND status='offered' AND (deadline IS NULL OR deadline > ?)",
             (when, when, firing_id, when),
         )
-        return cur.rowcount == 1
+        if cur.rowcount != 1:
+            return False
+        db.execute(
+            "UPDATE automation_firings SET status='declined', reason=?, decided_by='user', decided=?, finished=? "
+            "WHERE automation_id=? AND status='skipped' AND reason=?",
+            (f"offer #{firing_id} declined", when, when, automation_id, marker),
+        )
+        return True
 
 
 def _claim_approve(store: Store, firing_id: int, when: float) -> bool:
@@ -42,13 +50,8 @@ def _claim_approve(store: Store, firing_id: int, when: float) -> bool:
         return cur.rowcount == 1
 
 
-def _mark_expired(store: Store, firing_id: int, reason: str, when: float) -> None:
-    with store._tx(write=True) as db:
-        db.execute(
-            "UPDATE automation_firings SET status='expired', reason=?, finished=? "
-            "WHERE id=? AND status='offered'",
-            (astore._clean_reason(reason), when, firing_id),
-        )
+def _mark_expired(store: Store, automation_id: int, firing_id: int, reason: str, when: float) -> None:
+    offers.expire_offer_tx(store, automation_id, firing_id, reason, when)
 
 
 def _check_open_offer(store: Store, firing_id: int, when: float) -> dict[str, Any]:
@@ -64,7 +67,7 @@ def _check_open_offer(store: Store, firing_id: int, when: float) -> dict[str, An
         raise Conflict(f"This offer is no longer open (status: {status})")
     deadline = firing.get("deadline")
     if deadline is not None and when >= float(deadline):
-        _mark_expired(store, firing_id, "expired after 24 hours", when)
+        _mark_expired(store, int(firing["automation_id"]), firing_id, "expired after 24 hours", when)
         raise Conflict("This offer expired after 24 hours")
     return firing
 
@@ -77,7 +80,7 @@ def _verify_rule_for_approve(
     aid, fid = int(firing["automation_id"]), int(firing["id"])
     row = astore.get(store, aid)
     if row is None:
-        _mark_expired(store, fid, "no longer applies: automation deleted", when)
+        _mark_expired(store, aid, fid, "no longer applies: automation deleted", when)
         raise Conflict("This automation no longer exists")
     if not row["enabled"] or row["paused_reason"]:
         raise Forbidden("This automation is disabled or paused")
@@ -149,14 +152,14 @@ def decide_offer(
         when = time.time() if now is None else now
         firing = _check_open_offer(store, firing_id, when)
         if not approve:
-            if not _claim_decline(store, firing_id, when):
+            if not _claim_decline(store, int(firing["automation_id"]), firing_id, when):
                 raise Conflict("This offer was already decided or expired")
             return {"firing_id": firing_id, "status": "declined", "decided_by": "user"}
         aid, row, defn = _verify_rule_for_approve(store, firing, when)
         why = offers.recheck_offer(store, row, defn, firing, when)
         if why is not None:
             reason = why if why.startswith("expired") else f"no longer applies: {why}"
-            _mark_expired(store, firing_id, reason, when)
+            _mark_expired(store, aid, firing_id, reason, when)
             raise Conflict(f"This offer no longer applies: {why}")
         raw_input = offers._parse_json(firing.get("input"))
         try:
