@@ -344,7 +344,7 @@ def _project_lane_ok(
         return False
     if not _keys_in_project_lane(_snap_items_by_key(store), body.keys, scope.project, scope.lane, fixable=fixable):
         return False
-    return _verdict_keys_ok(store, body.keys, fids, automation_id) if (is_verdict and fids) else True
+    return _verdict_keys_ok(store, body.keys, fids, automation_id) if is_verdict else True
 
 
 def input_in_scope(

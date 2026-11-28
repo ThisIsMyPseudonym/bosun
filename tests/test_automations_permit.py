@@ -333,3 +333,47 @@ def test_permit_and_engine_refuse_unset_project_sentinel_even_with_valid_grant(t
     assert rep2.ran == 0
     row = astore.get_firing(st, fid)
     assert row is not None and row["status"] == "refused"
+
+
+def test_permit_fails_closed_for_verdict_start_fix_and_explain_item_without_firing(tmp_path):
+    from bosun.automations.schema import ExplainItemScope, VerdictConditions, VerdictTrigger
+
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+    it = Item(Source.REPO, "lodash", "lodash", "4.0", "4.17.21", ecosystem="npm", project="p1", lane="now")
+    other = Item(Source.REPO, "axios", "axios", "1.0", "1.7", ecosystem="npm", project="p1", lane="now")
+    st.save_snapshot([item_to_dict(it), item_to_dict(other)], [])
+
+    fix_id = st.create_fix(it.key, "p1")
+    st.update_fix(fix_id, status="failed", result={"error": "timeout"})
+    actions = Actions(store=st)
+
+    for action_name, scope in (
+        ("start_fix", StartFixScope(project="p1", lane="now")),
+        ("explain_item", ExplainItemScope(project="p1", lane="now")),
+    ):
+        defn = AutomationDef(
+            name=f"Verdict {action_name}",
+            trigger=VerdictTrigger(kind="verdict"),
+            conditions=VerdictConditions(categories=("network",)),
+            action=action_name,  # type: ignore[arg-type]
+            scope=scope,
+            mode="run",
+        )
+        aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=now)
+
+        # No firing_id / empty firing_ids MUST fail closed
+        ctx_none = ActionContext(actor=f"automation:{aid}", surface="automation", now=now)
+        with pytest.raises(Forbidden):
+            actions.permit(SPECS[action_name], ctx_none, FixIn(keys=[it.key]))
+
+        # Verified verdict firing referencing the failed fix allows ONLY that item
+        fid = astore.insert_firing(
+            st, aid, defn.name, "verdict", f"fix:{fix_id}", f"v:{action_name}",
+            status="scheduled", input_data={"keys": [it.key]}, now=now,
+        )
+        assert fid is not None
+        ctx_ok = ActionContext(actor=f"automation:{aid}", surface="automation", firing_id=fid, now=now)
+        assert actions.permit(SPECS[action_name], ctx_ok, FixIn(keys=[it.key])) is None
+        with pytest.raises(Forbidden):
+            actions.permit(SPECS[action_name], ctx_ok, FixIn(keys=[other.key]))
