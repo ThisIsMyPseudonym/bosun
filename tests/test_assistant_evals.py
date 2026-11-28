@@ -82,7 +82,9 @@ def test_assistant_reads_triage_verdict_and_starts_from_context_verdict(panel):
     assert not [k for k, _ in events if k == "approval"]
     prompt = panel.fakes[0].model.prompt
     ctx = json.loads(prompt.splitlines()[1])
-    assert ctx["run"]["triage"]["cause"] == "Homebrew cannot write to its folder."
+    assert ctx["run"]["trace_id"] == trace_id and "triage" not in ctx["run"]
+    assert "<<<BOSUN_TRIAGE_UNTRUSTED_" in prompt
+    assert '"cause":"Homebrew cannot write to its folder."' in prompt
 
 
 # --- approvals ---------------------------------------------------------------------------------------------------------
