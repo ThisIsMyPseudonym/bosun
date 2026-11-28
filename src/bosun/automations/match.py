@@ -376,13 +376,15 @@ def input_in_scope(
             store, scope, body, fids, automation_id, is_verdict=is_verdict, fixable=isinstance(scope, StartFixScope),
         )
     if isinstance(scope, UpgradeScope):
-        if not isinstance(body, KeysIn) or not body.keys:
+        if not isinstance(body, KeysIn) or not body.keys or (len(fids) > 1 and len(body.keys) > 20):
             return False
         if scope.mode == "keys" and not (set(body.keys) <= set(scope.keys)):
             return False
         return _verdict_keys_ok(store, body.keys, fids, automation_id) if (scope.mode == "failed_item" or is_verdict) else True
     if isinstance(scope, PinMcpScope):
-        if not isinstance(body, PinIn) or not body.keys or not (set(body.keys) <= set(scope.keys)):
+        if not isinstance(body, PinIn) or not body.keys or (len(fids) > 1 and len(body.keys) > 20):
+            return False
+        if not (set(body.keys) <= set(scope.keys)):
             return False
         return _verdict_keys_ok(store, body.keys, fids, automation_id) if is_verdict else True
     if isinstance(scope, AppActionScope):

@@ -16,7 +16,7 @@ from ..config import Settings
 from ..providers.router import QuotaHeld
 from ..registry import ActionContext, ActionError, Actions, Forbidden
 from ..store import Store
-from . import digest, match as amatch, recheck, schedule, store as astore, verdict as averdict
+from . import digest, match as amatch, merge as amerge, recheck, schedule, store as astore, verdict as averdict
 from .schema import (MODEL_ACTIONS, AutomationDef, RefreshConditions, ScheduleConditions, ScheduleTrigger,
                      grant_digest, grant_digest_matches, grant_expired, has_unset_project, is_install_action)
 
@@ -245,10 +245,24 @@ class Automator:
     def _execute_due(self, when: float) -> tuple[int, int, int, int]:
         ran = waiting = failed = 0
         skipped = self._expire_past_deadline(when)
-        for firing in astore.due_firings(self.store, now=when, limit=MAX_PER_TICK):
+        queue = list(astore.due_firings(self.store, now=when, limit=MAX_PER_TICK))
+        handled: set[int] = set()
+        steps = 0
+        while queue and steps < MAX_PER_TICK:
+            firing = queue.pop(0)
+            fid = int(firing["id"])
+            if fid in handled:
+                continue
             if astore.is_paused(self.store):
                 break
-            outcome = self._run_isolated(firing, when)
+            steps += 1
+            outcome, done_ids, overflow = self._run_isolated(firing, when)
+            handled.update(done_ids)
+            handled.add(fid)
+            if overflow and steps < MAX_PER_TICK:
+                nxt = astore.get_firing(self.store, overflow[0])
+                if nxt is not None:
+                    queue.append(nxt)
             if outcome == "done":
                 ran += 1
             elif outcome == "skipped":
@@ -259,7 +273,7 @@ class Automator:
                 failed += 1
         return ran, skipped, waiting, failed
 
-    def _run_isolated(self, firing: dict[str, Any], when: float) -> str:
+    def _run_isolated(self, firing: dict[str, Any], when: float) -> tuple[str, set[int], tuple[int, ...]]:
         try:
             return self._run_one(firing, when)
         except Exception as exc:
@@ -274,40 +288,44 @@ class Automator:
                 self._check_circuit_breaker(aid, str(firing.get("automation_name") or ""), when)
             except Exception:
                 log.exception("circuit breaker check failed for automation %s", aid)
-            return "failed"
+            return "failed", {fid}, ()
 
-    def _run_one(self, firing: dict[str, Any], when: float) -> str:
+    def _run_one(self, firing: dict[str, Any], when: float) -> tuple[str, set[int], tuple[int, ...]]:
         fid, aid = int(firing["id"]), int(firing["automation_id"])
         row = astore.get(self.store, aid)
         if row is None or not row["enabled"] or row["paused_reason"]:
             astore.set_firing(self.store, fid, status="skipped", reason="automation disabled or paused", now=when)
-            return "skipped"
+            return "skipped", {fid}, ()
         try:
             defn = astore.parse_def(row)
         except (ValueError, ValidationError):
             astore.set_firing(self.store, fid, status="refused", reason="invalid automation definition", now=when)
-            return "skipped"
+            return "skipped", {fid}, ()
         stop = self._precheck_limits(aid, row, defn, when)
         if stop is not None:
             astore.set_firing(self.store, fid, status=stop[0], reason=stop[1], now=when)
-            return "skipped"
+            return "skipped", {fid}, ()
         if is_install_action(defn.action) and astore.active_install_firing(self.store) is not None:
             astore.set_firing(self.store, fid, due=when + INSTALL_WAIT_BACKOFF_S, now=when)
-            return "waiting"
+            return "waiting", {fid}, ()
+        if defn.action in amerge.MERGEABLE_ACTIONS:
+            return amerge.run_merged(
+                self.store, self.actions, aid, defn, firing, when, on_failure=self._check_circuit_breaker,
+            )
         resolved, skip_reason = recheck.resolve_for_firing(self.store, defn, firing, when)
         if resolved is None:
             astore.set_firing(self.store, fid, status="skipped", reason=skip_reason, now=when)
-            return "skipped"
+            return "skipped", {fid}, ()
         dup = astore.same_work_recent(self.store, defn.action, resolved, exclude_automation_id=aid, now=when)
         if dup is not None:
             astore.set_firing(
                 self.store, fid, status="skipped",
                 reason=f"already handled by {dup['automation_name']} within the last hour", now=when,
             )
-            return "skipped"
+            return "skipped", {fid}, ()
         if defn.action == "notify":
-            return self._run_notify(fid, aid, defn, resolved, when)
-        return self._run_action(firing, aid, defn, resolved, when)
+            return self._run_notify(fid, aid, defn, resolved, when), {fid}, ()
+        return self._run_action(firing, aid, defn, resolved, when), {fid}, ()
 
     def _run_notify(self, fid: int, aid: int, defn: AutomationDef, resolved: dict[str, Any], when: float) -> str:
         ctx = ActionContext(actor=f"automation:{aid}", surface="automation", firing_id=fid, now=when)

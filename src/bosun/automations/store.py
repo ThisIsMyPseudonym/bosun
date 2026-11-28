@@ -307,34 +307,35 @@ def set_cursor(store: Store, name: str, value: str) -> None:
     store.set_setting(f"{CURSOR_PREFIX}{name}", value)
 
 
+_DISTINCT_CALL = "COUNT(DISTINCT CASE WHEN trace_id != '' THEN trace_id ELSE CAST(id AS TEXT) END)"
+
+
 def fired_today(store: Store, automation_id: int, *, now: float | None = None) -> int:
     when = time.time() if now is None else now
-    return _count(store, "SELECT COUNT(*) FROM automation_firings WHERE automation_id=? "
+    return _count(store, f"SELECT {_DISTINCT_CALL} FROM automation_firings WHERE automation_id=? "
                   "AND status IN ('running', 'done', 'failed') AND COALESCE(finished, created) >= ?",
                   (automation_id, when - 86400.0))
 
 
 def global_fired_today(store: Store, *, now: float | None = None) -> int:
     when = time.time() if now is None else now
-    return _count(store, "SELECT COUNT(*) FROM automation_firings WHERE status IN ('running', 'done', 'failed') "
+    return _count(store, f"SELECT {_DISTINCT_CALL} FROM automation_firings WHERE status IN ('running', 'done', 'failed') "
                   "AND COALESCE(finished, created) >= ?", (when - 86400.0,))
 
 
 def model_jobs_today(store: Store, automation_id: int, *, now: float | None = None) -> int:
     when = time.time() if now is None else now
     ph = ",".join("?" * len(MODEL_ACTIONS))
-    return _count(store, f"SELECT COUNT(*) FROM automation_firings f JOIN automations a ON a.id = f.automation_id "
+    return _count(store, "SELECT COUNT(DISTINCT CASE WHEN f.trace_id != '' THEN f.trace_id ELSE CAST(f.id AS TEXT) END) "
+                  "FROM automation_firings f JOIN automations a ON a.id = f.automation_id "
                   f"WHERE f.automation_id=? AND a.action IN ({ph}) AND f.status IN ('running', 'done', 'failed') "
-                  f"AND COALESCE(f.finished, f.created) >= ?", (automation_id, *sorted(MODEL_ACTIONS), when - 86400.0))
+                  "AND COALESCE(f.finished, f.created) >= ?", (automation_id, *sorted(MODEL_ACTIONS), when - 86400.0))
 
 
 def last_fired_at(store: Store, automation_id: int) -> float | None:
     with store._tx() as db:
-        row = db.execute(
-            "SELECT MAX(COALESCE(finished, created)) FROM automation_firings "
-            "WHERE automation_id=? AND status IN ('running', 'done', 'failed')",
-            (automation_id,),
-        ).fetchone()
+        row = db.execute("SELECT MAX(COALESCE(finished, created)) FROM automation_firings "
+                         "WHERE automation_id=? AND status IN ('running', 'done', 'failed')", (automation_id,)).fetchone()
     return float(row[0]) if row and row[0] is not None else None
 
 
@@ -342,37 +343,33 @@ def active_install_firing(store: Store) -> dict[str, Any] | None:
     """Return an active automation INSTALL firing (or active automation job/fix), or None."""
     ph = ",".join("?" * len(INSTALL_ACTION_NAMES))
     with store._tx() as db:
-        row = db.execute(
-            f"SELECT f.* FROM automation_firings f JOIN automations a ON a.id = f.automation_id "
-            f"WHERE f.status = 'running' AND a.action IN ({ph}) LIMIT 1",
-            INSTALL_ACTION_NAMES,
-        ).fetchone()
+        row = db.execute(f"SELECT f.* FROM automation_firings f JOIN automations a ON a.id = f.automation_id "
+                         f"WHERE f.status = 'running' AND a.action IN ({ph}) LIMIT 1", INSTALL_ACTION_NAMES).fetchone()
         if row is not None:
             return dict(row)
         for kind, table in (("job", "jobs"), ("fix", "fixes")):
-            active = db.execute(
-                f"SELECT id, item_key, actor, status FROM {table} "
-                "WHERE actor LIKE 'automation:%' AND status IN ('queued', 'running') LIMIT 1"
-            ).fetchone()
+            active = db.execute(f"SELECT id, item_key, actor, status FROM {table} "
+                                "WHERE actor LIKE 'automation:%' AND status IN ('queued', 'running') LIMIT 1").fetchone()
             if active is not None:
                 return {"kind": kind, **dict(active)}
     return None
 
 
 def consecutive_failures(store: Store, automation_id: int) -> int:
-    """Count trailing consecutive `failed` firings (ignoring `skipped`, resetting on `done`)."""
+    """Count trailing consecutive failed calls (deduping merged trace_ids, ignoring skipped, resetting on done)."""
     with store._tx() as db:
-        rows = db.execute(
-            "SELECT status FROM automation_firings WHERE automation_id=? AND status IN ('done', 'failed') "
-            "ORDER BY COALESCE(finished, created) DESC, id DESC LIMIT 10",
-            (automation_id,),
-        ).fetchall()
-    streak = 0
+        rows = db.execute("SELECT id, status, trace_id FROM automation_firings WHERE automation_id=? "
+                          "AND status IN ('done', 'failed') ORDER BY COALESCE(finished, created) DESC, id DESC LIMIT 60",
+                          (automation_id,)).fetchall()
+    streak, seen = 0, set()
     for row in rows:
-        if row["status"] == "failed":
-            streak += 1
-        else:
+        key = str(row["trace_id"]) if row["trace_id"] else f"id:{row['id']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        if row["status"] != "failed":
             break
+        streak += 1
     return streak
 
 
@@ -389,9 +386,7 @@ def same_work_recent(
     with store._tx() as db:
         row = db.execute(
             "SELECT f.* FROM automation_firings f JOIN automations a ON a.id = f.automation_id "
-            f"WHERE a.action=? AND f.status IN ('running', 'done') "
-            f"AND COALESCE(f.finished, f.created) >= ? AND f.input=?{extra} "
-            "ORDER BY COALESCE(f.finished, f.created) DESC LIMIT 1",
-            args,
+            f"WHERE a.action=? AND f.status IN ('running', 'done') AND COALESCE(f.finished, f.created) >= ? "
+            f"AND f.input=?{extra} ORDER BY COALESCE(f.finished, f.created) DESC LIMIT 1", args,
         ).fetchone()
     return _row(row)
