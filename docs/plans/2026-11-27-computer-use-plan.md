@@ -1007,9 +1007,11 @@ DB, trace, or logs), R17 (capturing windows of another app), R18 (vision CLI ign
 1. **External MCP agents starting Tier 1 (`update_in_app`) (conflict 1).** `computer-use-design.md:35, 168, 247` lets
    an external MCP agent start Tier 1 when "Let agents quit and reopen apps" (`agents_allow_system`) is on, whereas the
    stricter rule "every in-app update asks first with a spent approval" would refuse agents on `update_in_app`.
-   *Recommend:* refuse `agent:*` on `update_in_app` in `Actions.permit` (or require `user` click / spent `Approval`
-   from Ask Bosun or an automation offer), so no external agent can click inside an app without a per-run approval
-   click, while keeping `relaunch_app` and `open_app` under `agents_allow_system`.
+   *Decided (owner, 2026-11-25, "Agents starting tier 1"):* follow the design. An external MCP agent may start
+   Tier 1 `update_in_app` only when "Let agents quit and reopen apps" (`agents_allow_system`) is on, exactly as it may
+   `relaunch_app` today. The stricter "always asks first" rule is the automations decision: an automation's in-app
+   update is always an offer the owner approves. Ask Bosun needs a spent approval card. Tier 2 stays your click or
+   your approval of the assistant's card only; agents can never start it.
 2. **Browsers in Tier 1 vs Tier 2 (conflict 2).** The design excludes browsers from Tier 2 only
    (`computer-use-design.md:154, 246`) and plans Tier 1 for Chrome, Brave, and Firefox (`lines 105-106, 233`).
    *Recommend:* keep the design's split — enforce the server-side `BROWSER_BUNDLE_IDS` deny-list unconditionally on
