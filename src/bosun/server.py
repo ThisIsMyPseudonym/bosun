@@ -45,14 +45,16 @@ from .enrich.exposure import REACH_EXPLAIN, REACH_LABEL, impact, profile, reach
 from .fixer import Fixer
 from .config import Settings
 from .refresh import COLLECTORS, recheck, recheck_project, refresh
-from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
-                       ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
-                       NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TriageFeedbackIn, TriageIn, TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, AutomationFiringsIn,
+                       Conflict, ConversationIn, ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid,
+                       DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn, NotFound, OnIn, PinIn, PrefIn, ProjectIn,
+                       RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn, TraceIn,
+                       TriageFeedbackIn, TriageIn, TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn,
+                       AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, router as ai_router, routing as ai_routing, usage as ai_usage
-from .automations import engine as aengine, presets as apresets, store as astore
+from .automations import api as aapi, engine as aengine, presets as apresets, store as astore
 from .triage import model as tmodel, settings as tsettings, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
@@ -1172,6 +1174,16 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     @actions.bind("set_triage_settings")
     def triage_settings_set(ctx: ActionContext, body: TriageSettingsIn):
         return tsettings.update(store, auto=body.auto, daily_limit=body.daily_limit)
+
+    @actions.bind("list_automations")
+    def list_automations(ctx: ActionContext, body: Empty):
+        return aapi.list_automations(store, demo=s.demo)
+
+    @actions.bind("list_automation_firings")
+    def list_automation_firings(ctx: ActionContext, body: AutomationFiringsIn):
+        return aapi.list_firings(
+            store, automation_id=body.automation_id, status=body.status, limit=body.limit, demo=s.demo,
+        )
 
     @actions.bind("get_runbook")
     def get_runbook(ctx: ActionContext, body: RunbookIn):

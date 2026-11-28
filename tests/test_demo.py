@@ -163,3 +163,15 @@ def test_demo_seeds_rules_only_triage_verdicts_and_never_starts_a_cli(tmp_path, 
     failed_jobs = [j for j in c.get("/api/jobs").json() if j["status"] == "failed"]
     assert len(failed_jobs) >= 2
     assert all(j["triage"] is not None and j["triage"]["source"] == "rules" for j in failed_jobs)
+
+
+def test_demo_serves_seeded_automations_and_firings(client):
+    r = client.get("/api/automations")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["demo"] is True and body["paused"] is False
+    by_preset = {a["preset"]: a for a in body["automations"]}
+    assert {"what_changed", "nightly_fix"} <= set(by_preset)
+    assert all(a["enabled"] is False for a in body["automations"])
+    rf = client.get("/api/automations/firings")
+    assert rf.status_code == 200 and rf.json()["demo"] is True and len(rf.json()["firings"]) >= 2

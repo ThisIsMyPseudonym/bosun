@@ -84,6 +84,9 @@ GUIDANCE = {
     "set_pref": "Acknowledging, snoozing or ignoring hides an item from the dashboard: only when the user asked for exactly that.",
     "list_recipes": "For an update that needs the user's password, or a run that failed. You cannot start a recipe: "
                     "the user presses its button in the dashboard. Say which button and what it does; never say you ran it.",
+    "list_automations": "Read-only list of the owner's automations and presets. Agents and the assistant cannot "
+                        "create, edit, enable, renew, delete or pause automations: suggest changes in words and point "
+                        "the owner to the Automations page in the dashboard.",
 }
 
 MAX_RESULT_CHARS = 80_000  # a result past this is cut and says so: an agent's context is not a place for a whole refresh

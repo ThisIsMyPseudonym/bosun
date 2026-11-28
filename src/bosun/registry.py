@@ -321,6 +321,12 @@ class RefreshIn(_In):
     )
 
 
+class AutomationFiringsIn(_In):
+    automation_id: int | None = Field(default=None, ge=1, description="Filter firings to one automation id")
+    status: str | None = Field(default=None, max_length=32, description="Filter by firing status")
+    limit: int = Field(100, ge=1, le=500, description="Most firing rows to return")
+
+
 # --- specs ---------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ActionSpec:
@@ -383,6 +389,10 @@ SPECS: dict[str, ActionSpec] = _specs(
                Risk.READ, FixIn, "POST", "/api/prompt"),
     ActionSpec("list_recipes", "What Bosun can run in its own terminal for an item, or to fix a run that failed: "
                "named recipes the user starts with a button", Risk.READ, RecipesIn, "GET", "/api/recipes"),
+    ActionSpec("list_automations", "Owner-defined automations, presets, pause status, 90-day grant expiry and today's counts",
+               Risk.READ, Empty, "GET", "/api/automations"),
+    ActionSpec("list_automation_firings", "Recent automation firing history, newest first, with status, reason and trace id",
+               Risk.READ, AutomationFiringsIn, "GET", "/api/automations/firings"),
     # Bosun's own state
     ActionSpec("set_pref", "Acknowledge, snooze or ignore an item (or ignore a project), bring it back, or opt it "
                "into automatic upgrades", Risk.LOCAL, PrefIn, "POST", "/api/prefs",
