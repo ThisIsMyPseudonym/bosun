@@ -247,7 +247,7 @@ class Automator:
         ran = waiting = failed = 0
         skipped = self._expire_past_deadline(when)
         for firing in astore.due_firings(self.store, now=when, limit=MAX_PER_TICK):
-            outcome = self._run_one(firing, rules, when)
+            outcome = self._run_isolated(firing, rules, when)
             if outcome == "done":
                 ran += 1
             elif outcome == "skipped":
@@ -257,6 +257,25 @@ class Automator:
             elif outcome == "failed":
                 failed += 1
         return ran, skipped, waiting, failed
+
+    def _run_isolated(
+        self, firing: dict[str, Any], rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float,
+    ) -> str:
+        try:
+            return self._run_one(firing, rules, when)
+        except Exception as exc:
+            fid = int(firing["id"])
+            log.exception("automation firing %s failed unexpectedly", fid)
+            astore.set_firing(
+                self.store, fid, status="failed", reason=f"{exc.__class__.__name__}: {exc}",
+                finished=when, now=when,
+            )
+            aid = int(firing["automation_id"])
+            try:
+                self._check_circuit_breaker(aid, str(firing.get("automation_name") or ""), when)
+            except Exception:
+                log.exception("circuit breaker check failed for automation %s", aid)
+            return "failed"
 
     def _run_one(
         self, firing: dict[str, Any], rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float,

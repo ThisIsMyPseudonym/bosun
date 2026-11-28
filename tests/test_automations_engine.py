@@ -3,6 +3,8 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from fake_cli import FakeCli
 from bosun import autopilot, notify, trace
 from bosun.automations import store as astore
@@ -363,5 +365,83 @@ def test_engine_handles_tampered_grant_model_cap_empty_scope_and_quota_past_dead
     eng.tick(now=now + 6)
     assert astore.get_firing(st, f_q)["status"] == "skipped"
     assert "deadline" in astore.get_firing(st, f_q)["reason"].lower()
+
+
+@pytest.mark.parametrize("spot", ["precheck", "resolve_input", "same_work_recent", "run_notify"])
+def test_engine_isolates_per_firing_exceptions_without_starving_queue(tmp_path, monkeypatch, spot):
+    from bosun.automations import digest as adigest, match as amatch
+
+    st = Store(tmp_path / "bosun.db")
+    now = 800_000.0
+    st.save_snapshot([], [])
+    app = create_app(load_settings(), st, "t" * 32)
+    eng = Automator(st, load_settings(), app.state.actions, tz=CHI)
+
+    d1 = AutomationDef(
+        name="Rule A", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="notify", scope=NotifyScope(digest="what_changed"), mode="run", cooldown_s=0,
+    )
+    d2 = d1.model_copy(update={"name": "Rule B"})
+    a1 = astore.save(st, d1, enabled=True, grant_digest=grant_digest(d1), granted_by="user", now=now)
+    a2 = astore.save(st, d2, enabled=True, grant_digest=grant_digest(d2), granted_by="user", now=now)
+    f_bad = astore.insert_firing(
+        st, a1, d1.name, "refresh", "snap:1", "f:bad",
+        status="scheduled", due=now, input_data={"snapshot_id": 1, "prev_snapshot_id": None}, now=now,
+    )
+    f_good = astore.insert_firing(
+        st, a2, d2.name, "refresh", "snap:1", "f:good",
+        status="scheduled", due=now + 1, input_data={"snapshot_id": 1, "prev_snapshot_id": None}, now=now,
+    )
+    assert f_bad is not None and f_good is not None
+
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    calls = {"bad": 0}
+    real_precheck = eng._precheck_limits
+    real_resolve = amatch.resolve_input
+    real_same = astore.same_work_recent
+    real_digest = adigest.build_digest
+
+    if spot == "precheck":
+        def boom_precheck(aid, row, defn, when):
+            if aid == a1:
+                calls["bad"] += 1
+                raise RuntimeError(f"precheck boom token={secret}")
+            return real_precheck(aid, row, defn, when)
+        monkeypatch.setattr(eng, "_precheck_limits", boom_precheck)
+    elif spot == "resolve_input":
+        def boom_resolve(store, defn, *, event):
+            if defn.name == "Rule A":
+                calls["bad"] += 1
+                raise RuntimeError(f"resolve boom token={secret}")
+            return real_resolve(store, defn, event=event)
+        monkeypatch.setattr(amatch, "resolve_input", boom_resolve)
+    elif spot == "same_work_recent":
+        def boom_same(store, action, input_data, **kw):
+            if kw.get("exclude_automation_id") == a1:
+                calls["bad"] += 1
+                raise RuntimeError(f"same_work boom token={secret}")
+            return real_same(store, action, input_data, **kw)
+        monkeypatch.setattr(astore, "same_work_recent", boom_same)
+    else:
+        def boom_digest(store, *, snapshot_id, prev_snapshot_id=None):
+            if calls["bad"] == 0:
+                calls["bad"] += 1
+                raise RuntimeError(f"notify boom token={secret}")
+            return real_digest(store, snapshot_id=snapshot_id, prev_snapshot_id=prev_snapshot_id)
+        monkeypatch.setattr(adigest, "build_digest", boom_digest)
+
+    rep = eng.tick(now=now + 10)
+    assert rep.errors == 0
+    assert rep.failed == 1
+    assert rep.ran == 1
+    bad_row = astore.get_firing(st, f_bad)
+    good_row = astore.get_firing(st, f_good)
+    assert bad_row is not None and bad_row["status"] == "failed" and bad_row["finished"] is not None
+    assert secret not in bad_row["reason"] and "boom" in bad_row["reason"]
+    assert good_row is not None and good_row["status"] == "done"
+
+    # Poisoned firing is terminal: subsequent ticks never re-run it
+    rep2 = eng.tick(now=now + 40)
+    assert rep2.failed == 0 and rep2.ran == 0 and calls["bad"] == 1
 
 
