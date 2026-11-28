@@ -316,6 +316,7 @@ History of every automation firing: matching event, status, resolved input, link
 | `reason` |  |
 | `decided_by` | Who approved or declined an offer (`user`), or empty. |
 | `decided` |  |
+| `started_at` |  |
 | `created` |  |
 | `finished` |  |
 
@@ -721,6 +722,7 @@ One row per event that matched an automation, with status, resolved input, trace
 | `reason` | TEXT | redacted plain-text reason for skip, refusal, failure or digest line |
 | `decided_by` | TEXT | who approved or declined an offer (user) |
 | `decided` | REAL | Unix time an offer was approved or declined |
+| `started_at` | REAL | Unix time the action call began (NULL before action call) |
 | `created` | REAL | Unix time this firing row was created |
 | `finished` | REAL | Unix time this firing reached a terminal status |
 

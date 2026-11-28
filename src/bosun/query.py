@@ -65,7 +65,7 @@ READABLE: dict[str, frozenset[str]] = {name: frozenset(cols.split()) for name, c
     "automations": "id name preset enabled paused_reason trigger conditions action scope mode delay_s max_per_day "
                    "cooldown_s model_jobs_per_day grant_digest granted_by granted_at created updated",
     "automation_firings": "id automation_id automation_name event_kind event_ref dedup_key depth status due deadline "
-                          "input trace_id reason decided_by decided created finished",
+                          "input trace_id reason decided_by decided started_at created finished",
 }.items()}
 HIDDEN: dict[str, frozenset[str]] = {
     "snapshots": frozenset({"items"}),  # the blob: megabytes, and the rows in snapshot_items say the same

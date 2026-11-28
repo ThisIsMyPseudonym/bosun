@@ -330,7 +330,7 @@ class Automator:
             astore.set_firing(self.store, fid, status="skipped", reason="no snapshot yet", now=when)
             return "skipped"
         prev_id = resolved.get("prev_snapshot_id")
-        astore.set_firing(self.store, fid, status="running", input_data=resolved, now=when)
+        astore.set_firing(self.store, fid, status="running", input_data=resolved, started_at=when, now=when)
         line = digest.build_digest(self.store, snapshot_id=snap_id, prev_snapshot_id=prev_id if isinstance(prev_id, int) else None)
         notify.enqueue_automation(self.store, defn.name, line)
         astore.set_firing(self.store, fid, status="done", reason=line, finished=when, now=when)
@@ -341,7 +341,9 @@ class Automator:
     ) -> str:
         fid = int(firing["id"])
         ctx = ActionContext(actor=f"automation:{aid}", surface="automation", firing_id=fid, now=when)
-        astore.set_firing(self.store, fid, status="running", input_data=resolved, trace_id=ctx.trace_id, now=when)
+        astore.set_firing(
+            self.store, fid, status="running", input_data=resolved, trace_id=ctx.trace_id, started_at=when, now=when,
+        )
         try:
             result = self.actions.call(defn.action, resolved, ctx)
         except QuotaHeld as exc:

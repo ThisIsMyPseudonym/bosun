@@ -15,6 +15,7 @@ PAUSED_SETTING = "automations_paused"
 CURSOR_PREFIX = "automations_cursor_"
 WAITING_STATUSES = ("scheduled", "waiting_quota", "offered")
 INSTALL_ACTION_NAMES = ("upgrade", "start_fix", "pin_mcp")
+NON_IDEMPOTENT_ACTIONS = frozenset({"notify", "explain_item", "start_fix", "upgrade"})
 SAME_WORK_WINDOW_S = 3600.0
 
 
@@ -216,7 +217,7 @@ def set_firing(
     store: Store, firing_id: int, *, status: str | None = None, due: float | None = None,
     deadline: float | None = None, input_data: Any = None, trace_id: str | None = None,
     reason: str | None = None, decided_by: str | None = None, decided: float | None = None,
-    finished: float | None = None, now: float | None = None,
+    started_at: float | None = None, finished: float | None = None, now: float | None = None,
 ) -> None:
     """Update fields on an existing firing, redacting `reason` and `input`."""
     when = time.time() if now is None else now
@@ -226,16 +227,14 @@ def set_firing(
         ("status", status), ("due", due), ("deadline", deadline),
         ("input", None if input_data is None else _canon_json(input_data)),
         ("trace_id", trace_id), ("reason", None if reason is None else _clean_reason(reason)),
-        ("decided_by", decided_by), ("decided", decided), ("finished", finished),
+        ("decided_by", decided_by), ("decided", decided), ("started_at", started_at), ("finished", finished),
     )
     pairs = [(col, val) for col, val in updates if val is not None]
     if not pairs:
         return
     with store._tx(write=True) as db:
-        db.execute(
-            f"UPDATE automation_firings SET {', '.join(f'{c}=?' for c, _ in pairs)} WHERE id=?",
-            [*(v for _, v in pairs), firing_id],
-        )
+        db.execute(f"UPDATE automation_firings SET {', '.join(f'{c}=?' for c, _ in pairs)} WHERE id=?",
+                   [*(v for _, v in pairs), firing_id])
 
 
 def due_firings(store: Store, *, now: float | None = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -262,22 +261,27 @@ def due_firings(store: Store, *, now: float | None = None, limit: int = 50) -> l
 
 
 def recover_running(store: Store, *, now: float | None = None) -> int:
-    """On dashboard startup: link `running` firings that have a recorded run, or reset orphans to `scheduled`."""
+    """On startup: reconcile `running` firings; mark started non-idempotent orphans `failed`, retry unstarted ones."""
     when = time.time() if now is None else now
     with store._tx(write=True) as db:
-        rows = db.execute("SELECT id, trace_id FROM automation_firings WHERE status='running'").fetchall()
+        rows = db.execute(
+            "SELECT f.id, f.trace_id, f.started_at, a.action FROM automation_firings f "
+            "LEFT JOIN automations a ON a.id = f.automation_id WHERE f.status='running'"
+        ).fetchall()
         for row in rows:
             tid = str(row["trace_id"] or "")
             run = db.execute("SELECT status, error, finished FROM runs WHERE trace_id=?", (tid,)).fetchone() if tid else None
-            if run is None or run["status"] == "running":
-                db.execute("UPDATE automation_firings SET status='scheduled', finished=NULL WHERE id=?", (row["id"],))
-            elif run["status"] == "ok":
+            if run is not None and run["status"] == "ok":
                 db.execute("UPDATE automation_firings SET status='done', finished=? WHERE id=?", (run["finished"] or when, row["id"]))
+            elif run is not None and run["status"] != "running":
+                db.execute("UPDATE automation_firings SET status='failed', reason=?, finished=? WHERE id=?",
+                           (_clean_reason(str(run["error"] or run["status"])), run["finished"] or when, row["id"]))
+            elif row["started_at"] is not None and (row["action"] is None or row["action"] in NON_IDEMPOTENT_ACTIONS):
+                db.execute("UPDATE automation_firings SET status='failed', reason='interrupted', finished=? WHERE id=?",
+                           (when, row["id"]))
             else:
-                db.execute(
-                    "UPDATE automation_firings SET status='failed', reason=?, finished=? WHERE id=?",
-                    (_clean_reason(str(run["error"] or run["status"])), run["finished"] or when, row["id"]),
-                )
+                db.execute("UPDATE automation_firings SET status='scheduled', started_at=NULL, finished=NULL WHERE id=?",
+                           (row["id"],))
     return len(rows)
 
 

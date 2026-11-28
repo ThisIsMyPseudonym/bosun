@@ -725,6 +725,7 @@ CREATE TABLE IF NOT EXISTS automation_firings (
     reason TEXT NOT NULL DEFAULT '',               -- redacted plain-text reason for skip, refusal, failure or digest line
     decided_by TEXT NOT NULL DEFAULT '',           -- who approved or declined an offer (user)
     decided REAL,                                  -- Unix time an offer was approved or declined
+    started_at REAL,                               -- Unix time the action call began (NULL before action call)
     created REAL NOT NULL,                         -- Unix time this firing row was created
     finished REAL                                  -- Unix time this firing reached a terminal status
 );
@@ -742,7 +743,7 @@ SELECT id, name, preset, enabled, paused_reason, trigger, conditions, action, sc
 FROM automations;
 CREATE VIEW IF NOT EXISTS v_automation_firings AS
 SELECT id, automation_id, automation_name, event_kind, event_ref, dedup_key, depth, status,
-       due, deadline, input, trace_id, reason, decided_by, decided, created, finished
+       due, deadline, input, trace_id, reason, decided_by, decided, started_at, created, finished
 FROM automation_firings;
 """
 

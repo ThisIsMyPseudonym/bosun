@@ -4,8 +4,10 @@ from bosun import trace
 from bosun.automations import store as astore
 from bosun.automations.schema import (
     AutomationDef,
+    ExplainItemScope,
     NotifyScope,
     RefreshConditions,
+    RefreshScope,
     RefreshTrigger,
     ScheduleConditions,
     ScheduleTrigger,
@@ -194,3 +196,64 @@ def test_crud_redaction_caps_circuit_breaker_and_same_work_queries(tmp_path):
     assert astore.get_firing(st, f_wait)["status"] == "skipped"
     assert astore.get_firing(st, f_run)["status"] == "failed"  # history preserved
     assert len(astore.list_firings(st, automation_id=uid)) == 5
+
+
+def test_recover_running_marks_started_non_idempotent_failed_and_retries_unstarted(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    now = 200_000.0
+    non_idem = [
+        ("notify", _defn("Digest")),
+        ("explain_item", AutomationDef(
+            name="Explain", trigger=ScheduleTrigger(kind="schedule", time="02:00"),
+            conditions=ScheduleConditions(project="p1", lane="now"),
+            action="explain_item", scope=ExplainItemScope(project="p1", lane="now"), mode="run",
+        )),
+        ("start_fix", AutomationDef(
+            name="Fix", trigger=ScheduleTrigger(kind="schedule", time="02:00"),
+            conditions=ScheduleConditions(project="p1", lane="now"),
+            action="start_fix", scope=StartFixScope(project="p1", lane="now"), mode="run",
+        )),
+        ("upgrade", AutomationDef(
+            name="Upgrade", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+            action="upgrade", scope=UpgradeScope(mode="keys", keys=("brew:jq",)), mode="run",
+        )),
+    ]
+    started_fids: list[int] = []
+    unstarted_fids: list[int] = []
+    for action, defn in non_idem:
+        aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=now)
+        f_started = astore.insert_firing(
+            st, aid, defn.name, "refresh", f"s:{action}:1", f"k:{action}:started",
+            status="running", due=now, now=now,
+        )
+        f_unstarted = astore.insert_firing(
+            st, aid, defn.name, "refresh", f"s:{action}:2", f"k:{action}:unstarted",
+            status="running", due=now, now=now,
+        )
+        assert f_started is not None and f_unstarted is not None
+        astore.set_firing(st, f_started, started_at=now + 1.0, now=now + 1.0)
+        started_fids.append(f_started)
+        unstarted_fids.append(f_unstarted)
+
+    # Idempotent action (refresh) with started_at can still retry safely
+    ref_def = AutomationDef(
+        name="Rescan", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="refresh", scope=RefreshScope(only=("brew",)), mode="run",
+    )
+    rid = astore.save(st, ref_def, enabled=True, grant_digest=grant_digest(ref_def), granted_by="user", now=now)
+    f_ref = astore.insert_firing(
+        st, rid, ref_def.name, "refresh", "s:ref", "k:ref", status="running", due=now, now=now,
+    )
+    assert f_ref is not None
+    astore.set_firing(st, f_ref, started_at=now + 1.0, now=now + 1.0)
+
+    assert astore.recover_running(st, now=now + 50.0) == 9
+    for fid in started_fids:
+        row = astore.get_firing(st, fid)
+        assert row is not None and row["status"] == "failed" and row["reason"] == "interrupted"
+        assert row["finished"] == now + 50.0
+    for fid in unstarted_fids:
+        row = astore.get_firing(st, fid)
+        assert row is not None and row["status"] == "scheduled"
+    ref_row = astore.get_firing(st, f_ref)
+    assert ref_row is not None and ref_row["status"] == "scheduled" and ref_row["started_at"] is None
