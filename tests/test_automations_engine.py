@@ -445,3 +445,55 @@ def test_engine_isolates_per_firing_exceptions_without_starving_queue(tmp_path, 
     assert rep2.failed == 0 and rep2.ran == 0 and calls["bad"] == 1
 
 
+def test_waiting_installs_push_due_forward_and_never_starve_digest(tmp_path):
+    from bosun.automations.engine import INSTALL_WAIT_BACKOFF_S
+
+    st = Store(tmp_path / "bosun.db")
+    now = 900_000.0
+    it = Item(Source.BREW, "ripgrep", "ripgrep", "14.0.0", "14.1.0", lane="batch")
+    st.save_snapshot([item_to_dict(it)], [])
+    app = create_app(load_settings(), st, "t" * 32)
+    eng = Automator(st, load_settings(), app.state.actions, tz=CHI)
+
+    up_def = AutomationDef(
+        name="Upgrade rg", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="upgrade", scope=UpgradeScope(mode="keys", keys=(it.key,)), mode="run",
+        max_per_day=48, cooldown_s=0,
+    )
+    ua = astore.save(st, up_def, enabled=True, grant_digest=grant_digest(up_def), granted_by="user", now=now)
+    # Active install already in flight
+    st.create_job("brew:other", ["brew", "upgrade", "other"], status="running", actor=f"automation:{ua}")
+
+    install_fids: list[int] = []
+    for i in range(12):
+        fid = astore.insert_firing(
+            st, ua, up_def.name, "refresh", f"snap:{i}", f"inst:{i}",
+            status="scheduled", due=now - 100 + i, now=now - 100 + i,
+        )
+        assert fid is not None
+        install_fids.append(fid)
+
+    dig_def = AutomationDef(
+        name="What changed", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="notify", scope=NotifyScope(digest="what_changed"), mode="run",
+    )
+    da = astore.save(st, dig_def, enabled=True, grant_digest=grant_digest(dig_def), granted_by="user", now=now)
+    dig_fid = astore.insert_firing(
+        st, da, dig_def.name, "refresh", "snap:99", "dig:1",
+        status="scheduled", due=now, input_data={"snapshot_id": 1, "prev_snapshot_id": None}, now=now,
+    )
+    assert dig_fid is not None
+
+    tick_now = now + 10.0
+    rep = eng.tick(now=tick_now)
+    assert rep.ran == 1
+    assert astore.get_firing(st, dig_fid)["status"] == "done"
+    pushed = [
+        astore.get_firing(st, fid)["due"]
+        for fid in install_fids
+        if astore.get_firing(st, fid)["due"] == tick_now + INSTALL_WAIT_BACKOFF_S
+    ]
+    assert len(pushed) >= 1
+    assert all(astore.get_firing(st, fid)["status"] == "scheduled" for fid in install_fids)
+
+

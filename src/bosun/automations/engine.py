@@ -33,6 +33,7 @@ from .schema import (
 log = logging.getLogger(__name__)
 
 TICK_S = 30.0
+INSTALL_WAIT_BACKOFF_S = 60.0
 GLOBAL_DAILY_CAP = 30
 SCHEDULE_DEADLINE_S = 6 * 3600.0
 RETRY_DEADLINE_S = 2 * 3600.0
@@ -291,6 +292,7 @@ class Automator:
             astore.set_firing(self.store, fid, status=stop[0], reason=stop[1], now=when)
             return "skipped"
         if is_install_action(defn.action) and astore.active_install_firing(self.store) is not None:
+            astore.set_firing(self.store, fid, due=when + INSTALL_WAIT_BACKOFF_S, now=when)
             return "waiting"
         if isinstance(defn.conditions, ScheduleConditions) and not amatch.matches_schedule(
             self.store, defn.conditions, defn.action,

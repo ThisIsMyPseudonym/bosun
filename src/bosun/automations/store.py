@@ -227,14 +227,26 @@ def set_firing(
 
 
 def due_firings(store: Store, *, now: float | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    """Return due firings fairly by interleaving non-install and install firings."""
     when = time.time() if now is None else now
+    ph = ",".join("?" * len(INSTALL_ACTION_NAMES))
+    base = ("SELECT f.* FROM automation_firings f LEFT JOIN automations a ON a.id = f.automation_id "
+            "WHERE f.status IN ('scheduled', 'waiting_quota') AND (f.due IS NULL OR f.due <= ?) ")
+    order = "ORDER BY COALESCE(f.due, f.created) ASC, f.id ASC LIMIT ?"
     with store._tx() as db:
-        rows = db.execute(
-            "SELECT * FROM automation_firings WHERE status IN ('scheduled', 'waiting_quota') "
-            "AND (due IS NULL OR due <= ?) ORDER BY COALESCE(due, created) ASC, id ASC LIMIT ?",
-            (when, limit),
-        ).fetchall()
-    return [dict(r) for r in rows]
+        non_inst = [dict(r) for r in db.execute(
+            f"{base}AND (a.action IS NULL OR a.action NOT IN ({ph})) {order}", (when, *INSTALL_ACTION_NAMES, limit),
+        ).fetchall()]
+        inst = [dict(r) for r in db.execute(
+            f"{base}AND a.action IN ({ph}) {order}", (when, *INSTALL_ACTION_NAMES, limit),
+        ).fetchall()]
+    out: list[dict[str, Any]] = []
+    for idx in range(max(len(non_inst), len(inst))):
+        if idx < len(non_inst) and len(out) < limit:
+            out.append(non_inst[idx])
+        if idx < len(inst) and len(out) < limit:
+            out.append(inst[idx])
+    return out
 
 
 def recover_running(store: Store, *, now: float | None = None) -> int:
