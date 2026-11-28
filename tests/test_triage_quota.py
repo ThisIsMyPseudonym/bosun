@@ -192,3 +192,38 @@ def test_crash_recovery_requeues_running_row_and_no_cli_skips_all_queued(tmp_pat
         assert tstore.get_by_trace(st, tid_y)["status"] == "skipped"
     finally:
         trace.configure(None)
+
+
+def test_killed_mid_call_background_attempt_still_counts_toward_daily_limit(tmp_path, monkeypatch):
+    import pytest
+
+    from bosun.triage import model as tmodel
+
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([
+        item_to_dict(Item(Source.BREW, "k1", "k1", "1.0", "2.0")),
+        item_to_dict(Item(Source.BREW, "k2", "k2", "1.0", "2.0")),
+    ], [])
+    tsettings.update(st, daily_limit=1)
+    monkeypatch.setattr(accounts, "installed", lambda: {"codex": "/test/bin/codex"})
+
+    trace.configure(st.path, "serve")
+    try:
+        tid1 = _fail_job(st, "brew:k1", "Error: mid-call kill aaa")
+        _fail_job(st, "brew:k2", "Error: mid-call kill bbb")
+        monkeypatch.setattr(tmodel, "_run_cli", lambda *a, **k: (_ for _ in ()).throw(SystemExit(137)))
+        triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+        with pytest.raises(SystemExit):
+            triager.tick(now=time.time() + 1.0)
+
+        # Even though the process died before _run_cli returned, the attempt was already counted
+        assert tsettings.daily_auto_used(st) == 1
+        assert tsettings.remaining_budget(st) == 0
+        # Restart recovery re-queues the background running row, but budget is already 0 so no second call runs
+        assert tstore.reset_running(st) == 1
+        assert tstore.get_by_trace(st, tid1)["status"] == "queued"
+        monkeypatch.setattr(tmodel, "_run_cli", lambda *a, **k: (_ for _ in ()).throw(AssertionError("exceeded daily cap")))
+        rep2 = triager.tick(now=time.time() + 2.0)
+        assert rep2.model_ran == 0
+    finally:
+        trace.configure(None)

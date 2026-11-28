@@ -288,11 +288,22 @@ def superseded(store: Store, rec: FailureRecord) -> bool:
         return hit is not None
 
 
-def reset_running(store: Store) -> int:
-    """Return interrupted 'running' triage rows back to 'queued' on startup."""
+def reset_running(store: Store, *, now: float | None = None) -> int:
+    """Recover interrupted 'running' rows on startup: mark clicked rows failed ('interrupted'), re-queue background rows."""
+    ts = time.time() if now is None else now
     with store._tx(write=True) as db:
-        cur = db.execute("UPDATE triage SET status = 'queued' WHERE status = 'running'")
-        return int(cur.rowcount)
+        clicked = db.execute(
+            "UPDATE triage SET "
+            "status = CASE WHEN feedback IN ('wrong', 'disputed') THEN 'disputed' ELSE 'failed' END, "
+            "source = CASE WHEN source = 'click' THEN '' ELSE source END, "
+            "last_error = 'interrupted', finished = ? "
+            "WHERE status = 'running' AND ("
+            "source = 'click' OR EXISTS (SELECT 1 FROM runs r WHERE r.trace_id = triage.triage_trace AND r.actor = 'user')"
+            ")",
+            (ts,),
+        )
+        requeued = db.execute("UPDATE triage SET status = 'queued' WHERE status = 'running'")
+        return int(clicked.rowcount) + int(requeued.rowcount)
 
 
 def _parse_argv(raw: str | None) -> tuple[str, ...]:

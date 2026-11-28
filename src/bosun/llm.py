@@ -64,15 +64,66 @@ def usage_of(envelope: dict[str, Any]) -> Usage:
     return u
 
 
+def _attrs_json(attrs: dict[str, Any]) -> str:
+    attrs_json = json.dumps(trace.redact.value(attrs), default=str)
+    if len(attrs_json) > 4000:  # keep valid JSON so llm_usage() never chokes on a truncated row
+        attrs_json = json.dumps({"truncated": f"{len(attrs_json)} chars dropped", "keys": sorted(map(str, attrs))[:50]})
+    return attrs_json
+
+
+def start(store: Any, purpose: str, *, model: str = "", item_key: str = "", project: str = "",
+          provider: str = "claude", account: str = "default", job: str = "", trace_id: str = "",
+          ts: float | None = None, **attrs: Any) -> int | None:
+    """Insert an in-flight llm_calls row with outcome='started' before invoking a CLI so mid-call kills still count."""
+    if store.read_only:
+        return None
+    when = time.time() if ts is None else ts
+    tid = trace_id or trace.current_trace_id()
+    with store._tx(write=True) as db:
+        cur = db.execute(
+            "INSERT INTO llm_calls (ts, trace_id, span_id, purpose, item_key, project, model, models, input_tokens, "
+            "output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, outcome, error, session_id, attrs, "
+            "provider, account, job, estimated) VALUES (?,?,?,?,?,?,?,'{}',0,0,0,0,0,'started','','',?,?,?,?,0)",
+            (when, tid, trace.current_span_id(), purpose, item_key, project, model,
+             _attrs_json(attrs), provider, account, job or purpose),
+        )
+        return int(cur.lastrowid) if cur.lastrowid is not None else None
+
+
+def finish(store: Any, row_id: int | None, purpose: str, *, outcome: str, usage: Usage | None = None,
+           model: str = "", item_key: str = "", project: str = "", duration_ms: float | None = None,
+           api_ms: float | None = None, turns: int | None = None, prompt_chars: int | None = None,
+           session_id: str = "", error: str = "", provider: str = "claude", account: str = "default",
+           job: str = "", window_draw: float | None = None, estimated: bool = False,
+           ts: float | None = None, **attrs: Any) -> None:
+    """Update a started llm_calls row in place when complete, or insert a fresh row if no row_id was created."""
+    if row_id is None or store.read_only:
+        record(purpose, outcome=outcome, usage=usage, model=model, item_key=item_key, project=project,
+               duration_ms=duration_ms, api_ms=api_ms, turns=turns, prompt_chars=prompt_chars,
+               session_id=session_id, error=error, provider=provider, account=account, job=job,
+               window_draw=window_draw, estimated=estimated, **attrs)
+        return
+    u = usage or Usage()
+    when = time.time() if ts is None else ts
+    with store._tx(write=True) as db:
+        db.execute(
+            "UPDATE llm_calls SET ts=?, model=?, models=?, input_tokens=?, output_tokens=?, cache_read_tokens=?, "
+            "cache_write_tokens=?, cost_usd=?, duration_ms=?, api_ms=?, turns=?, prompt_chars=?, outcome=?, "
+            "error=?, session_id=?, attrs=?, window_draw=?, estimated=? WHERE id=?",
+            (when, model, json.dumps(u.models), u.input_tokens, u.output_tokens, u.cache_read_tokens,
+             u.cache_write_tokens, round(u.cost_usd, 6), duration_ms, api_ms, turns, prompt_chars, outcome,
+             trace.redact.text(error)[:500], session_id, _attrs_json(attrs), window_draw, int(bool(estimated)),
+             row_id),
+        )
+
+
 def record(purpose: str, *, outcome: str, usage: Usage | None = None, model: str = "", item_key: str = "",
            project: str = "", duration_ms: float | None = None, api_ms: float | None = None, turns: int | None = None,
            prompt_chars: int | None = None, session_id: str = "", error: str = "", provider: str = "claude",
            account: str = "default", job: str = "", window_draw: float | None = None, estimated: bool = False,
            **attrs: Any) -> None:
     u = usage or Usage()
-    attrs_json = json.dumps(trace.redact.value(attrs), default=str)
-    if len(attrs_json) > 4000:  # keep valid JSON so llm_usage() never chokes on a truncated row
-        attrs_json = json.dumps({"truncated": f"{len(attrs_json)} chars dropped", "keys": sorted(map(str, attrs))[:50]})
+    attrs_json = _attrs_json(attrs)
     trace._write(
         "INSERT INTO llm_calls (ts, trace_id, span_id, purpose, item_key, project, model, models, input_tokens, "
         "output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, duration_ms, api_ms, turns, prompt_chars, "

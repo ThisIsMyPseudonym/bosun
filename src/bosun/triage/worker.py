@@ -262,7 +262,7 @@ class Triager:
         sig = signature_of(rec)
         previous = tstore.get(self.store, rec.failure)
         try:
-            tstore.save_status(self.store, rec.failure, tid, sig, "running")
+            tstore.save_status(self.store, rec.failure, tid, sig, "running", source="click")
             outcome = tmodel.run_model(self.store, self.settings, rec, clicked=True, tokens=self.tokens)
             if outcome.ok and outcome.verdict is not None:
                 origin_id = tstore.save_verdict(
