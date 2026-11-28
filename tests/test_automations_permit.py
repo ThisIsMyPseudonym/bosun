@@ -23,13 +23,36 @@ from bosun.registry import (
     SPECS,
     ActionContext,
     Actions,
+    AgentPolicyIn,
+    AiLoginIn,
+    AiLoginSetIn,
+    AiOverrideIn,
+    AiRoutingIn,
+    AskIn,
+    BundleIn,
+    ConversationIn,
+    ConversationsIn,
+    DecideIn,
     Empty,
+    FixIdIn,
     FixIn,
     Forbidden,
+    JobIn,
+    KeyIn,
+    ListPrefsIn,
     OnIn,
+    PrefIn,
+    QueryIn,
     RefreshIn,
     RelaunchIn,
     Risk,
+    RunIn,
+    RunManyIn,
+    TriageFeedbackIn,
+    TriageIn,
+    TriageSettingsIn,
+    TypeIn,
+    ViewIn,
 )
 from bosun.serialize import item_to_dict
 from bosun.store import Store
@@ -63,13 +86,6 @@ def test_permit_enforces_grant_scope_expiry_pause_system_approval_and_blocks_use
     # Action mismatch (even another allow-listed action) refused
     with pytest.raises(Forbidden):
         actions.permit(SPECS["refresh"], ctx, RefreshIn(only=None, auto_upgrade=False))
-
-    # Every user_only action, EXTERNAL action, and non-allowlisted action is refused
-    for name, spec in SPECS.items():
-        if spec.user_only or spec.risk >= Risk.EXTERNAL or name not in ALLOWLIST:
-            body = OnIn(on=True) if name == "set_autopilot" else Empty()
-            with pytest.raises(Forbidden):
-                actions.permit(spec, ctx, body)
 
     # Kill switch refuses everything
     astore.set_paused(st, True)
@@ -183,3 +199,70 @@ def test_non_ascii_grant_digest_is_refused_never_raises_type_error(tmp_path):
     assert rep.failed == 0 and rep.errors == 0
     row = astore.get_firing(st, fid)
     assert row is not None and row["status"] == "refused"
+
+
+FORBIDDEN_AUTOMATION_ACTIONS = [
+    # Limit-loosening & user-only settings
+    ("set_ai_routing", AiRoutingIn(mode="balance")),
+    ("set_quota_override", AiOverrideIn(bucket="claude", on=True)),
+    ("set_triage_settings", TriageSettingsIn(auto=False, daily_limit=5)),
+    ("set_agent_policy", AgentPolicyIn(system=True, external=True)),
+    ("set_notify", OnIn(on=False)),
+    ("add_ai_login", AiLoginIn(provider="claude", id="work", label="Work", home="/tmp")),
+    ("set_ai_login", AiLoginSetIn(provider="claude", id="default", excluded=False)),
+    ("set_autopilot", OnIn(on=True)),
+    ("set_pref", PrefIn(key="repo:npm:lodash@p1", ignored=True)),
+    ("set_list_prefs", ListPrefsIn(page="pc")),
+    ("dismiss_ai_notice", Empty()),
+    ("triage", TriageIn(trace_id="abcdef01", deep=False)),
+    ("triage_feedback", TriageFeedbackIn(trace_id="abcdef01", feedback="helpful")),
+    ("restore_app", BundleIn(bundle_id="com.example.app")),
+    # EXTERNAL action
+    ("open_pr", FixIdIn(fix_id=1)),
+    # Panel actions (terminal & Ask Bosun)
+    ("run_recipe", RunIn(key="brew:jq", recipe="brew-upgrade")),
+    ("run_recipes", RunManyIn(keys=["brew:jq"], recipe="brew-upgrade")),
+    ("terminal_input", TypeIn(job_id=1, data="y\n")),
+    ("terminal_stop", JobIn(job_id=1)),
+    ("assistant_ask", AskIn(text="hi")),
+    ("assistant_decide", DecideIn(approval_id="approval1234", approve=True)),
+    ("assistant_stop", ConversationIn(conversation_id="deadbeef1234")),
+    ("assistant_conversations", ConversationsIn()),
+    ("assistant_conversation", ConversationIn(conversation_id="deadbeef1234")),
+    ("assistant_delete", ConversationIn(conversation_id="deadbeef1234")),
+    # Non-allowlisted local / system / read actions
+    ("cancel_job", JobIn(job_id=1)),
+    ("discard_fix", FixIdIn(fix_id=1)),
+    ("open_os_updates", Empty()),
+    ("set_view", ViewIn(mode="simple")),
+    ("watch_app", KeyIn(key="mac-app:Slack")),
+    ("check_app", Empty()),
+    ("status", Empty()),
+    ("query", QueryIn(sql="SELECT 1")),
+]
+
+
+@pytest.mark.parametrize(("action_name", "body"), FORBIDDEN_AUTOMATION_ACTIONS, ids=[a for a, _ in FORBIDDEN_AUTOMATION_ACTIONS])
+def test_permit_refuses_each_forbidden_or_user_only_action(tmp_path, action_name, body):
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+    defn = AutomationDef(
+        name="Scan brew",
+        trigger=RefreshTrigger(kind="refresh"),
+        conditions=RefreshConditions(),
+        action="refresh",
+        scope=RefreshScope(only=("brew",)),
+        mode="run",
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=now)
+    actions = Actions(store=st)
+    ctx = ActionContext(actor=f"automation:{aid}", surface="automation", now=now)
+    with pytest.raises(Forbidden):
+        actions.permit(SPECS[action_name], ctx, body)
+
+
+def test_forbidden_action_table_covers_every_user_only_and_external_spec():
+    covered = {name for name, _ in FORBIDDEN_AUTOMATION_ACTIONS}
+    required = {name for name, spec in SPECS.items() if spec.user_only or spec.risk >= Risk.EXTERNAL}
+    assert required <= covered, f"missing forbidden action assertions for: {sorted(required - covered)}"
+    assert not (covered & ALLOWLIST)
