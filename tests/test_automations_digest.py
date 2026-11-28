@@ -154,3 +154,85 @@ def test_digest_drops_hostile_cause_and_sanitizes_item_names(tmp_path):
     assert "A" * (MAX_ITEM_NAME + 1) not in line
     assert "B" * (MAX_ITEM_NAME + 1) not in line
 
+
+def test_automation_notify_queue_keeps_undelivered_expires_24h_and_locks(tmp_path):
+    import threading
+
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([], [])
+    sent, t = [], [10_000.0]
+
+    def send(note, url):
+        sent.append(note)
+        return True
+
+    n = Notifier(st, "http://127.0.0.1:8787/", send=send, pending=lambda: [], clock=lambda: t[0])
+    n.tick()  # baseline
+
+    # 1. Quiet while user is viewing: line is NOT dropped; delivered once user stops looking
+    n.viewed()
+    t[0] += 10
+    notify.enqueue_automation(st, "What changed", "1 updated", now=t[0])
+    assert n.tick() is None and not sent
+    t[0] += notify.WATCHING_S + 10
+    note = n.tick()
+    assert note is not None and "1 updated" in note.body and len(sent) == 1
+
+    # 2. Quiet while notifications are off: kept until turned back on (within 24h)
+    notify.set_on(st, False)
+    t[0] += notify.GAP_S + 10
+    notify.enqueue_automation(st, "What changed", "2 updated", now=t[0])
+    assert n.tick() is None
+    notify.set_on(st, True)
+    t[0] += 10
+    note2 = n.tick()
+    assert note2 is not None and "2 updated" in note2.body and len(sent) == 2
+
+    # 3. Entry arriving mid-delivery is NOT wiped when the earlier batch is cleared
+    t[0] += notify.GAP_S + 10
+    notify.enqueue_automation(st, "Batch A", "line A", now=t[0])
+    injected = False
+
+    def send_with_concurrent_enqueue(note, url):
+        nonlocal injected
+        sent.append(note)
+        if not injected:
+            injected = True
+            notify.enqueue_automation(st, "Batch B", "line B", now=t[0])
+        return True
+
+    n.send = send_with_concurrent_enqueue
+    note3 = n.tick()
+    assert note3 is not None and "line A" in note3.body and "line B" not in note3.body
+    t[0] += notify.GAP_S + 10
+    note4 = n.tick()
+    assert note4 is not None and "line B" in note4.body
+
+    # 4. Undelivered entries expire after 24 h
+    n.send = send
+    notify.set_on(st, False)
+    t[0] += notify.GAP_S + 10
+    notify.enqueue_automation(st, "Stale", "expired line", now=t[0])
+    assert n.tick() is None
+    t[0] += notify.AUTOMATION_QUEUE_TTL_S + 10
+    notify.set_on(st, True)
+    assert n.tick() is None
+
+    # 5. Bounded to MAX_AUTOMATION_QUEUE and thread-safe under concurrent enqueue_automation calls
+    t[0] += notify.GAP_S + 10
+    threads = [
+        threading.Thread(
+            target=lambda idx=i: notify.enqueue_automation(st, f"T{idx}", f"msg {idx}", now=t[0])
+        )
+        for i in range(40)
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    queued = notify._read_automation_queue(st, now=t[0])
+    assert len(queued) == 40
+    for i in range(30):
+        notify.enqueue_automation(st, f"Extra{i}", f"extra {i}", now=t[0])
+    assert len(notify._read_automation_queue(st, now=t[0])) == notify.MAX_AUTOMATION_QUEUE
+
