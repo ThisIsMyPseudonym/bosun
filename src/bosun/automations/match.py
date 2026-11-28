@@ -238,7 +238,7 @@ def resolve_input(
     if isinstance(scope, RecheckProjectScope):
         if scope.mode == "project":
             ev_proj = event.get("project")
-            if is_verdict and isinstance(ev_proj, str) and ev_proj and ev_proj != scope.project:
+            if is_verdict and (not isinstance(ev_proj, str) or not ev_proj or ev_proj != scope.project):
                 return None
             return {"project": scope.project}
         proj = event.get("project")
@@ -369,7 +369,9 @@ def input_in_scope(
         if not isinstance(body, ProjectIn):
             return False
         if scope.mode == "project":
-            return body.project == scope.project
+            return body.project == scope.project and (
+                not is_verdict or _verified_firing_project(store, fids, automation_id) == scope.project
+            )
         return bool(body.project) and _verified_firing_project(store, fids, automation_id) == body.project
     if isinstance(scope, (StartFixScope, ExplainItemScope)):
         return _project_lane_ok(

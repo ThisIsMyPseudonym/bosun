@@ -267,3 +267,41 @@ def test_unset_project_sentinel_never_matches_resolves_or_passes_scope(tmp_path)
     assert resolve_input(st, defn, event={}) is None
     assert input_in_scope(st, defn, FixIn(keys=[it.key])) is False
 
+
+def test_verdict_recheck_project_requires_matching_non_empty_project(tmp_path):
+    from bosun.automations import store as astore
+    from bosun.automations.schema import VerdictConditions, VerdictTrigger, grant_digest
+
+    st = Store(tmp_path / "bosun.db")
+    brew_it = Item(Source.BREW, "jq", "jq", "1.7.0", "1.7.1", lane="batch")
+    p1_it = Item(Source.REPO, "lodash", "lodash", "4.0", "4.17.21", ecosystem="npm", project="p1", lane="now")
+    p2_it = Item(Source.REPO, "axios", "axios", "1.0", "1.7", ecosystem="npm", project="p2", lane="now")
+    st.save_snapshot([item_to_dict(x) for x in (brew_it, p1_it, p2_it)], [])
+
+    defn = AutomationDef(
+        name="Recheck p1 on verdict",
+        trigger=VerdictTrigger(kind="verdict"),
+        conditions=VerdictConditions(categories=("network",)),
+        action="recheck_project",
+        scope=RecheckProjectScope(mode="project", project="p1"),
+        mode="run",
+    )
+    assert resolve_input(st, defn, event={"project": "p1"}) == {"project": "p1"}
+    assert resolve_input(st, defn, event={"project": "p2"}) is None
+    assert resolve_input(st, defn, event={"project": ""}) is None
+    assert resolve_input(st, defn, event={}) is None
+    assert resolve_input(st, defn, event={"project": None}) is None
+
+    # Permit-time input_in_scope also requires a verified verdict firing for p1
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=100.0)
+    fix_p1 = st.create_fix(p1_it.key, "p1")
+    fix_p2 = st.create_fix(p2_it.key, "p2")
+    job_brew = st.create_job(brew_it.key, ["brew", "upgrade", "jq"])
+    f_p1 = astore.insert_firing(st, aid, defn.name, "verdict", f"fix:{fix_p1}", "v:p1", status="scheduled", input_data={"project": "p1"}, now=100.0)
+    f_p2 = astore.insert_firing(st, aid, defn.name, "verdict", f"fix:{fix_p2}", "v:p2", status="scheduled", input_data={"project": "p1"}, now=100.0)
+    f_brew = astore.insert_firing(st, aid, defn.name, "verdict", f"job:{job_brew}", "v:brew", status="scheduled", input_data={"project": "p1"}, now=100.0)
+    assert input_in_scope(st, defn, ProjectIn(project="p1"), firing_id=f_p1, automation_id=aid) is True
+    assert input_in_scope(st, defn, ProjectIn(project="p1"), firing_id=f_p2, automation_id=aid) is False
+    assert input_in_scope(st, defn, ProjectIn(project="p1"), firing_id=f_brew, automation_id=aid) is False
+    assert input_in_scope(st, defn, ProjectIn(project="p1"), firing_id=None, automation_id=aid) is False
+
