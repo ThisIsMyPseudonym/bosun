@@ -53,11 +53,22 @@ def matches_in_app_update(conditions: InAppUpdateConditions, event: InAppUpdateE
     return bool(ids & wanted)
 
 
+def _event_target(defn: AutomationDef, ev: InAppUpdateEvent) -> str:
+    """Return the action-appropriate event target (`app` for `relaunch_app`, `item_key` for `open_app`)."""
+    app_id, key = ev.app.strip(), ev.item_key.strip()
+    is_trigger_app = isinstance(defn.scope, AppActionScope) and defn.scope.mode == "trigger_app"
+    if defn.action == "relaunch_app":
+        return app_id if is_trigger_app else (app_id or key)
+    if defn.action == "open_app":
+        return key if is_trigger_app else (key or app_id)
+    return key or app_id
+
+
 def scan_in_app_updates(
     store: Store, rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float,
     reader: InAppUpdateReader = empty_reader,
 ) -> int:
-    """Scan pluggable in-app update events and schedule matching offers (deduped by app@version)."""
+    """Scan pluggable in-app update events and schedule matching offers (deduped by target@version)."""
     app_rules = [(aid, r, d) for aid, (r, d) in rules.items() if d.trigger.kind == "in_app_update"]
     if not app_rules:
         return 0
@@ -70,21 +81,24 @@ def scan_in_app_updates(
         return 0
     created = 0
     for ev in events:
-        target = ev.item_key or ev.app
-        if not target or not ev.version:
+        ver = ev.version.strip()
+        if not ver or (not ev.item_key.strip() and not ev.app.strip()):
             continue
-        subject = f"{target}@{ev.version}"
-        dedup = f"in_app_update:{subject}"
         for aid, _row, defn in app_rules:
             if not isinstance(defn.conditions, InAppUpdateConditions):
                 continue
             if not matches_in_app_update(defn.conditions, ev):
                 continue
+            target = _event_target(defn, ev)
+            if not target:
+                continue
+            subject = f"{target}@{ver}"
+            dedup = f"in_app_update:{subject}"
             due = when + defn.delay_s
             fid = astore.insert_firing(
                 store, aid, defn.name, "in_app_update", subject, dedup,
                 status="scheduled", depth=0, due=due, deadline=due + offers.OFFER_TTL_S,
-                input_data={"app": ev.app, "item_key": ev.item_key, "version": ev.version, "bundle_id": ev.bundle_id},
+                input_data={"app": ev.app, "item_key": ev.item_key, "version": ver, "bundle_id": ev.bundle_id},
                 now=when,
             )
             created += int(fid is not None)
@@ -99,16 +113,16 @@ def resolve_app_scope(
         return {"app": scope.app} if defn.action == "relaunch_app" else {"key": scope.app}
     if defn.trigger.kind != "in_app_update":
         return None
+    if isinstance(defn.conditions, InAppUpdateConditions) and defn.conditions.apps:
+        ids = {str(event.get(k) or "") for k in ("app", "item_key", "bundle_id")} - {""}
+        if not (ids & set(defn.conditions.apps)):
+            return None
     if defn.action == "relaunch_app":
         app_id = event.get("app")
         return {"app": app_id} if isinstance(app_id, str) and app_id in relaunch.APPS else None
     key = event.get("item_key")
     if not isinstance(key, str) or not key:
         return None
-    if isinstance(defn.conditions, InAppUpdateConditions) and defn.conditions.apps:
-        ids = {str(event.get(k) or "") for k in ("app", "item_key", "bundle_id")} - {""}
-        if not (ids & set(defn.conditions.apps)):
-            return None
     if offers._check_app_item_guards(store, key, now if now is not None else 0.0) is not None:
         return None
     return {"key": key}

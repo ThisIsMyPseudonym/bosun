@@ -206,3 +206,57 @@ def test_failing_in_app_reader_is_isolated_and_does_not_abort_tick(tmp_path, cap
     assert any("project 4 reader crashed" in r.getMessage() or "in_app" in r.getMessage().lower() for r in caplog.records)
 
 
+def test_trigger_app_event_with_both_app_and_item_key_works_for_both_actions_without_widening_scope(tmp_path):
+    from bosun.registry import KeyIn, RelaunchIn
+
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+    chrome = Item(Source.BREW_CASK, "google-chrome", "Google Chrome", "130.0", "131.0", self_updates=True)
+    st.save_snapshot([item_to_dict(chrome)], [])
+    relaunched: list[str] = []
+    opened: list[str] = []
+    book = approving.Approvals()
+    actions = Actions(store=st, approvals=book)
+    actions.bind("relaunch_app")(lambda ctx, body: relaunched.append(body.app) or {"app": body.app})
+    actions.bind("open_app")(lambda ctx, body: opened.append(body.key) or {"key": body.key})
+
+    rel_def = AutomationDef(
+        name="Offer Chrome relaunch", trigger=InAppUpdateTrigger(), conditions=InAppUpdateConditions(apps=("chrome",)),
+        action="relaunch_app", scope=AppActionScope(mode="trigger_app"), mode="ask",
+    )
+    open_def = AutomationDef(
+        name="Offer Chrome open", trigger=InAppUpdateTrigger(), conditions=InAppUpdateConditions(apps=("chrome",)),
+        action="open_app", scope=AppActionScope(mode="trigger_app"), mode="ask",
+    )
+    aid_rel = astore.save(st, rel_def, enabled=True, grant_digest=grant_digest(rel_def), granted_by="user", now=now)
+    aid_open = astore.save(st, open_def, enabled=True, grant_digest=grant_digest(open_def), granted_by="user", now=now)
+
+    ev = in_app.InAppUpdateEvent(
+        app="chrome", item_key=chrome.key, version="131.0",
+        installed="130.0", name="Google Chrome", bundle_id="com.google.Chrome", detected_at=now,
+    )
+    eng = Automator(st, load_settings(), actions, in_app_reader=lambda _s, *, now: (ev,))
+    rep = eng.tick(now=now + 10.0)
+    assert rep.scanned == 2 and rep.offered == 2
+
+    rel_firing = astore.list_firings(st, automation_id=aid_rel, status="offered")[0]
+    open_firing = astore.list_firings(st, automation_id=aid_open, status="offered")[0]
+    assert rel_firing["event_ref"] == "chrome@131.0"
+    assert json.loads(rel_firing["input"]) == {"app": "chrome"}
+    assert open_firing["event_ref"] == f"{chrome.key}@131.0"
+    assert json.loads(open_firing["input"]) == {"key": chrome.key}
+
+    # Both offers approve cleanly through Actions.permit
+    r1 = offer_decide.decide_offer(st, actions, book, int(rel_firing["id"]), True, actor="user", now=now + 20.0)
+    r2 = offer_decide.decide_offer(st, actions, book, int(open_firing["id"]), True, actor="user", now=now + 20.0)
+    assert r1["status"] == "done" and relaunched == ["chrome"]
+    assert r2["status"] == "done" and opened == [chrome.key]
+
+    # Scope is not widened: mismatched app/key or cross-field value stays refused
+    assert in_app.app_input_in_scope(st, rel_def, rel_def.scope, RelaunchIn(app="firefox"), (int(rel_firing["id"]),), aid_rel) is False
+    assert in_app.app_input_in_scope(st, rel_def, rel_def.scope, RelaunchIn(app=chrome.key), (int(rel_firing["id"]),), aid_rel) is False
+    assert in_app.app_input_in_scope(st, open_def, open_def.scope, KeyIn(key="brew-cask:firefox"), (int(open_firing["id"]),), aid_open) is False
+    assert in_app.app_input_in_scope(st, open_def, open_def.scope, KeyIn(key="chrome"), (int(open_firing["id"]),), aid_open) is False
+
+
+
