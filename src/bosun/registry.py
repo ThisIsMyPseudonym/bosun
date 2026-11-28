@@ -748,6 +748,8 @@ class Actions:
         if body is None or not amatch.input_in_scope(
             self.store, defn, body, firing_id=ctx.firing_id, firing_ids=ctx.firing_ids, automation_id=aid,
         ):
+            if self.approvals is not None and ctx.approval and body is not None:
+                self.approvals.consume(ctx.approval, spec.name, body)
             raise Forbidden(f"{spec.name} is refused: input is outside automation {aid}'s granted scope")
         if spec.risk == Risk.SYSTEM or defn.mode == "ask":
             granted = (self.approvals.consume(ctx.approval, spec.name, body)
