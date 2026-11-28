@@ -227,10 +227,12 @@ def background_calls(store: Store, now: float) -> dict[str, tuple[int, int]]:
     run_id = trace.current_trace_id()
     with store._tx() as db:
         rows = db.execute(
-            "SELECT COALESCE(NULLIF(provider, ''), 'claude') AS p, COALESCE(NULLIF(account, ''), 'default') AS a, "
-            "SUM(CASE WHEN ? != '' AND trace_id = ? THEN 1 ELSE 0 END) AS refresh, COUNT(*) AS day "
-            f"FROM llm_calls WHERE ts >= ? AND COALESCE(NULLIF(job, ''), purpose) IN ({','.join('?' * len(jobs))}) "
-            "AND outcome NOT IN ('cached', 'skipped') GROUP BY p, a",
+            "SELECT COALESCE(NULLIF(c.provider, ''), 'claude') AS p, COALESCE(NULLIF(c.account, ''), 'default') AS a, "
+            "SUM(CASE WHEN ? != '' AND c.trace_id = ? THEN 1 ELSE 0 END) AS refresh, COUNT(*) AS day "
+            "FROM llm_calls c LEFT JOIN runs r ON r.trace_id = c.trace_id "
+            f"WHERE c.ts >= ? AND (COALESCE(NULLIF(c.job, ''), c.purpose) IN ({','.join('?' * len(jobs))}) "
+            "OR COALESCE(r.actor, '') LIKE 'automation:%') "
+            "AND c.outcome NOT IN ('cached', 'skipped') GROUP BY p, a",
             (run_id, run_id, now - 86400, *jobs)).fetchall()
     return {(r["p"] if r["a"] == accounts.DEFAULT else f"{r['p']}@{r['a']}"): (int(r["refresh"]), int(r["day"]))
             for r in rows}

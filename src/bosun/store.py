@@ -508,8 +508,14 @@ class Store:
                 "AND COALESCE(finished, created) < ?",
                 (now - RECORD_DAYS * day,),
             ).rowcount
+            firings = self._db.execute(
+                "DELETE FROM automation_firings "
+                "WHERE status NOT IN ('scheduled', 'waiting_quota', 'offered', 'running') "
+                "AND COALESCE(finished, created) < ?",
+                (now - RECORD_DAYS * day,),
+            ).rowcount
         return {"cache": cache, "jobs": jobs, "fixes": fixes, "llm_calls": llm, "audit": audit,
-                "conversations": chats, "triage": triage}
+                "conversations": chats, "triage": triage, "automation_firings": firings}
 
     # --- the audit trail (written by registry.Actions.run) ------------------------------------------------------
     def record_action(self, *, actor: str, action: str, args: dict, risk: str, surface: str, trace_id: str,

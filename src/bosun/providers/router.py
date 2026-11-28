@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import math
 import statistics
-from collections.abc import Callable, Mapping, Set as AbstractSet
+from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -152,6 +152,32 @@ class Route:
     fell_back_from: str | None = None
 
 
+QUOTA_SKIP_REASONS: frozenset[str] = frozenset({"line", "limit", "cap", "cooldown"})
+
+
+class QuotaHeld(RuntimeError):
+    """Every eligible login for a background/automation AI job is currently held by quota."""
+
+    def __init__(self, earliest_reset: float | None, reason: str):
+        super().__init__(reason)
+        self.earliest_reset = earliest_reset
+        self.reason = reason
+
+
+def is_quota_held(skipped: Sequence[Skip]) -> bool:
+    """True when at least one login was held by quota/cap/cooldown and no permanent failure blocked all others."""
+    return any(s.reason in QUOTA_SKIP_REASONS for s in skipped)
+
+
+def quota_held_reset(skipped: Sequence[Skip]) -> float | None:
+    """Earliest reset timestamp among quota-held skips, or None if undated."""
+    resets = [
+        s.hit.resets_at for s in skipped
+        if s.reason in QUOTA_SKIP_REASONS and s.hit is not None and s.hit.resets_at is not None
+    ]
+    return min(resets) if resets else None
+
+
 def _capability_detail(job: catalog.Job, provider: str, *, jail_ok: bool | None = None) -> str:
     spec = catalog.CATALOG[provider]
     missing = sorted(job.needs - catalog.effective_capabilities(spec, jail_ok=jail_ok))
@@ -205,7 +231,7 @@ def _line_skip(bucket: str, curr: tuple[windows.Reading, ...], ctx: Context) -> 
 
 
 def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Login, ctx: Context,
-                 *, clicked: bool) -> Skip | None:
+                 *, clicked: bool, force_background: bool = False) -> Skip | None:
     if login.provider not in capable:
         return Skip(login.bucket, "capability", _capability_detail(job, login.provider, jail_ok=ctx.jail_available))
     spec = catalog.CATALOG[login.provider]
@@ -222,7 +248,7 @@ def _check_login(job: catalog.Job, capable: frozenset[str], login: accounts.Logi
         return limit
     if (cool := _cooldown_skip(login.bucket, ctx.cooldowns, ctx.now)) is not None:
         return cool
-    if job.background and not clicked:
+    if (job.background or force_background) and not clicked:
         return _line_skip(login.bucket, curr, ctx) or _cap_skip(login.bucket, curr, ctx)
     return None
 
@@ -281,14 +307,14 @@ def _fell_back_from(entries: list[tuple[str, accounts.Login | None]], candidates
 
 
 def _evaluate(job: catalog.Job, capable: frozenset[str], entries: list[tuple[str, accounts.Login | None]],
-              ctx: Context, *, clicked: bool) -> tuple[list[Candidate], list[Skip]]:
+              ctx: Context, *, clicked: bool, force_background: bool = False) -> tuple[list[Candidate], list[Skip]]:
     candidates: list[Candidate] = []
     skipped: list[Skip] = []
     for bucket, login in entries:
         if login is None:
             skipped.append(_check_missing(job, capable, bucket, jail_ok=ctx.jail_available))
             continue
-        skip = _check_login(job, capable, login, ctx, clicked=clicked)
+        skip = _check_login(job, capable, login, ctx, clicked=clicked, force_background=force_background)
         if skip is not None:
             skipped.append(skip)
         else:
@@ -327,16 +353,17 @@ def _job_mode(job: str, rs: RoutingSettings) -> str:
     return override if override in MODES else rs.mode
 
 
-def plan(job: str, ctx: Context, *, clicked: bool = False) -> Route:
+def plan(job: str, ctx: Context, *, clicked: bool = False, force_background: bool = False) -> Route:
     """Filter and order candidates for `job` from pure `ctx` (no store, no clock)."""
     capable = frozenset(catalog.capable(job, jail_ok=ctx.jail_available))
     job_spec = catalog.JOBS[job]
     if (pinned := _pinned_bucket(job, ctx.settings)) is not None:
         by_bucket = {lg.bucket: lg for lg in ctx.logins if lg.provider in catalog.CATALOG}
-        candidates, skipped = _evaluate(job_spec, capable, [(pinned, by_bucket.get(pinned))], ctx, clicked=clicked)
+        candidates, skipped = _evaluate(job_spec, capable, [(pinned, by_bucket.get(pinned))], ctx,
+                                        clicked=clicked, force_background=force_background)
         return Route(job, tuple(candidates), tuple(skipped), "pinned")
     entries = _ordered_entries(ctx)
-    candidates, skipped = _evaluate(job_spec, capable, entries, ctx, clicked=clicked)
+    candidates, skipped = _evaluate(job_spec, capable, entries, ctx, clicked=clicked, force_background=force_background)
     mode = _job_mode(job, ctx.settings)
     if mode == "balance":
         candidates = _balance_order(candidates)

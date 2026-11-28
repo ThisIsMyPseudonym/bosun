@@ -32,7 +32,8 @@ TIME_LIMIT_S = 2.0
 MAX_BYTES = 5_000_000  # of result text and blobs; a few rows of span attributes can be large
 MAX_VALUE_BYTES = 10_000_000  # one string or blob SQLite may build (zeroblob(), printf('%.*c'), group_concat)
 
-VIEWS = ("v_current_items", "v_item_history", "v_open_vulns", "v_failures", "v_triage", "v_llm_spend", "v_ai_spend", "v_actions")
+VIEWS = ("v_current_items", "v_item_history", "v_open_vulns", "v_failures", "v_triage", "v_llm_spend", "v_ai_spend",
+         "v_actions", "v_automations", "v_automation_firings")
 
 # Every table SQL may read, with every column it may read. A column added by a later migration is not readable
 # until it is listed here or in HIDDEN: tests/test_query.py fails until someone decides which.
@@ -61,6 +62,10 @@ READABLE: dict[str, frozenset[str]] = {name: frozenset(cols.split()) for name, c
     "quota_windows": "bucket provider account window status used resets_at at source",
     "triage": "id failure trace_id signature status source verdict same_as triage_trace feedback feedback_ts created finished last_error",
     "triage_disputed_rules": "signature disputed_at",
+    "automations": "id name preset enabled paused_reason trigger conditions action scope mode delay_s max_per_day "
+                   "cooldown_s model_jobs_per_day grant_digest granted_by granted_at created updated",
+    "automation_firings": "id automation_id automation_name event_kind event_ref dedup_key depth status due deadline "
+                          "input trace_id reason decided_by decided started_at created finished",
 }.items()}
 HIDDEN: dict[str, frozenset[str]] = {
     "snapshots": frozenset({"items"}),  # the blob: megabytes, and the rows in snapshot_items say the same

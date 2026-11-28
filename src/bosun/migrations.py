@@ -687,6 +687,67 @@ def _triage_last_error(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE triage ADD COLUMN last_error TEXT NOT NULL DEFAULT ''")
 
 
+AUTOMATIONS = """
+CREATE TABLE IF NOT EXISTS automations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,          -- stable row id for this automation
+    name TEXT NOT NULL,                            -- owner-chosen display name
+    preset TEXT,                                   -- shipped preset id, or NULL for custom rules
+    enabled INTEGER NOT NULL DEFAULT 0,            -- 1 = active, 0 = off
+    paused_reason TEXT NOT NULL DEFAULT '',        -- set by the circuit breaker when paused after consecutive failures
+    trigger TEXT NOT NULL,                         -- validated trigger JSON
+    conditions TEXT NOT NULL,                      -- validated conditions JSON
+    action TEXT NOT NULL,                          -- allow-listed action name (or notify)
+    scope TEXT NOT NULL,                           -- validated scope JSON
+    mode TEXT NOT NULL,                            -- run (runs on its own) or ask (asks first)
+    delay_s INTEGER NOT NULL DEFAULT 0,            -- seconds to wait between event and execution
+    max_per_day INTEGER NOT NULL DEFAULT 6,        -- daily firing limit for this rule (1-48)
+    cooldown_s INTEGER NOT NULL DEFAULT 900,       -- minimum seconds between firings of this rule
+    model_jobs_per_day INTEGER NOT NULL DEFAULT 3, -- daily cap on AI model jobs started by this rule
+    grant_digest TEXT NOT NULL DEFAULT '',         -- SHA-256 of the definition granted at save time
+    granted_by TEXT NOT NULL DEFAULT '',           -- who granted this automation (user)
+    granted_at REAL,                               -- Unix time the current grant was saved or renewed
+    created REAL NOT NULL,                         -- Unix time this automation was created
+    updated REAL NOT NULL                          -- Unix time this automation was last updated
+);
+CREATE TABLE IF NOT EXISTS automation_firings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,          -- stable firing id
+    automation_id INTEGER NOT NULL,                -- automations.id (history survives delete)
+    automation_name TEXT NOT NULL,                 -- copied automation name so history survives delete
+    event_kind TEXT NOT NULL,                      -- refresh, schedule, verdict, or in_app_update
+    event_ref TEXT NOT NULL,                       -- event subject (snap:<id>, slot key, failure id, app@ver)
+    dedup_key TEXT NOT NULL,                       -- unique per automation_id to stop double runs
+    depth INTEGER NOT NULL DEFAULT 0,              -- chain depth (0 = external event, 1 = from a depth-0 automation)
+    status TEXT NOT NULL,                          -- scheduled, waiting_quota, offered, running, done, failed, skipped, missed, declined, expired, refused
+    due REAL,                                      -- Unix time this firing is due to run
+    deadline REAL,                                 -- Unix time after which waiting_quota skips or offered expires
+    input TEXT NOT NULL DEFAULT '{}',              -- redacted resolved action input JSON
+    trace_id TEXT NOT NULL DEFAULT '',             -- trace_id of the action run started by this firing
+    reason TEXT NOT NULL DEFAULT '',               -- redacted plain-text reason for skip, refusal, failure or digest line
+    decided_by TEXT NOT NULL DEFAULT '',           -- who approved or declined an offer (user)
+    decided REAL,                                  -- Unix time an offer was approved or declined
+    started_at REAL,                               -- Unix time the action call began (NULL before action call)
+    created REAL NOT NULL,                         -- Unix time this firing row was created
+    finished REAL                                  -- Unix time this firing reached a terminal status
+);
+CREATE UNIQUE INDEX IF NOT EXISTS automation_firings_dedup ON automation_firings (automation_id, dedup_key);
+CREATE INDEX IF NOT EXISTS automation_firings_by_due ON automation_firings (status, due);
+CREATE INDEX IF NOT EXISTS automation_firings_by_auto ON automation_firings (automation_id, created DESC);
+CREATE INDEX IF NOT EXISTS automation_firings_by_trace ON automation_firings (trace_id);
+CREATE VIEW IF NOT EXISTS v_automations AS
+SELECT id, name, preset, enabled, paused_reason, trigger, conditions, action, scope, mode,
+       delay_s, max_per_day, cooldown_s, model_jobs_per_day, grant_digest, granted_by, granted_at,
+       CASE WHEN mode = 'run' AND action IN ('upgrade', 'start_fix', 'pin_mcp') AND granted_at IS NOT NULL
+            THEN granted_at + 7776000.0
+            ELSE NULL END AS grant_expires_at,
+       created, updated
+FROM automations;
+CREATE VIEW IF NOT EXISTS v_automation_firings AS
+SELECT id, automation_id, automation_name, event_kind, event_ref, dedup_key, depth, status,
+       due, deadline, input, trace_id, reason, decided_by, decided, started_at, created, finished
+FROM automation_firings;
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline", fn=_baseline),
     Migration(2, "tracing", fn=_tracing),
@@ -702,6 +763,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(12, "triage", sql=TRIAGE),
     Migration(13, "triage_rule_disputes", sql=TRIAGE_RULE_DISPUTES),
     Migration(14, "triage_last_error", fn=_triage_last_error),
+    Migration(15, "automations", sql=AUTOMATIONS),
 )
 
 

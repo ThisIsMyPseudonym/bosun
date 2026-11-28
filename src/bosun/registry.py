@@ -198,7 +198,8 @@ class UsageIn(_In):
 class QueryIn(_In):
     sql: str = Field(min_length=1, max_length=4000,
                      description="One SELECT over the views and tables in docs/data-model.md (start with v_current_items, "
-                                 "v_item_history, v_open_vulns, v_failures, v_triage, v_llm_spend, v_ai_spend, v_actions)")
+                                 "v_item_history, v_open_vulns, v_failures, v_triage, v_llm_spend, v_ai_spend, v_actions, "
+                                 "v_automations, v_automation_firings)")
     limit: int = Field(500, ge=1, le=5000, description="Most rows to return")
 
 
@@ -503,6 +504,7 @@ AGENT_TIER_WORDS = {Risk.SYSTEM: "quit and reopen apps and open system updaters"
 ASSISTANT = "assistant"  # the built-in Ask Bosun assistant (assistant.py)
 TRIAGE = "triage"  # read-only error triage worker (triage/model.py)
 TRIAGE_ALLOWED_ACTIONS = frozenset({"diagnose", "get_trace", "get_triage", "get_runbook"})
+AUTOMATION_PREFIX = "automation:"
 
 # What `bosun demo` refuses, besides everything that installs, upgrades, pins, fixes, quits, opens or restores
 # (Risk.INSTALL and above): the small actions that would look at, or run something on, the real computer.
@@ -514,6 +516,17 @@ DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "triage"
 
 def is_agent(actor: Actor) -> bool:
     return actor.startswith("agent:")
+
+
+def is_automation(actor: Actor) -> bool:
+    return actor.startswith(AUTOMATION_PREFIX)
+
+
+def automation_id(actor: Actor) -> int | None:
+    if not is_automation(actor):
+        return None
+    raw = actor.removeprefix(AUTOMATION_PREFIX)
+    return int(raw) if raw.isdigit() else None
 
 
 class Granted(Protocol):
@@ -549,6 +562,10 @@ class ActionContext:
     approval: str | None = None
     # For actor == TRIAGE: the single failed run's trace_id bound to the per-job triage token.
     triage_trace_id: str | None = None
+    # For actor == automation:<id>: the firing row id (used to verify "failed item / failed project" scopes).
+    firing_id: int | None = None
+    # Optional deterministic clock for in-process callers (e.g. Automator.tick(now=...)).
+    now: float | None = None
 
 
 Handler = Callable[[ActionContext, Any], Any]
@@ -621,9 +638,64 @@ class Actions:
                 raise Forbidden(f"{spec.name} was not run: the assistant needs the user's approval in the Ask Bosun "
                                 "panel for exactly this action and input, and each approval covers one call")
             return granted
+        if is_automation(ctx.actor):
+            return self._permit_automation(spec, ctx, body)
         if ctx.actor in ("autopilot", "schedule"):
             return None
         raise Forbidden(f"{spec.name} is refused for unknown actor {ctx.actor!r}")
+
+    def _verify_automation_rule(self, action_name: str, ctx: ActionContext) -> tuple[int, Any]:
+        from .automations import store as astore
+        from .automations.schema import ALLOWLIST, grant_digest, grant_digest_matches, grant_expired
+
+        if self.store is None:
+            raise Forbidden(f"{action_name} is refused for automation: no store")
+        if astore.is_paused(self.store):
+            raise Forbidden(f"{action_name} is refused: all automations are paused")
+        aid = automation_id(ctx.actor)
+        row = astore.get(self.store, aid) if aid is not None else None
+        if aid is None or row is None:
+            raise Forbidden(f"{action_name} is refused for unknown automation {ctx.actor!r}")
+        if not row["enabled"] or row["paused_reason"]:
+            raise Forbidden(f"{action_name} is refused: automation {aid} is disabled or paused")
+        try:
+            defn = astore.parse_def(row)
+        except (ValueError, ValidationError):
+            raise Forbidden(f"{action_name} is refused: automation {aid} has an invalid definition") from None
+        if not grant_digest_matches(row["grant_digest"], grant_digest(defn)):
+            raise Forbidden(f"{action_name} is refused: automation {aid} grant does not match its current definition")
+        if grant_expired(defn.action, defn.mode, row["granted_at"], now=ctx.now):
+            raise Forbidden(f"{action_name} is refused: automation {aid} grant has expired; renew it in the dashboard")
+        if action_name not in ALLOWLIST or action_name != defn.action:
+            raise Forbidden(f"{action_name} is not allowed for automation {aid}")
+        return aid, defn
+
+    def permit_automation_notify(self, ctx: ActionContext) -> None:
+        """Enforce allow-list, grant digest, expiry, pause, and enabled checks for internal `notify` automations."""
+        from .automations.schema import NotifyScope
+
+        if self.demo:
+            raise Forbidden("notify is refused in demo mode")
+        aid, defn = self._verify_automation_rule("notify", ctx)
+        if defn.mode != "run" or not isinstance(defn.scope, NotifyScope):
+            raise Forbidden(f"notify is refused: invalid scope or mode for automation {aid}")
+
+    def _permit_automation(self, spec: ActionSpec, ctx: ActionContext, body: BaseModel | None) -> Granted | None:
+        from .automations import match as amatch
+
+        aid, defn = self._verify_automation_rule(spec.name, ctx)
+        assert self.store is not None
+        if spec.user_only or spec.risk >= Risk.EXTERNAL:
+            raise Forbidden(f"{spec.name} is not allowed for automation {aid}")
+        if body is None or not amatch.input_in_scope(self.store, defn, body, firing_id=ctx.firing_id):
+            raise Forbidden(f"{spec.name} is refused: input is outside automation {aid}'s granted scope")
+        if spec.risk == Risk.SYSTEM or defn.mode == "ask":
+            granted = (self.approvals.consume(ctx.approval, spec.name, body)
+                       if self.approvals is not None and ctx.approval else None)
+            if granted is None:
+                raise Forbidden(f"{spec.name} was not run: automation {aid} requires your approval in the dashboard")
+            return granted
+        return None
 
     def run(self, name: str, body: BaseModel, ctx: ActionContext) -> Any:
         handler = self._handlers.get(name)

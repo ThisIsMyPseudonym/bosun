@@ -469,12 +469,14 @@ class Upgrader:
     def _still_autopilots(self, job: dict, listed: dict[str, dict]) -> bool:
         """A job parked for Autopilot, an agent or the assistant (the app was open) is for the version listed
         then. It runs only if that is still what the latest check lists, and that version's waiting period is over."""
-        from . import attention, autopilot  # late: autopilot imports this module
+        from . import attention, autopilot, registry  # late: autopilot imports this module
+        from .automations import schema as aschema, store as astore
         from .serialize import item_from_dict
         now_listed = listed.get(job["item_key"])
         if now_listed is None or autopilot.held_until(now_listed) is not None:
             return False
-        if job.get("actor") == AUTOPILOT:
+        actor = str(job.get("actor") or "")
+        if actor == AUTOPILOT:
             # Autopilot's own job also needs the person's settings to still say yes: switched off, snoozed,
             # ignored or put in hands-off since it was parked all mean "leave it".
             prefs = self.store.prefs()
@@ -484,6 +486,19 @@ class Upgrader:
                         and attention.autopilot_may(now_listed, prefs)
                         and job["item_key"] not in skip)
             if not opted_in and (not autopilot.is_on(self.store) or not autopilot.eligible(now_listed, prefs, skip)):
+                return False
+        elif registry.is_automation(actor):
+            if astore.is_paused(self.store):
+                return False
+            aid = registry.automation_id(actor)
+            row = astore.get(self.store, aid) if aid is not None else None
+            if row is None or not row["enabled"] or row["paused_reason"]:
+                return False
+            if aschema.grant_expired(row["action"], row["mode"], row["granted_at"]):
+                return False
+            prefs = self.store.prefs()
+            skip = autopilot.hands_off(self.store, list(listed.values()))
+            if not autopilot.eligible(now_listed, prefs, skip):
                 return False
         try:
             return self._argv(item_from_dict(now_listed), actor=job.get("actor") or AUTOPILOT) == job["argv"]

@@ -26,6 +26,7 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 RESULT_CHARS = 30_000  # of one tool result given to the model: a panel answer shouldn't cost a whole refresh's trace
+GUIDE_RESULT_CHARS = 60_000  # trusted repo docs returned by read_guide (data-model.md, runbooks)
 STORED_CHARS = 4_000  # of a tool result kept in messages
 SHOWN_CHARS = 1_500  # of a tool result sent to the panel
 # Cards one conversation may have waiting over MCP. Each waits on a server thread, so a model told to fire many
@@ -142,7 +143,8 @@ class ToolRunner:
         self.store.update_message(row, outcome=outcome, text=text, max_chars=STORED_CHARS)
         turn.emit("tool_result", id=row, ok=ok, outcome=outcome, trace_id=ctx.trace_id if changes else "",
                   result=text[:SHOWN_CHARS])
-        return mcp_server.frame(name, ok, payload, ctx.trace_id if changes else None, limit=RESULT_CHARS)
+        limit = GUIDE_RESULT_CHARS if name == "read_guide" else RESULT_CHARS
+        return mcp_server.frame(name, ok, payload, ctx.trace_id if changes else None, limit=limit)
 
     def run_mcp_action(self, grant: auth.TokenGrant, turn: Turn | None, spec: ActionSpec, body: BaseModel,
                        token: str) -> tuple[Any, str]:

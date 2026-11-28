@@ -51,7 +51,8 @@ from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPol
                        TraceIn, TriageFeedbackIn, TriageIn, TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
-from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
+from .providers import accounts as ai_accounts, router as ai_router, routing as ai_routing, usage as ai_usage
+from .automations import engine as aengine, store as astore
 from .triage import model as tmodel, settings as tsettings, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
@@ -115,6 +116,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     threading.Thread(target=notifier.run, daemon=True, name="notify").start()
     running = selfupdate.version()
     assistant: Assistant | None = None
+    automator: aengine.Automator | None = None
     if s.self_update:  # once the daily refresh pulls new code, move onto it when nothing is running
         def _not_started(why: str) -> None:
             store.set_setting(selfupdate.STATUS, json.dumps({"status": "failed", "detail": why, "at": time.time(),
@@ -122,7 +124,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
 
         def _selfupdate_busy() -> bool:
             return (refresh_state["running"] or store.busy() or selfupdate.is_pending(store)
-                    or (assistant is not None and assistant.busy()))
+                    or (assistant is not None and assistant.busy())
+                    or (automator is not None and automator.busy()))
 
         threading.Thread(target=selfupdate.restart_when_idle, args=(_selfupdate_busy,),
                          kwargs={"report": _not_started},
@@ -135,6 +138,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     reset = tstore.reset_running(store)
     if reset:
         log.info("returned %d interrupted triage rows to queued", reset)
+    if not store.read_only:
+        recovered = astore.recover_running(store)
+        if recovered:
+            log.info("recovered %d interrupted automation firings", recovered)
     fixer = Fixer(store, s)
     explainer = Explainer(store, s.model, s.claude_sandbox)
     allowed_hosts = {f"127.0.0.1:{s.port}", f"localhost:{s.port}"}
@@ -406,7 +413,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
 
     def _run_relaunch(app_id: str, job_id: int) -> None:
         job = store.job(job_id) or {}
-        with trace.run("relaunch", subject=app_id, trace_id=job.get("trace_id") or None) as run:
+        with trace.run("relaunch", subject=app_id, actor=job.get("actor") or None,
+                       trace_id=job.get("trace_id") or None, parent=job.get("parent_trace", "")) as run:
             try:
                 ok, message = relaunch.relaunch(app_id)
             except Exception as exc:
@@ -429,6 +437,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     app.state.triage_tokens, app.state.triager = triage_tokens, triager
     if not s.demo and not store.read_only:
         threading.Thread(target=triager.run, daemon=True, name="triage").start()
+    automator = aengine.Automator(store, s, actions)
+    app.state.automator = automator
+    if not s.demo and not store.read_only:
+        threading.Thread(target=automator.run, daemon=True, name="automations").start()
     app.state.terminals, app.state.upgrader = terminals, upgrader
     if store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")
@@ -684,8 +696,16 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         found = _items_by_key().get(body.keys[0])
         if found is None:
             raise NotFound("Unknown item; refresh and try again")
+        is_auto = registry.is_automation(ctx.actor)
         try:
-            return explainer.explain(item_from_dict(found))
+            when = ctx.now
+            clock = (lambda: when) if when is not None else time.time
+            return explainer.explain(item_from_dict(found), background=is_auto, now=clock)
+        except ai_router.QuotaHeld as exc:
+            if is_auto:
+                raise
+            log.warning("explain failed for %s: %s", body.keys[0], exc)
+            raise Failed(f"Assessment failed: {exc}")
         except RuntimeError as exc:
             log.warning("explain failed for %s: %s", body.keys[0], exc)
             raise Failed(f"Assessment failed: {exc}")
@@ -897,6 +917,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         keys, held = list(body.keys), []
         if ctx.actor != "user":
             yours = goback.left_alone(store, [known[k] for k in body.keys])
+            auto_actor = registry.is_automation(ctx.actor)
+            prefs = store.prefs() if auto_actor else {}
+            skip = autopilot.hands_off(store, list(known.values())) if auto_actor else {}
             for k in body.keys:
                 until = autopilot.held_until(known[k])
                 if k in yours:  # an earlier copy was put back: installing the newer one again is the person's call
@@ -909,6 +932,14 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                     held.append({"key": k, "reason": f"This release is new: Bosun installs nothing unattended until it has "
                                  f"been on offer {autopilot.wait_label(known[k])} (about {time.strftime('%A %d %B', time.localtime(until))}). "
                                  "The user can update it now from the dashboard."})
+                elif auto_actor and k in skip:
+                    keys.remove(k)
+                    held.append({"key": k, "reason": f"Left to you: {skip[k]}"})
+                elif auto_actor and not autopilot.qualifies(known[k], prefs, skip):
+                    keys.remove(k)
+                    held.append({"key": k, "reason": "Does not qualify for unattended automation upgrades "
+                                 "(Autopilot rules apply: no major jumps, drivers/hardware, self-updating apps, "
+                                 "or ignored/snoozed items)."})
         # a password window needs you at the machine: only a person clicking in the dashboard gets one
         out = upgrader.start_many([item_from_dict(known[k]) for k in keys], allow_password=ctx.actor == "user",
                                   actor=None if ctx.actor == "user" else ctx.actor)
@@ -921,7 +952,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                 for item, job_id in zip(items, job_ids):
                     store.mark_job(job_id, "running")
                     job = store.job(job_id) or {}
-                    with trace.run("pin", subject=item["key"], trace_id=job.get("trace_id") or None) as run:
+                    with trace.run("pin", subject=item["key"], actor=job.get("actor") or None,
+                                   trace_id=job.get("trace_id") or None, parent=job.get("parent_trace", "")) as run:
                         try:
                             out = mcp_pin.pin(item, client, backed_up)
                             store.finish_job(job_id, "succeeded", out)
@@ -940,14 +972,39 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     def pin_mcp(ctx: ActionContext, body: PinIn):
         """Pin unpinned MCP servers to the newest version that has been out three days (Bosun edits the config; see mcp_pin)."""
         known = _items_by_key()
-        items = [known[k] for k in dict.fromkeys(body.keys)
-                 if k in known and known[k]["source"] == "mcp" and known[k].get("fix_kind") == "pin"
-                 and not store.active_job_for(k)]
+        pinnable = [known[k] for k in dict.fromkeys(body.keys)
+                    if k in known and known[k]["source"] == "mcp" and known[k].get("fix_kind") == "pin"
+                    and not store.active_job_for(k)]
+        items, held = list(pinnable), []
+        auto_actor = registry.is_automation(ctx.actor)
+        if auto_actor and pinnable:
+            prefs = store.prefs()
+            skip = autopilot.hands_off(store, list(known.values()))
+            items = []
+            for it in pinnable:
+                k = it["key"]
+                until = (None if (not it.get("available") and "offered" not in it)
+                         else autopilot.held_until(it, ctx.now))
+                if k in skip:
+                    held.append({"key": k, "reason": f"Left to you: {skip[k]}"})
+                elif not attention.autopilot_may(it, prefs, ctx.now):
+                    held.append({"key": k, "reason": "Ignored or snoozed; automations leave it to you."})
+                elif until is not None:
+                    held.append({"key": k, "reason": f"This release is new: Bosun installs nothing unattended until it "
+                                 f"has been on offer {autopilot.wait_label(it)}."})
+                else:
+                    items.append(it)
         if not items:
+            if auto_actor and held:
+                return {"queued": [], "skipped": held}
             raise Invalid("Nothing here Bosun can pin; refresh and try again")
-        job_ids = [store.create_job(i["key"], ["pin", i["package_id"]]) for i in items]
+        actor = None if ctx.actor == "user" else ctx.actor
+        job_ids = [store.create_job(i["key"], ["pin", i["package_id"]], actor=actor) for i in items]
         trace.thread(_run_pins, (items, job_ids), name="mcp-pin")
-        return {"queued": job_ids, "skipped": [k for k in body.keys if k not in {i["key"] for i in items}]}
+        queued_keys = {i["key"] for i in items}
+        held_keys = {h["key"] for h in held}
+        other_skipped = [k for k in body.keys if k not in queued_keys and k not in held_keys]
+        return {"queued": job_ids, "skipped": [*other_skipped, *held]}
 
     @actions.bind("start_fix")
     def fix(ctx: ActionContext, body: FixIn):
@@ -956,7 +1013,12 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if missing:
             raise NotFound("Unknown item; refresh and try again")
         try:
-            return {"fix": fixer.start([item_from_dict(known[k]) for k in body.keys])}
+            when = ctx.now
+            clock = (lambda: when) if when is not None else None
+            return {"fix": fixer.start([item_from_dict(known[k]) for k in body.keys],
+                                       background=registry.is_automation(ctx.actor), now=clock)}
+        except ai_router.QuotaHeld:
+            raise
         except ValueError as exc:
             raise Invalid(str(exc))
         except RuntimeError as exc:

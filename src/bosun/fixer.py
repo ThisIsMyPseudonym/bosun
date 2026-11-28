@@ -20,6 +20,7 @@ import re
 import shutil
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -29,6 +30,7 @@ from . import machine, proc, trace
 from .config import Settings
 from .models import Item, Source
 from .providers import accounts, catalog, contract, jail, router, routing, run as ai_run
+from .providers.router import QuotaHeld
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -320,7 +322,7 @@ class Fixer:
         self._claude_override = claude
         self.claude = claude if claude is not None else shutil.which("claude")
         self.budget = budget_usd
-        self._q: queue.Queue[tuple[int, list[Item]]] = queue.Queue()
+        self._q: queue.Queue[tuple[int, list[Item], bool]] = queue.Queue()
         self._worker: threading.Thread | None = None
         self._lock = threading.Lock()
 
@@ -338,14 +340,20 @@ class Fixer:
             patched.insert(0, accounts.default("claude", self._claude_override))
         return tuple(patched)
 
-    def _choose_login(self) -> tuple[accounts.Login | None, str]:
-        ctx = routing.context(self.store, include_fixer=True, logins=self._logins())
-        route = router.plan("fix", ctx, clicked=True)
+    def _choose_login(
+        self, *, background: bool = False, now: Callable[[], float] | None = None,
+    ) -> tuple[accounts.Login | None, str]:
+        when = now() if now is not None else None
+        ctx = routing.context(self.store, include_fixer=True, logins=self._logins(), now=when)
+        route = router.plan("fix", ctx, clicked=not background, force_background=background)
         if not route.candidates:
             if route.skipped and all(s.bucket == "claude" and s.reason == "not_installed" for s in route.skipped):
                 return None, "Claude Code CLI ('claude') not found on PATH"
             if route.skipped:
-                return None, "; ".join(f"{s.bucket}: {s.detail}" for s in route.skipped)
+                detail = "; ".join(f"{s.bucket}: {s.detail}" for s in route.skipped)
+                if background and router.is_quota_held(route.skipped):
+                    raise QuotaHeld(router.quota_held_reset(route.skipped), detail)
+                return None, detail
             return None, "Claude Code CLI ('claude') not found on PATH"
         login = route.candidates[0].login
         if login.provider == "claude":
@@ -383,7 +391,9 @@ class Fixer:
         err = None if res.report else f"[{rel or '.'}] {(res.error or res.result.stderr or res.result.stdout)[-800:]}"
         return res.report, float(res.cost_usd), list(res.denied), err
 
-    def start(self, items: Item | list[Item]) -> int:
+    def start(
+        self, items: Item | list[Item], *, background: bool = False, now: Callable[[], float] | None = None,
+    ) -> int:
         """Queue one fix run. Several items must belong to the same project: one branch, one commit."""
         items = [items] if isinstance(items, Item) else list(items)
         if not items:
@@ -395,7 +405,7 @@ class Fixer:
         items = [i for i in items if i.available or i.malicious]
         if not items:
             raise ValueError("No fixed version is published yet")
-        _, err = self._choose_login()
+        _, err = self._choose_login(background=background, now=now)
         if err:
             raise ValueError(err)
         with self._lock:
@@ -404,7 +414,7 @@ class Fixer:
                 raise RuntimeError(f"A fix is already queued or running for: {', '.join(busy)}")
             key = items[0].key if len(items) == 1 else f"batch:{items[0].project}"
             fix_id = self.store.create_fix(key, items[0].project, keys=[i.key for i in items])
-            self._q.put((fix_id, items))
+            self._q.put((fix_id, items, background))
             if self._worker is None or not self._worker.is_alive():
                 self._worker = threading.Thread(target=self._drain, daemon=True, name="fix-worker")
                 self._worker.start()
@@ -413,7 +423,7 @@ class Fixer:
     def _drain(self) -> None:
         while True:
             try:
-                fix_id, items = self._q.get(timeout=5)
+                fix_id, items, background = self._q.get(timeout=5)
             except queue.Empty:
                 with self._lock:
                     if not self._q.empty():
@@ -425,7 +435,7 @@ class Fixer:
                 with trace.run("fix", subject=fix.get("project") or "", actor=fix.get("actor") or None,
                                trace_id=fix.get("trace_id") or None, parent=fix.get("parent_trace", ""),
                                fix=fix_id, items=[i.key for i in items]) as run:
-                    self.run(fix_id, items)
+                    self.run(fix_id, items, background=background)
                     done = self.store.fix(fix_id) or {}
                     run.note(f"fix {fix_id}: {done.get('status')}")
                     if done.get("status") in ("failed", "needs_human", "partial"):
@@ -435,9 +445,12 @@ class Fixer:
                 log.exception("fix %s crashed", fix_id)
                 self.store.update_fix(fix_id, status="failed", result={"error": f"internal error: {exc}"})
 
-    def run(self, fix_id: int, items: Item | list[Item]) -> None:
+    def run(self, fix_id: int, items: Item | list[Item], *, background: bool = False) -> None:
         items = [items] if isinstance(items, Item) else list(items)
-        login, err = self._choose_login()
+        try:
+            login, err = self._choose_login(background=background)
+        except QuotaHeld as exc:
+            login, err = None, exc.reason
         if err or login is None:
             self.store.update_fix(fix_id, status="failed", result={"error": err or "No AI CLI available"})
             return

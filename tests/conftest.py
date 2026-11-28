@@ -30,10 +30,12 @@ import pytest  # noqa: E402
 SESSION_KEY = "k" * 48
 
 from bosun import auth as _auth  # noqa: E402
+from bosun.automations import engine as _aengine  # noqa: E402
 from bosun.triage import worker as _tworker  # noqa: E402
 
 REAL_LOAD_KEY = _auth.load_key  # for the tests of the key file itself
 REAL_TRIAGER_RUN = _tworker.Triager.run  # for tests of the background triage loop itself
+REAL_AUTOMATOR_RUN = _aengine.Automator.run  # for tests of the background automations loop itself
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +83,12 @@ def _no_notification_loop(monkeypatch):
 def _no_triage_loop(monkeypatch):
     """Every dashboard a test builds would start the background triage loop; tests drive Triager.tick directly."""
     monkeypatch.setattr("bosun.triage.worker.Triager.run", lambda self, interval=0: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_automations_loop(monkeypatch):
+    """Every dashboard a test builds would start the background automations loop; tests drive Automator.tick directly."""
+    monkeypatch.setattr("bosun.automations.engine.Automator.run", lambda self, interval=0: None)
 
 
 @pytest.fixture(autouse=True)
