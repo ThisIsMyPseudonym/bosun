@@ -16,7 +16,7 @@ from ..config import Settings
 from ..providers.router import QuotaHeld
 from ..registry import ActionContext, ActionError, Actions, Forbidden
 from ..store import Store
-from . import chain, digest, match as amatch, merge as amerge, offers, recheck, schedule, store as astore, verdict as averdict
+from . import chain, digest, in_app, match as amatch, merge as amerge, offers, recheck, schedule, store as astore, verdict as averdict
 from .schema import (MODEL_ACTIONS, AutomationDef, RefreshConditions, ScheduleConditions, ScheduleTrigger,
                      grant_digest, grant_digest_matches, grant_expired, has_unset_project, is_install_action)
 
@@ -59,11 +59,12 @@ def _skip_summary(skipped: Any) -> str:
 class Automator:
     """Single-writer automation engine running in the dashboard process only."""
 
-    def __init__(self, store: Store, settings: Settings, actions: Actions, *, tz: tzinfo | None = None) -> None:
-        self.store = store
-        self.settings = settings
-        self.actions = actions
-        self.tz = tz
+    def __init__(
+        self, store: Store, settings: Settings, actions: Actions,
+        *, tz: tzinfo | None = None, in_app_reader: in_app.InAppUpdateReader = in_app.empty_reader,
+    ) -> None:
+        self.store, self.settings, self.actions, self.tz = store, settings, actions, tz
+        self.in_app_reader = in_app_reader
         self._tick_lock = threading.Lock()
         self._busy = False
 
@@ -101,6 +102,7 @@ class Automator:
             self._scan_refreshes(rules, when)
             + self._scan_schedules(rules, when)
             + averdict.scan_verdicts(self.store, rules, when)
+            + in_app.scan_in_app_updates(self.store, rules, when, self.in_app_reader)
         )
         ran, skipped, waiting, failed, offered = self._execute_due(when)
         return TickReport(scanned=scanned, ran=ran, skipped=skipped, waiting=waiting,

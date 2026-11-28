@@ -10,7 +10,10 @@ from ..store import Store
 from . import store as astore
 from .schema import (
     UNSET_PROJECT,
+    AppActionScope,
     AutomationDef,
+    InAppUpdateConditions,
+    InAppUpdateTrigger,
     NotifyScope,
     RefreshConditions,
     RefreshTrigger,
@@ -80,6 +83,18 @@ PRESETS: tuple[PresetSpec, ...] = (
             cooldown_s=900,
         ),
         summary="When an upgrade fails because something was busy or locked, retry that item in 15 minutes.",
+    ),
+    PresetSpec(
+        slug="offer_in_app_updates",
+        definition=AutomationDef(
+            name="Offer in-app updates",
+            trigger=InAppUpdateTrigger(kind="in_app_update"),
+            conditions=InAppUpdateConditions(apps=()),
+            action="open_app",
+            scope=AppActionScope(mode="trigger_app"),
+            mode="ask",
+        ),
+        summary="When an app has an in-app update waiting, offer to open it so its updater can run (always asks first).",
     ),
 )
 

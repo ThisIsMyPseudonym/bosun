@@ -117,7 +117,8 @@ def _action_phrase(defn: AutomationDef, projects: dict[str, str]) -> str:
     if isinstance(scope, PinMcpScope):
         return f"{verb}pin {len(scope.keys)} MCP server(s)"
     assert isinstance(scope, AppActionScope)
-    return f"offer to {defn.action.replace('_', ' ')} {scope.app}"
+    target = "that app" if scope.mode == "trigger_app" else scope.app
+    return f"offer to {defn.action.replace('_', ' ')} {target}"
 
 
 def describe_sentence(defn: AutomationDef, projects: dict[str, str]) -> str:
@@ -200,19 +201,12 @@ def serialize_firing(row: dict[str, Any]) -> dict[str, Any]:
 
 def list_automations(store: Store, *, demo: bool = False, now: float | None = None) -> dict[str, Any]:
     from . import offer_decide
-
     when = time.time() if now is None else now
     projects = _snapshot_projects(store)
     proj_map = {p["key"]: p["name"] for p in projects}
     items = [serialize_automation(store, r, projects=proj_map, now=when) for r in astore.list_all(store)]
-    offers = offer_decide.waiting_offers(store, now=when, limit=50)
-    return {
-        "paused": astore.is_paused(store),
-        "demo": demo,
-        "automations": items,
-        "projects": projects,
-        "waiting_offers": offers,
-    }
+    return {"paused": astore.is_paused(store), "demo": demo, "automations": items,
+            "projects": projects, "waiting_offers": offer_decide.waiting_offers(store, now=when, limit=50)}
 
 
 def list_firings(
