@@ -696,12 +696,16 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         found = _items_by_key().get(body.keys[0])
         if found is None:
             raise NotFound("Unknown item; refresh and try again")
+        is_auto = registry.is_automation(ctx.actor)
         try:
             when = ctx.now
             clock = (lambda: when) if when is not None else time.time
-            return explainer.explain(item_from_dict(found), background=registry.is_automation(ctx.actor), now=clock)
-        except ai_router.QuotaHeld:
-            raise
+            return explainer.explain(item_from_dict(found), background=is_auto, now=clock)
+        except ai_router.QuotaHeld as exc:
+            if is_auto:
+                raise
+            log.warning("explain failed for %s: %s", body.keys[0], exc)
+            raise Failed(f"Assessment failed: {exc}")
         except RuntimeError as exc:
             log.warning("explain failed for %s: %s", body.keys[0], exc)
             raise Failed(f"Assessment failed: {exc}")

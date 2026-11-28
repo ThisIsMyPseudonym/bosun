@@ -122,7 +122,7 @@ class Explainer:
             now=now, source=item.source.value,
         )
         if not out.ok or out.login is None:
-            if out.quota_held:
+            if background and out.quota_held:
                 raise router.QuotaHeld(out.earliest_reset, out.reason)
             raise RuntimeError(out.reason)
         result = out.payload.model_dump()
