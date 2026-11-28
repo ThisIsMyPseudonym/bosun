@@ -873,6 +873,38 @@ def cmd_usage(args, s) -> int:
     return 0
 
 
+def cmd_automations(args, s) -> int:
+    """Inspect or toggle the owner-only automations kill switch (`status`, `pause`, `resume`)."""
+    from .automations import store as astore
+
+    action = args.action
+    if action == "status":
+        try:
+            with Store(s.db_path, read_only=True) as store:
+                paused = astore.is_paused(store)
+                rows = astore.list_all(store)
+        except FileNotFoundError:
+            paused, rows = False, []
+        enabled = sum(1 for r in rows if r["enabled"])
+        if args.json:
+            print(json.dumps({"paused": paused, "enabled": enabled, "total": len(rows)}, indent=2))
+        else:
+            state = "paused" if paused else "active"
+            extra = " (no database yet)" if not s.db_path.exists() else f" ({enabled} of {len(rows)} enabled)"
+            print(f"Automations: {state}{extra}.")
+        return 0
+
+    pause = action == "pause"
+    with Store(s.db_path) as store:
+        astore.set_paused(store, pause)
+    if args.json:
+        print(json.dumps({"paused": pause}, indent=2))
+    else:
+        print("Automations paused. Waiting firings stay frozen until you run `bosun automations resume`."
+              if pause else "Automations resumed.")
+    return 0
+
+
 _READ_ONLY_CMDS = frozenset({"actions", "doctor", "query", "runs", "trace", "usage", "diagnose", "status"})
 _NO_DB_LOG_CMDS = frozenset({"open", "install-launcher", "mcp"})
 
@@ -937,6 +969,10 @@ def main(argv: list[str] | None = None) -> int:
     dg.add_argument("id", nargs="?", help="trace id or prefix (default: the latest run that failed)")
     dg.add_argument("--out", help="where to write the zip")
     dg.add_argument("--json", action="store_true", help="print the bundle instead of writing a zip")
+    au = sub.add_parser("automations", help="check or toggle the owner-only automations kill switch")
+    au.add_argument("action", nargs="?", choices=("status", "pause", "resume"), default="status",
+                    help="status (read-only, default), pause (freeze all automations), or resume")
+    au.add_argument("--json", action="store_true", help="machine-readable JSON")
     args = p.parse_args(argv)
     if args.cmd == "serve":  # before the settings, the log and the database: any of them may be what broke
         args.on_probation = startguard.guard_serve()
@@ -960,6 +996,7 @@ def main(argv: list[str] | None = None) -> int:
     read_only = (
         (args.cmd in _READ_ONLY_CMDS and not (args.cmd == "doctor" and getattr(args, "providers", False)))
         or (args.cmd == "db" and not args.migrate)
+        or (args.cmd == "automations" and args.action == "status")
     )
     embedded_mcp = args.cmd == "mcp" and args.mcp_cmd is None and getattr(args, "as_role", "agent") in ("assistant", "triage")
     # Read-only commands must never create directories, write logs, or open/migrate the database.
@@ -973,7 +1010,8 @@ def main(argv: list[str] | None = None) -> int:
                "self-update": cmd_self_update, "serve": cmd_serve, "demo": cmd_demo, "doctor": cmd_doctor,
                "open": cmd_open, "install-tasks": cmd_install_tasks, "install-launcher": cmd_install_launcher,
                "mcp": cmd_mcp, "actions": cmd_actions, "db": cmd_db, "query": cmd_query, "runs": cmd_runs,
-               "trace": cmd_trace, "diagnose": cmd_diagnose, "usage": cmd_usage}[args.cmd]
+               "trace": cmd_trace, "diagnose": cmd_diagnose, "usage": cmd_usage,
+               "automations": cmd_automations}[args.cmd]
     from .migrations import MigrationRefused
     try:
         code = handler(args, s)
