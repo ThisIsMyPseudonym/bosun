@@ -570,3 +570,71 @@ def test_refresh_cursor_staleness_window_and_quota_deadline(tmp_path, monkeypatc
         trace.configure(None)
 
 
+def test_engine_rechecks_pause_and_rule_mid_tick_and_permits_notify(tmp_path):
+    from bosun.registry import ActionContext, Forbidden
+
+    st = Store(tmp_path / "bosun.db")
+    now = 950_000.0
+    st.save_snapshot([], [])
+    app = create_app(load_settings(), st, "t" * 32)
+    eng = Automator(st, load_settings(), app.state.actions, tz=CHI)
+
+    dig_def = AutomationDef(
+        name="Digest", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="notify", scope=NotifyScope(digest="what_changed"), mode="run", cooldown_s=0,
+    )
+    da = astore.save(st, dig_def, enabled=True, grant_digest=grant_digest(dig_def), granted_by="user", now=now)
+
+    # 1. permit_automation_notify enforces allow-list/action match, grant digest, pause, and enabled state
+    ctx = ActionContext(actor=f"automation:{da}", surface="automation", now=now)
+    app.state.actions.permit_automation_notify(ctx)
+    astore.set_paused(st, True)
+    with pytest.raises(Forbidden):
+        app.state.actions.permit_automation_notify(ctx)
+    astore.set_paused(st, False)
+
+    ref_def = AutomationDef(
+        name="Trigger action", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="refresh", scope=RefreshScope(only=("brew",)), mode="run", cooldown_s=0,
+    )
+    ra = astore.save(st, ref_def, enabled=True, grant_digest=grant_digest(ref_def), granted_by="user", now=now)
+    with pytest.raises(Forbidden):  # non-notify rule refused by permit_automation_notify
+        app.state.actions.permit_automation_notify(ActionContext(actor=f"automation:{ra}", surface="automation", now=now))
+
+    # 2. Mid-tick kill switch freezes subsequent notify firing in the same tick
+    @app.state.actions.bind("refresh")
+    def pause_mid_tick(ctx, body):
+        astore.set_paused(st, True)
+        return {"started": True}
+
+    f1 = astore.insert_firing(st, ra, ref_def.name, "refresh", "s:1", "mid:1", status="scheduled", due=now, now=now)
+    f2 = astore.insert_firing(
+        st, da, dig_def.name, "refresh", "s:1", "mid:2", status="scheduled", due=now + 1,
+        input_data={"snapshot_id": 1, "prev_snapshot_id": None}, now=now,
+    )
+    assert f1 is not None and f2 is not None
+    rep = eng.tick(now=now + 10)
+    assert rep.ran == 1
+    assert astore.get_firing(st, f1)["status"] == "done"
+    assert astore.get_firing(st, f2)["status"] == "scheduled"  # frozen by mid-tick kill switch
+    astore.set_paused(st, False)
+
+    # 3. Mid-tick rule disable skips subsequent notify firing in the same tick
+    @app.state.actions.bind("refresh")
+    def disable_mid_tick(ctx, body):
+        astore.set_enabled(st, da, False, now=now + 20)
+        return {"started": True}
+
+    f3 = astore.insert_firing(st, ra, ref_def.name, "refresh", "s:2", "mid:3", status="scheduled", due=now + 15, now=now)
+    f4 = astore.insert_firing(
+        st, da, dig_def.name, "refresh", "s:2", "mid:4", status="scheduled", due=now + 16,
+        input_data={"snapshot_id": 1, "prev_snapshot_id": None}, now=now,
+    )
+    assert f3 is not None and f4 is not None
+    astore.set_firing(st, f2, status="skipped", reason="done test", now=now + 15)
+    rep2 = eng.tick(now=now + 20)
+    assert rep2.ran == 1
+    assert astore.get_firing(st, f3)["status"] == "done"
+    assert astore.get_firing(st, f4)["status"] == "skipped"
+
+

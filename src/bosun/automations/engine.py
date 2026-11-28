@@ -122,7 +122,7 @@ class Automator:
             return TickReport(paused=True)
         rules = self._active_rules()
         scanned = self._scan_refreshes(rules, when) + self._scan_schedules(rules, when)
-        ran, skipped, waiting, failed = self._execute_due(rules, when)
+        ran, skipped, waiting, failed = self._execute_due(when)
         return TickReport(scanned=scanned, ran=ran, skipped=skipped, waiting=waiting, failed=failed)
 
     def _active_rules(self) -> dict[int, tuple[dict[str, Any], AutomationDef]]:
@@ -249,13 +249,13 @@ class Automator:
             return ("skipped", f"daily model job limit reached ({defn.model_jobs_per_day}/day)")
         return None
 
-    def _execute_due(
-        self, rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float,
-    ) -> tuple[int, int, int, int]:
+    def _execute_due(self, when: float) -> tuple[int, int, int, int]:
         ran = waiting = failed = 0
         skipped = self._expire_past_deadline(when)
         for firing in astore.due_firings(self.store, now=when, limit=MAX_PER_TICK):
-            outcome = self._run_isolated(firing, rules, when)
+            if astore.is_paused(self.store):
+                break
+            outcome = self._run_isolated(firing, when)
             if outcome == "done":
                 ran += 1
             elif outcome == "skipped":
@@ -266,11 +266,9 @@ class Automator:
                 failed += 1
         return ran, skipped, waiting, failed
 
-    def _run_isolated(
-        self, firing: dict[str, Any], rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float,
-    ) -> str:
+    def _run_isolated(self, firing: dict[str, Any], when: float) -> str:
         try:
-            return self._run_one(firing, rules, when)
+            return self._run_one(firing, when)
         except Exception as exc:
             fid = int(firing["id"])
             log.exception("automation firing %s failed unexpectedly", fid)
@@ -285,15 +283,17 @@ class Automator:
                 log.exception("circuit breaker check failed for automation %s", aid)
             return "failed"
 
-    def _run_one(
-        self, firing: dict[str, Any], rules: dict[int, tuple[dict[str, Any], AutomationDef]], when: float,
-    ) -> str:
+    def _run_one(self, firing: dict[str, Any], when: float) -> str:
         fid, aid = int(firing["id"]), int(firing["automation_id"])
-        pair = rules.get(aid)
-        if pair is None:
+        row = astore.get(self.store, aid)
+        if row is None or not row["enabled"] or row["paused_reason"]:
             astore.set_firing(self.store, fid, status="skipped", reason="automation disabled or paused", now=when)
             return "skipped"
-        row, defn = pair
+        try:
+            defn = astore.parse_def(row)
+        except (ValueError, ValidationError):
+            astore.set_firing(self.store, fid, status="refused", reason="invalid automation definition", now=when)
+            return "skipped"
         stop = self._precheck_limits(aid, row, defn, when)
         if stop is not None:
             astore.set_firing(self.store, fid, status=stop[0], reason=stop[1], now=when)
@@ -318,10 +318,16 @@ class Automator:
             )
             return "skipped"
         if defn.action == "notify":
-            return self._run_notify(fid, defn, resolved, when)
+            return self._run_notify(fid, aid, defn, resolved, when)
         return self._run_action(firing, aid, defn, resolved, when)
 
-    def _run_notify(self, fid: int, defn: AutomationDef, resolved: dict[str, Any], when: float) -> str:
+    def _run_notify(self, fid: int, aid: int, defn: AutomationDef, resolved: dict[str, Any], when: float) -> str:
+        ctx = ActionContext(actor=f"automation:{aid}", surface="automation", firing_id=fid, now=when)
+        try:
+            self.actions.permit_automation_notify(ctx)
+        except Forbidden as exc:
+            astore.set_firing(self.store, fid, status="refused", reason=exc.message, finished=when, now=when)
+            return "skipped"
         snap_id = resolved.get("snapshot_id")
         if not isinstance(snap_id, int):
             latest = self.store.latest_snapshot()

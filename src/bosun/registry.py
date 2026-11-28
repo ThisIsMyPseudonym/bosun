@@ -644,29 +644,48 @@ class Actions:
             return None
         raise Forbidden(f"{spec.name} is refused for unknown actor {ctx.actor!r}")
 
-    def _permit_automation(self, spec: ActionSpec, ctx: ActionContext, body: BaseModel | None) -> Granted | None:
-        from .automations import match as amatch, store as astore
+    def _verify_automation_rule(self, action_name: str, ctx: ActionContext) -> tuple[int, Any]:
+        from .automations import store as astore
         from .automations.schema import ALLOWLIST, grant_digest, grant_digest_matches, grant_expired
 
         if self.store is None:
-            raise Forbidden(f"{spec.name} is refused for automation: no store")
+            raise Forbidden(f"{action_name} is refused for automation: no store")
         if astore.is_paused(self.store):
-            raise Forbidden(f"{spec.name} is refused: all automations are paused")
+            raise Forbidden(f"{action_name} is refused: all automations are paused")
         aid = automation_id(ctx.actor)
         row = astore.get(self.store, aid) if aid is not None else None
-        if row is None:
-            raise Forbidden(f"{spec.name} is refused for unknown automation {ctx.actor!r}")
+        if aid is None or row is None:
+            raise Forbidden(f"{action_name} is refused for unknown automation {ctx.actor!r}")
         if not row["enabled"] or row["paused_reason"]:
-            raise Forbidden(f"{spec.name} is refused: automation {aid} is disabled or paused")
+            raise Forbidden(f"{action_name} is refused: automation {aid} is disabled or paused")
         try:
             defn = astore.parse_def(row)
         except (ValueError, ValidationError):
-            raise Forbidden(f"{spec.name} is refused: automation {aid} has an invalid definition") from None
+            raise Forbidden(f"{action_name} is refused: automation {aid} has an invalid definition") from None
         if not grant_digest_matches(row["grant_digest"], grant_digest(defn)):
-            raise Forbidden(f"{spec.name} is refused: automation {aid} grant does not match its current definition")
+            raise Forbidden(f"{action_name} is refused: automation {aid} grant does not match its current definition")
         if grant_expired(defn.action, defn.mode, row["granted_at"], now=ctx.now):
-            raise Forbidden(f"{spec.name} is refused: automation {aid} grant has expired; renew it in the dashboard")
-        if spec.name not in ALLOWLIST or spec.name != defn.action or spec.user_only or spec.risk >= Risk.EXTERNAL:
+            raise Forbidden(f"{action_name} is refused: automation {aid} grant has expired; renew it in the dashboard")
+        if action_name not in ALLOWLIST or action_name != defn.action:
+            raise Forbidden(f"{action_name} is not allowed for automation {aid}")
+        return aid, defn
+
+    def permit_automation_notify(self, ctx: ActionContext) -> None:
+        """Enforce allow-list, grant digest, expiry, pause, and enabled checks for internal `notify` automations."""
+        from .automations.schema import NotifyScope
+
+        if self.demo:
+            raise Forbidden("notify is refused in demo mode")
+        aid, defn = self._verify_automation_rule("notify", ctx)
+        if defn.mode != "run" or not isinstance(defn.scope, NotifyScope):
+            raise Forbidden(f"notify is refused: invalid scope or mode for automation {aid}")
+
+    def _permit_automation(self, spec: ActionSpec, ctx: ActionContext, body: BaseModel | None) -> Granted | None:
+        from .automations import match as amatch
+
+        aid, defn = self._verify_automation_rule(spec.name, ctx)
+        assert self.store is not None
+        if spec.user_only or spec.risk >= Risk.EXTERNAL:
             raise Forbidden(f"{spec.name} is not allowed for automation {aid}")
         if body is None or not amatch.input_in_scope(self.store, defn, body, firing_id=ctx.firing_id):
             raise Forbidden(f"{spec.name} is refused: input is outside automation {aid}'s granted scope")
