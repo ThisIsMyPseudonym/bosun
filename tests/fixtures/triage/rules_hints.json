@@ -1,0 +1,324 @@
+{
+  "cases": [
+    {
+      "id": "winget-1618-another-installer",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"hint_index": 0},
+      "failure": {
+        "what": "job", "what_id": "101", "kind": "upgrade",
+        "subject": "winget:Git.Git", "item_source": "winget", "status": "failed", "actor": "autopilot",
+        "command": ["winget", "upgrade", "--id", "Git.Git", "--exact", "--silent"],
+        "exit_code": 1618,
+        "error": "exit 1618: Installer failed with exit code: 1618",
+        "output": "Found Git [Git.Git] Version 2.47.1\nStarting package install...\nInstaller failed with exit code: 1618\n"
+      },
+      "item": {"source": "winget", "package_id": "Git.Git", "name": "Git", "installed": "2.46.0", "available": "2.47.1"},
+      "expected": {
+        "source": "rules", "category": "busy_or_locked", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "winget-admin-privileges-required",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"hint_index": 1, "needs_person_index": 0},
+      "failure": {
+        "what": "job", "what_id": "102", "kind": "upgrade",
+        "subject": "winget:7zip.7zip", "item_source": "winget", "status": "failed", "actor": "autopilot",
+        "command": ["winget", "upgrade", "--id", "7zip.7zip", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "exit 1: Installer failed: 0x80073d28 administrator privileges are required",
+        "output": "Starting package install...\nInstaller failed: 0x80073d28 administrator privileges are required\n"
+      },
+      "item": {"source": "winget", "package_id": "7zip.7zip", "name": "7-Zip", "installed": "24.08", "available": "24.09"},
+      "expected": {
+        "source": "rules", "category": "admin_prompt", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "winget-install-technology-different",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"hint_index": 2, "needs_person_index": 1},
+      "failure": {
+        "what": "job", "what_id": "103", "kind": "upgrade",
+        "subject": "winget:Microsoft.Edge", "item_source": "winget", "status": "failed", "actor": "autopilot",
+        "command": ["winget", "upgrade", "--id", "Microsoft.Edge", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "The install technology is different from the current version installed.",
+        "output": "Found Microsoft Edge [Microsoft.Edge]\nThe install technology is different from the current version installed.\n"
+      },
+      "item": {"source": "winget", "package_id": "Microsoft.Edge", "name": "Microsoft Edge", "installed": "130.0", "available": "131.0"},
+      "expected": {
+        "source": "rules", "category": "already_current", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "winget-version-unreadable",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"hint_index": 3, "needs_person_index": 2},
+      "failure": {
+        "what": "job", "what_id": "104", "kind": "upgrade",
+        "subject": "winget:Google.CloudSDK", "item_source": "winget", "status": "failed", "actor": "user",
+        "command": ["winget", "upgrade", "--id", "Google.CloudSDK", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "This package's version number cannot be determined.",
+        "output": "Found Google Cloud SDK [Google.CloudSDK]\nThis package's version number cannot be determined.\n"
+      },
+      "item": {"source": "winget", "package_id": "Google.CloudSDK", "name": "Google Cloud SDK", "installed": "490.0", "available": "498.0"},
+      "expected": {
+        "source": "rules", "category": "already_current", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "winget-uac-declined",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"hint_index": 4},
+      "failure": {
+        "what": "job", "what_id": "105", "kind": "upgrade",
+        "subject": "winget:WiresharkFoundation.Wireshark", "item_source": "winget", "status": "failed", "actor": "user",
+        "command": ["winget", "upgrade", "--id", "WiresharkFoundation.Wireshark", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "exit 1: Installer failed with exit code: 0x80070005 (Access is denied)",
+        "output": "Starting package install...\nInstaller failed with exit code: 0x80070005 (Access is denied)\n"
+      },
+      "item": {"source": "winget", "package_id": "WiresharkFoundation.Wireshark", "name": "Wireshark", "installed": "4.2.6", "available": "4.4.0"},
+      "expected": {
+        "source": "rules", "category": "admin_prompt", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "winget-restart-needed-1641",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"hint_index": 5},
+      "failure": {
+        "what": "job", "what_id": "106", "kind": "upgrade",
+        "subject": "winget:Microsoft.VCRedist.2015+.x64", "item_source": "winget", "status": "failed", "actor": "autopilot",
+        "command": ["winget", "upgrade", "--id", "Microsoft.VCRedist.2015+.x64", "--exact", "--silent"],
+        "exit_code": 1641,
+        "error": "Installer failed with exit code: 1641",
+        "output": "Starting package install...\nInstaller failed with exit code: 1641\n"
+      },
+      "item": {"source": "winget", "package_id": "Microsoft.VCRedist.2015+.x64", "name": "Visual C++ Redistributable", "installed": "14.40", "available": "14.42"},
+      "expected": {
+        "source": "rules", "category": "already_current", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": false
+      }
+    },
+    {
+      "id": "winget-no-applicable-upgrade",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"hint_index": 6},
+      "failure": {
+        "what": "job", "what_id": "107", "kind": "upgrade",
+        "subject": "winget:Mozilla.Firefox", "item_source": "winget", "status": "failed", "actor": "autopilot",
+        "command": ["winget", "upgrade", "--id", "Mozilla.Firefox", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "No applicable upgrade found.",
+        "output": "No applicable upgrade found.\n"
+      },
+      "item": {"source": "winget", "package_id": "Mozilla.Firefox", "name": "Firefox", "installed": "132.0", "available": "133.0"},
+      "expected": {
+        "source": "rules", "category": "already_current", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "winget-file-being-used",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"hint_index": 7, "retry_why_index": 2},
+      "failure": {
+        "what": "job", "what_id": "108", "kind": "upgrade",
+        "subject": "winget:Notepad++.Notepad++", "item_source": "winget", "status": "failed", "actor": "user",
+        "command": ["winget", "upgrade", "--id", "Notepad++.Notepad++", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "The file is being used by another process.",
+        "output": "Starting package install...\nError writing C:\\ProgramData\\Notepad++\\notepad++.exe: The file is being used by another process.\n"
+      },
+      "item": {"source": "winget", "package_id": "Notepad++.Notepad++", "name": "Notepad++", "installed": "8.6.9", "available": "8.7.1"},
+      "expected": {
+        "source": "rules", "category": "in_use", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "macos-apple-events-1743",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"hint_index": 8},
+      "failure": {
+        "what": "job", "what_id": "109", "kind": "upgrade",
+        "subject": "mac-app:com.microsoft.Excel", "item_source": "mac-app", "status": "failed", "actor": "user",
+        "command": ["/Library/Application Support/Microsoft/MAU2.0/Microsoft AutoUpdate.app/Contents/MacOS/msupdate", "--install", "--apps", "XCEL2019"],
+        "exit_code": 1,
+        "error": "execution error: Not authorized to send Apple events to Microsoft AutoUpdate. (-1743)",
+        "output": "execution error: Not authorized to send Apple events to Microsoft AutoUpdate. (-1743)\n"
+      },
+      "item": {"source": "mac-app", "package_id": "com.microsoft.Excel", "name": "Microsoft Excel", "installed": "16.89", "available": "16.91"},
+      "expected": {
+        "source": "rules", "category": "permissions", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "linux-dpkg-interrupted",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "linux",
+      "covers": {"hint_index": 9, "recipe": "dpkg-configure"},
+      "failure": {
+        "what": "job", "what_id": "110", "kind": "upgrade",
+        "subject": "apt:curl", "item_source": "apt", "status": "failed", "actor": "user",
+        "command": ["apt-get", "install", "--only-upgrade", "-y", "curl"],
+        "exit_code": 100,
+        "error": "E: dpkg was interrupted, you must manually run 'dpkg --configure -a' to correct the problem.",
+        "output": "Reading package lists...\nE: dpkg was interrupted, you must manually run 'dpkg --configure -a' to correct the problem.\n"
+      },
+      "item": {"source": "apt", "package_id": "curl", "name": "curl", "installed": "8.5.0-2", "available": "8.5.0-3", "binaries": ["curl"]},
+      "expected": {
+        "source": "rules", "category": "busy_or_locked", "step_kind": "recipe",
+        "runbook": null, "recipe": "dpkg-configure", "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "mac-sudo-terminal-required",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"hint_index": 10},
+      "failure": {
+        "what": "job", "what_id": "111", "kind": "upgrade",
+        "subject": "brew-cask:gimp", "item_source": "brew-cask", "status": "failed", "actor": "user",
+        "command": ["brew", "upgrade", "--cask", "gimp"],
+        "exit_code": 1,
+        "error": "sudo: a terminal is required to read the password",
+        "output": "==> Running installer for gimp\nsudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper\n"
+      },
+      "item": {"source": "brew-cask", "package_id": "gimp", "name": "GIMP", "installed": "2.10.36", "available": "2.10.38"},
+      "expected": {
+        "source": "rules", "category": "password_needed", "step_kind": "runbook",
+        "runbook": "cask-needs-password", "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "mac-no-password-provided",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"hint_index": 11, "needs_person_index": 3},
+      "failure": {
+        "what": "job", "what_id": "112", "kind": "upgrade",
+        "subject": "brew-cask:zoom", "item_source": "brew-cask", "status": "failed", "actor": "user",
+        "command": ["brew", "upgrade", "--cask", "zoom"],
+        "exit_code": 1,
+        "error": "sudo: no password was provided",
+        "output": "==> Running installer for zoom\nsudo: no password was provided\nsudo: a password is required\n"
+      },
+      "item": {"source": "brew-cask", "package_id": "zoom", "name": "Zoom", "installed": "6.1.0", "available": "6.2.5"},
+      "expected": {
+        "source": "rules", "category": "password_needed", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "linux-polkit-request-dismissed",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "linux",
+      "covers": {"hint_index": 12},
+      "failure": {
+        "what": "job", "what_id": "113", "kind": "upgrade",
+        "subject": "apt:openssl", "item_source": "apt", "status": "failed", "actor": "user",
+        "command": ["pkexec", "/usr/bin/apt-get", "install", "--only-upgrade", "-y", "openssl"],
+        "exit_code": 126,
+        "error": "Error executing command as another user: Request dismissed",
+        "output": "Error executing command as another user: Request dismissed\n"
+      },
+      "item": {"source": "apt", "package_id": "openssl", "name": "openssl", "installed": "3.0.13-1", "available": "3.0.13-2", "binaries": ["openssl"]},
+      "expected": {
+        "source": "rules", "category": "password_needed", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "linux-polkit-no-auth-agent",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "linux",
+      "covers": {"hint_index": 13},
+      "failure": {
+        "what": "job", "what_id": "114", "kind": "upgrade",
+        "subject": "apt:openssl", "item_source": "apt", "status": "failed", "actor": "autopilot",
+        "command": ["pkexec", "/usr/bin/apt-get", "install", "--only-upgrade", "-y", "openssl"],
+        "exit_code": 127,
+        "error": "Error executing command as another user: No authentication agent found.",
+        "output": "Error executing command as another user: No authentication agent found.\n"
+      },
+      "item": {"source": "apt", "package_id": "openssl", "name": "openssl", "installed": "3.0.13-1", "available": "3.0.13-2", "binaries": ["openssl"]},
+      "expected": {
+        "source": "rules", "category": "password_needed", "step_kind": "runbook",
+        "runbook": "cask-needs-password", "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "linux-apt-lock-held",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "linux",
+      "covers": {"hint_index": 14, "runbook": "apt-lock"},
+      "failure": {
+        "what": "job", "what_id": "115", "kind": "upgrade",
+        "subject": "apt:curl", "item_source": "apt", "status": "failed", "actor": "autopilot",
+        "command": ["apt-get", "install", "--only-upgrade", "-y", "curl"],
+        "exit_code": 100,
+        "error": "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 4242 (unattended-upgr)",
+        "output": "Waiting for cache lock...\nE: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 4242 (unattended-upgr)\nE: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?\n"
+      },
+      "item": {"source": "apt", "package_id": "curl", "name": "curl", "installed": "8.5.0-2", "available": "8.5.0-3", "binaries": ["curl"]},
+      "expected": {
+        "source": "rules", "category": "busy_or_locked", "step_kind": "retry",
+        "runbook": "apt-lock", "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "winget-installer-timed-out",
+      "family": "hint",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"hint_index": 15},
+      "failure": {
+        "what": "job", "what_id": "116", "kind": "upgrade",
+        "subject": "winget:GitHub.cli", "item_source": "winget", "status": "failed", "actor": "autopilot",
+        "command": ["winget", "upgrade", "--id", "GitHub.cli", "--exact", "--silent"],
+        "exit_code": 124,
+        "error": "timed out after 1800s",
+        "output": "Starting package install...\ntimed out after 1800s\n"
+      },
+      "item": {"source": "winget", "package_id": "GitHub.cli", "name": "GitHub CLI", "installed": "2.60.0", "available": "2.62.0"},
+      "expected": {
+        "source": "rules", "category": "admin_prompt", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    }
+  ]
+}
