@@ -17,7 +17,7 @@ from ..config import Settings
 from ..providers.router import QuotaHeld
 from ..registry import ActionContext, ActionError, Actions, Forbidden
 from ..store import Store
-from . import digest, match as amatch, schedule, store as astore
+from . import digest, match as amatch, schedule, store as astore, verdict as averdict
 from .schema import (MODEL_ACTIONS, AutomationDef, RefreshConditions, ScheduleConditions, ScheduleTrigger,
                      grant_digest, grant_digest_matches, grant_expired, has_unset_project, is_install_action)
 
@@ -112,7 +112,11 @@ class Automator:
         if astore.is_paused(self.store):
             return TickReport(paused=True)
         rules = self._active_rules()
-        scanned = self._scan_refreshes(rules, when) + self._scan_schedules(rules, when)
+        scanned = (
+            self._scan_refreshes(rules, when)
+            + self._scan_schedules(rules, when)
+            + averdict.scan_verdicts(self.store, rules, when)
+        )
         ran, skipped, waiting, failed = self._execute_due(when)
         return TickReport(scanned=scanned, ran=ran, skipped=skipped, waiting=waiting, failed=failed)
 

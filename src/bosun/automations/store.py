@@ -56,9 +56,10 @@ def parse_def(row: dict[str, Any]) -> AutomationDef:
     })
 
 
-def _set_refresh_cursor(db: sqlite3.Connection, automation_id: int, when: float) -> None:
-    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-               (f"{CURSOR_PREFIX}refresh_{automation_id}", repr(when)))
+def _set_trigger_cursors(db: sqlite3.Connection, automation_id: int, when: float, kind: str | None = None) -> None:
+    for k in ((kind,) if kind in ("refresh", "verdict") else ("refresh", "verdict")):
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                   (f"{CURSOR_PREFIX}{k}_{automation_id}", repr(when)))
 
 
 def save(
@@ -99,8 +100,8 @@ def save(
                 (when, automation_id),
             )
             aid = automation_id
-        if defn.trigger.kind == "refresh":
-            _set_refresh_cursor(db, aid, when)
+        if defn.trigger.kind in ("refresh", "verdict"):
+            _set_trigger_cursors(db, aid, when, defn.trigger.kind)
         return aid
 
 
@@ -139,7 +140,7 @@ def set_enabled(store: Store, automation_id: int, enabled: bool, *, now: float |
         if enabled:
             cur = db.execute("UPDATE automations SET enabled=1, paused_reason='', updated=? WHERE id=?", (when, automation_id))
             if cur.rowcount > 0:
-                _set_refresh_cursor(db, automation_id, when)
+                _set_trigger_cursors(db, automation_id, when)
         else:
             cur = db.execute("UPDATE automations SET enabled=0, updated=? WHERE id=?", (when, automation_id))
             db.execute(
@@ -168,7 +169,7 @@ def renew_grant(store: Store, automation_id: int, *, granted_by: str = "user", n
             (granted_by, when, when, automation_id),
         )
         if cur.rowcount > 0:
-            _set_refresh_cursor(db, automation_id, when)
+            _set_trigger_cursors(db, automation_id, when)
         return cur.rowcount > 0
 
 

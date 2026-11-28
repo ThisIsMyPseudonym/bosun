@@ -11,7 +11,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .. import mcp_server, recipes
+from ..models import Source
 from ..registry import SPECS, Risk
+from ..triage.schema import CATEGORIES, RUNBOOK_NAME, Category, Confidence, StepKind
 
 Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 Lane = Literal["now", "plan", "watch", "batch"]
@@ -106,16 +109,50 @@ class ScheduleConditions(_Strict):
     lane: ActionLane | None = None
 
 
+_CATEGORY_ORDER = {c: i for i, c in enumerate(CATEGORIES)}
+_VALID_ITEM_SOURCES = frozenset(s.value for s in Source)
+_RUNBOOK_RE = re.compile(RUNBOOK_NAME)
+
+
 class VerdictConditions(_Strict):
-    categories: tuple[str, ...] = ()
+    categories: tuple[Category, ...] = ()
     transient: bool | None = None
     needs_person: bool | None = None
-    min_confidence: Literal["low", "medium", "high"] | None = None
-    next_step_kind: Literal["recipe", "retry", "rescan", "runbook", "agent_prompt", "none"] | None = None
+    min_confidence: Confidence | None = None
+    next_step_kind: StepKind | None = None
+    next_step_recipe: str | None = Field(default=None, max_length=60)
+    next_step_runbook: str | None = Field(default=None, max_length=60)
     run_kind: Literal["upgrade", "fix", "refresh"] | None = None
     source: str | None = Field(default=None, max_length=40)
     project: str | None = Field(default=None, max_length=1000)
     verdict_source: Literal["rules", "cache", "model"] | None = None
+
+    @field_validator("categories")
+    @classmethod
+    def _dedup_categories(cls, value: tuple[Category, ...]) -> tuple[Category, ...]:
+        return tuple(sorted(dict.fromkeys(value), key=lambda c: _CATEGORY_ORDER[c]))
+
+    @field_validator("next_step_recipe")
+    @classmethod
+    def _valid_recipe(cls, value: str | None) -> str | None:
+        if value is not None and value not in recipes.RECIPES:
+            raise ValueError(f"unknown recipe {value!r}")
+        return value
+
+    @field_validator("next_step_runbook")
+    @classmethod
+    def _valid_runbook(cls, value: str | None) -> str | None:
+        if value is not None:
+            if not _RUNBOOK_RE.fullmatch(value) or not (mcp_server.RUNBOOKS / f"{value}.md").is_file():
+                raise ValueError(f"unknown runbook {value!r}")
+        return value
+
+    @field_validator("source")
+    @classmethod
+    def _valid_source(cls, value: str | None) -> str | None:
+        if value is not None and value not in _VALID_ITEM_SOURCES:
+            raise ValueError(f"unknown item source {value!r}")
+        return value
 
 
 class InAppUpdateConditions(_Strict):
