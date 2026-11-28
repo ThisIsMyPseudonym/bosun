@@ -1084,3 +1084,119 @@ def test_automations_route_sidebar_developer_only_and_no_innerhtml():
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
+
+
+def test_automations_page_helpers_render_kill_switch_rules_renewal_history_and_escape():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false, href: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "href") this.href = String(v);
+          if (k === "value") this.value = String(v);
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.confirm = () => true;
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{ calls.push({{ path, opts }}); return {{}}; }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "5 min ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+
+    const H = MC.automationsHelpers;
+    if (!H) throw new Error("MC.automationsHelpers missing");
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+
+    // 1. Kill switch header: active -> Pause all automations; paused -> Resume automations; disabled in demo
+    const hdrActive = H.headerBar({{ paused: false, demo: false }}, () => {{}});
+    const pauseBtn = allNodes(hdrActive).find((n) => n.tagName === "BUTTON" && n.textContent === "Pause all automations");
+    if (!pauseBtn || pauseBtn.disabled) throw new Error("expected enabled Pause all automations button");
+    const hdrPaused = H.headerBar({{ paused: true, demo: false }}, () => {{}});
+    if (!hdrPaused.textContent.includes("Resume automations")) throw new Error("expected Resume automations when paused");
+    const hdrDemo = H.headerBar({{ paused: false, demo: true }}, () => {{}});
+    const demoBtns = allNodes(hdrDemo).filter((n) => n.tagName === "BUTTON");
+    if (!demoBtns.length || !demoBtns.every((b) => b.disabled)) throw new Error("header buttons must be disabled in demo mode");
+
+    // 2. Rule card: sentence, mode chip, counts, renewal notice, escaping, demo disabled switch
+    const rule = {{
+      id: 7, name: "<b>Nightly</b>", preset: "nightly_fix", enabled: true, paused_reason: "",
+      mode: "run", action: "start_fix", sentence: "Daily at 02:00, run Branch + test on App.",
+      scope_sentence: "Run Branch + test on now items in p1.",
+      grant_expired: true, grant_expires_at: 1700000000, needs_project: false, needs_grant: true,
+      today_count: 2, max_per_day: 6, last_fired: 1700000000, next_due: 1700090000,
+    }};
+    const card = H.ruleCard(rule, false, () => {{}});
+    const ctext = card.textContent;
+    if (!ctext.includes("<b>Nightly</b>") || !ctext.includes("Daily at 02:00") || !ctext.includes("Runs on its own")) {{
+      throw new Error("rule card missing escaped name, sentence, or mode: " + ctext);
+    }}
+    if (!ctext.includes("2 / 6") || !ctext.includes("5 min ago") || !ctext.includes("02:00")) {{
+      throw new Error("rule card missing today count, last fired, or next due: " + ctext);
+    }}
+    if (!ctext.includes("Still want this?") || !ctext.includes("Renew")) {{
+      throw new Error("expired rule card missing Still want this? / Renew: " + ctext);
+    }}
+    const renewBtn = allNodes(card).find((n) => n.tagName === "BUTTON" && n.textContent === "Renew");
+    const demoCard = H.ruleCard(rule, true, () => {{}});
+    const demoSwitch = allNodes(demoCard).find((n) => n.tagName === "INPUT" && n.attrs.type === "checkbox");
+    if (!demoSwitch || !demoSwitch.disabled) throw new Error("rule switch must be disabled in demo mode");
+
+    // 3. Firing history: event, status/reason, trace link, escaping
+    const hist = H.historyPanel([{{
+      id: 11, automation_id: 7, automation_name: "<script>bad()</script>", event_kind: "schedule",
+      event_ref: "2026-11-27T02:00", status: "done", reason: "Fixed <img src=x>", trace_id: "deadbeef1234",
+      created: 1700000000, finished: 1700000005,
+    }}]);
+    if (!hist.textContent.includes("<script>bad()</script>") || !hist.textContent.includes("Fixed <img src=x>")) {{
+      throw new Error("history did not escape hostile name/reason: " + hist.textContent);
+    }}
+    const runLink = allNodes(hist).find((n) => n.tagName === "A" && n.href === "#/runs/deadbeef1234");
+    if (!runLink) throw new Error("history missing #/runs/<trace_id> link");
+
+    (async () => {{
+      for (const fn of pauseBtn.listeners.click || []) await fn();
+      for (const fn of renewBtn.listeners.click || []) await fn();
+      if (!calls.some((c) => c.path === "/api/automations/pause" && JSON.parse(c.opts.body).on === true)) {{
+        throw new Error("pause click did not POST /api/automations/pause: " + JSON.stringify(calls));
+      }}
+      if (!calls.some((c) => c.path === "/api/automations/7/renew" && c.opts.method === "POST")) {{
+        throw new Error("renew click did not POST /api/automations/7/renew: " + JSON.stringify(calls));
+      }}
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
