@@ -97,7 +97,7 @@ MC.api = async function api(path, opts = {}, again = true) {
     const d = body.detail || body.error;  // a string, or a validator's list of { loc, msg }
     const said = Array.isArray(d) ? d.map((x) => (x && x.msg ? `${(x.loc || []).slice(1).join(".")}: ${x.msg}`.replace(/^: /, "") : String(x))).join("; ")
       : d && typeof d === "object" ? JSON.stringify(d) : d;
-    throw new Error(said || `HTTP ${res.status}`);
+    throw Object.assign(new Error(said || `HTTP ${res.status}`), { status: res.status });
   }
   return body;
 };

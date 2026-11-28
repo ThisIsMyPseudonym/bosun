@@ -86,17 +86,27 @@ async function deleteRule(rule) {
   }
 }
 
-async function decideOffer(offer, approve) {
+const DECIDING = new Set();
+const isDecidedConflict = (err) => !!(err && (err.status === 409
+  || /already (decided|declined)|no longer open/i.test(String(err.message || ""))));
+
+async function decideOffer(offer, approve, btns = []) {
+  if (DECIDING.has(offer.id)) return;
+  DECIDING.add(offer.id);
+  const prev = btns.map((b) => [b, !!(b && b.disabled)]);
+  for (const [b] of prev) if (b) b.disabled = true;
   try {
     await api(`/api/automations/firings/${offer.id}/decide`, {
       method: "POST",
       body: JSON.stringify({ approve: !!approve }),
     });
+  } catch (err) {
+    if (!isDecidedConflict(err)) alert(`Could not ${approve ? "approve" : "decline"} offer: ${err.message}`);
+  } finally {
+    DECIDING.delete(offer.id);
+    for (const [b, was] of prev) if (b) b.disabled = was;
     fetchAutomations(true);
     if (MC.refreshNow) MC.refreshNow().catch(() => {});
-  } catch (err) {
-    alert(`Could not ${approve ? "approve" : "decline"} offer: ${err.message}`);
-    fetchAutomations(true);
   }
 }
 
@@ -143,11 +153,18 @@ function offerTargetText(offer) {
 
 function offerCard(offer, isDemo) {
   const expired = isOfferExpired(offer);
+  const busy = DECIDING.has(offer.id);
   const itemsLine = offerItemsText(offer.items);
   const targetText = offerTargetText(offer);
   const statusLine = expired
     ? "This offer expired after 24 hours and can no longer be approved."
     : offer.deadline ? `Waiting for your approval · expires ${MC.clock(offer.deadline)}` : "Waiting for your approval";
+  const btns = [];
+  const mkBtn = (cls, text, approve) => {
+    const b = el("button", { class: cls, disabled: isDemo || expired || busy || null, text, onclick: () => decideOffer(offer, approve, btns) });
+    btns.push(b);
+    return b;
+  };
   return el("article", { class: `panel auto-offer${expired ? " auto-offer-expired" : ""}` },
     el("div", { class: "auto-card-top" },
       el("strong", { text: cleanOfferText(offer.automation_name || `Automation #${offer.automation_id}`, 80) }),
@@ -161,15 +178,7 @@ function offerCard(offer, isDemo) {
       el("code", { text: targetText })) : null,
     el("div", { class: "auto-offer-foot" },
       el("span", { class: "auto-meta", text: statusLine }),
-      el("div", { class: "auto-offer-actions" },
-        el("button", {
-          class: "quiet", disabled: isDemo || expired || null, text: "Decline",
-          onclick: () => decideOffer(offer, false),
-        }),
-        el("button", {
-          class: "primary", disabled: isDemo || expired || null, text: "Approve",
-          onclick: () => decideOffer(offer, true),
-        }))));
+      el("div", { class: "auto-offer-actions" }, mkBtn("quiet", "Decline", false), mkBtn("primary", "Approve", true))));
 }
 
 function offersPanel(offers, isDemo) {
