@@ -15,36 +15,41 @@ prints per-case tokens, window draw, category accuracy, and invalid-step count.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 import triage_eval_loader as loader
 import triage_eval_runner as runner
+import triage_live_evals as live_evals
 
 from bosun import actions, machine, mcp_server, recipes
+from bosun.providers import accounts
 from bosun.store import Store
 from bosun.triage import check, rules, store as tstore, worker
+from fake_cli import FakeCli
+
+LIVE = os.environ.get("BOSUN_LIVE_EVALS") == "1"
+
+
+def _sample_case(cid: str, error: str, output: str, what_id: str = "1") -> dict:
+    return {
+        "id": cid, "family": "hint", "eval_kind": "rules",
+        "failure": {
+            "what": "job", "what_id": what_id, "kind": "upgrade", "subject": "brew:jq",
+            "item_source": "brew", "status": "failed", "actor": "user",
+            "command": ["brew", "upgrade", "--formula", "jq"], "exit_code": 1,
+            "error": error, "output": output,
+        },
+        "expected": {"source": "rules", "category": "permissions", "step_kind": "none"},
+    }
 
 
 def test_fixture_hygiene_rejects_secrets_home_paths_emails_and_duplicates(tmp_path: Path):
     good = tmp_path / "good.json"
     good.write_text(json.dumps({
-        "cases": [{
-            "id": "sample-ok",
-            "family": "hint",
-            "eval_kind": "rules",
-            "failure": {
-                "what": "job", "what_id": "1", "kind": "upgrade", "subject": "brew:jq",
-                "item_source": "brew", "status": "failed", "actor": "user",
-                "command": ["brew", "upgrade", "--formula", "jq"], "exit_code": 1,
-                "error": "Permission denied", "output": "Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq",
-            },
-            "expected": {
-                "source": "rules", "category": "permissions", "step_kind": "runbook",
-                "runbook": "homebrew-permissions",
-            },
-        }],
+        "cases": [_sample_case("sample-ok", "Permission denied", "Error: Permission denied - /opt/homebrew/Cellar/jq")],
     }), encoding="utf-8")
     assert loader.hygiene_errors(tmp_path) == []
     cases = loader.load_cases(tmp_path)
@@ -54,36 +59,15 @@ def test_fixture_hygiene_rejects_secrets_home_paths_emails_and_duplicates(tmp_pa
     bad_dir.mkdir()
     (bad_dir / "leaks.json").write_text(json.dumps({
         "cases": [
-            {
-                "id": "dup-id",
-                "family": "hint",
-                "eval_kind": "rules",
-                "failure": {
-                    "what": "job", "what_id": "1", "kind": "upgrade", "subject": "brew:jq",
-                    "item_source": "brew", "status": "failed", "actor": "user",
-                    "command": ["brew", "upgrade", "jq"], "exit_code": 1,
-                    "error": "token ghp_1234567890abcdefghij1234567890abcd leaked",
-                    "output": "failed at /Users/alice/dev/app and contact alice@example.org",
-                },
-                "expected": {"source": "rules", "category": "permissions", "step_kind": "none"},
-            },
-            {
-                "id": "dup-id",
-                "family": "hint",
-                "eval_kind": "rules",
-                "failure": {
-                    "what": "job", "what_id": "2", "kind": "upgrade", "subject": "brew:jq",
-                    "item_source": "brew", "status": "failed", "actor": "user",
-                    "command": ["brew", "upgrade", "jq"], "exit_code": 1,
-                    "error": "C:\\Users\\bob\\AppData\\Local\\Temp\\x.exe",
-                    "output": "failed",
-                },
-                "expected": {"source": "rules", "category": "permissions", "step_kind": "none"},
-            },
+            _sample_case(
+                "dup-id",
+                "token ghp_1234567890abcdefghij1234567890abcd leaked",
+                "failed at /Users/alice/dev/app and contact alice@example.org",
+            ),
+            _sample_case("dup-id", "C:\\Users\\bob\\AppData\\Local\\Temp\\x.exe", "failed", what_id="2"),
         ],
     }), encoding="utf-8")
-    errs = loader.hygiene_errors(bad_dir)
-    joined = "\n".join(errs)
+    joined = "\n".join(loader.hygiene_errors(bad_dir))
     assert "redaction" in joined.lower()
     assert "/Users/" in joined or "home path" in joined.lower()
     assert "email" in joined.lower()
@@ -211,6 +195,7 @@ def test_offline_rules_eval_suite_achieves_100_percent(monkeypatch: pytest.Monke
         else:
             passed += 1
     score = passed / len(rules_cases)
+    print(f"\n[offline-eval] rules: {passed}/{len(rules_cases)} ({score:.1%})")
     assert score == 1.0 and not failures, (
         f"rules offline eval score {passed}/{len(rules_cases)} ({score:.1%} < 100%):\n" + "\n".join(failures)
     )
@@ -266,6 +251,7 @@ def test_offline_cache_eval_suite_achieves_100_percent(tmp_path: Path, monkeypat
         else:
             passed += 1
     score = passed / len(cache_cases)
+    print(f"\n[offline-eval] cache: {passed}/{len(cache_cases)} ({score:.1%})")
     assert score == 1.0 and not failures, (
         f"cache offline eval score {passed}/{len(cache_cases)} ({score:.1%} < 100%):\n" + "\n".join(failures)
     )
@@ -292,6 +278,7 @@ def test_offline_outage_eval_suite_achieves_100_percent():
             failures.extend(errs)
         else:
             passed += 1
+    print(f"\n[offline-eval] outage: {passed}/{len(outage_cases)} ({passed / len(outage_cases):.1%})")
     assert passed == len(outage_cases) and not failures, "\n".join(failures)
 
 
@@ -326,3 +313,41 @@ def test_eval_score_threshold_enforcement_fails_below_bar():
     assert not invalid.meets(runner.MODEL_ACCURACY_BAR)
     ok = runner.ScoreSummary(family="model", passed=4, total=5, invalid_steps=0, failures=("miss",))
     assert ok.meets(runner.MODEL_ACCURACY_BAR)
+
+
+def test_live_eval_helpers_are_bounded_format_cost_and_score_cleanly_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+):
+    cases = live_evals.select_live_cases(loader.load_cases(loader.FIXTURES_DIR))
+    assert 1 <= len(cases) <= live_evals.LIVE_MAX_CASES
+    assert all(c.eval_kind in ("model", "hostile") for c in cases)
+    assert "tokens=120in/45out" in runner.format_call_cost({"input_tokens": 120, "output_tokens": 45, "window_draw": 0.015})
+    assert "draw=1.50%" in runner.format_call_cost({"input_tokens": 120, "output_tokens": 45, "window_draw": 0.015})
+    assert "draw=n/a" in runner.format_call_cost({"input_tokens": 10, "output_tokens": 5, "window_draw": None})
+
+    fake = FakeCli(monkeypatch)
+    for case in cases:
+        assert case.good_reply is not None
+        fake.reply("gemini", fake.gemini_ok(dict(case.good_reply), input_tokens=150, output_tokens=40))
+    login = accounts.Login(
+        provider="gemini", id="default", label="Gemini", home=None, excluded=False, binary="/test/bin/gemini",
+    )
+    summary = live_evals.evaluate_login(tmp_path, login, cases, port=0, timeout_s=live_evals.LIVE_CASE_TIMEOUT_S)
+    out = capsys.readouterr().out
+    assert summary.meets(runner.MODEL_ACCURACY_BAR) and summary.invalid_steps == 0
+    assert "tokens=150in/40out" in out and "draw=" in out
+    assert all(c.timeout <= live_evals.LIVE_CASE_TIMEOUT_S for c in fake.calls)
+
+
+@pytest.mark.live_eval
+@pytest.mark.real_contract
+def test_live_triage_evals_across_installed_clis(tmp_path: Path):
+    if not LIVE:
+        pytest.skip("set BOSUN_LIVE_EVALS=1 to run triage evals against real installed AI CLIs (spends tokens)")
+    cases = live_evals.select_live_cases(loader.load_cases(loader.FIXTURES_DIR))
+    summaries = live_evals.run_live_suite(tmp_path, cases)
+    if not summaries:
+        pytest.skip("no installed locked-down AI CLI (claude, codex, gemini) passed its contract check")
+    for summary in summaries:
+        assert summary.invalid_steps == 0, f"{summary.line()}\n" + "\n".join(summary.failures)
+        assert summary.meets(runner.MODEL_ACCURACY_BAR), f"{summary.line()}\n" + "\n".join(summary.failures)
