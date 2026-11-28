@@ -1200,3 +1200,134 @@ def test_automations_page_helpers_render_kill_switch_rules_renewal_history_and_e
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_dropdowns_grant_confirmation_and_system_mode():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    index_html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert '/static/automations_editor.js' in index_html
+    editor_js_path = STATIC / "automations_editor.js"
+    assert editor_js_path.is_file()
+    assert "innerHTML" not in code_only(editor_js_path.read_text(encoding="utf-8"))
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(editor_js_path)
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{ calls.push({{ path, opts }}); return {{ id: 99 }}; }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const H = MC.automationsHelpers;
+    if (!H || typeof H.editorPanel !== "function") throw new Error("MC.automationsHelpers.editorPanel missing");
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const projects = [{{ key: "p1", name: "orchard-api", active: true }}, {{ key: "p2", name: "tidepool-web", active: true }}];
+
+    // 1. Nightly Branch + test preset: needs project pick and INSTALL + run grant checkbox
+    const nightly = {{
+      id: 2, name: "Nightly Branch + test", preset: "nightly_fix", enabled: false,
+      trigger: {{ kind: "schedule", time: "02:00", days: [] }},
+      conditions: {{ project: "__pick_project__", lane: "now" }},
+      action: "start_fix",
+      scope: {{ project: "__pick_project__", lane: "now" }},
+      mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+    }};
+    let savedCount = 0;
+    const panel = H.editorPanel(nightly, projects, false, () => {{}}, () => {{ savedCount += 1; }});
+    const selects = allNodes(panel).filter((n) => n.tagName === "SELECT");
+    if (selects.length < 4) throw new Error("expected dropdown selects for trigger, condition/scope, action, mode; got " + selects.length);
+
+    const findSave = () => allNodes(panel).find((n) => n.tagName === "BUTTON" && n.textContent === "Save");
+    const findByLabel = (lbl) => allNodes(panel).find((n) => n.attrs["aria-label"] === lbl);
+
+    // Save disabled until project picked AND grant checkbox checked
+    if (!findSave().disabled) throw new Error("Save must be disabled before project and grant are confirmed");
+    const projSel = findByLabel("Project");
+    if (!projSel) throw new Error("missing Project dropdown");
+    projSel.value = "p1";
+    (projSel.listeners.change || []).forEach((fn) => fn({{ target: projSel }}));
+    if (!findSave().disabled) throw new Error("Save must stay disabled until INSTALL grant checkbox is checked");
+    if (!panel.textContent.includes("Branch + test") || !panel.textContent.includes("orchard-api")) {{
+      throw new Error("grant sentence missing action or project: " + panel.textContent);
+    }}
+    const grantBox = findByLabel("Confirm scope grant");
+    if (!grantBox) throw new Error("missing Confirm scope grant checkbox");
+    grantBox.checked = true;
+    (grantBox.listeners.change || []).forEach((fn) => fn({{ target: grantBox }}));
+    if (findSave().disabled) throw new Error("Save should be enabled after picking project and checking grant");
+
+    // 2. SYSTEM action forbids choosing mode="run"
+    const sysRule = {{
+      id: null, name: "Offer relaunch", enabled: false,
+      trigger: {{ kind: "refresh" }}, conditions: {{}},
+      action: "relaunch_app", scope: {{ app: "chrome" }}, mode: "ask",
+    }};
+    const sysPanel = H.editorPanel(sysRule, projects, false, () => {{}}, () => {{}});
+    const modeSel = allNodes(sysPanel).find((n) => n.attrs["aria-label"] === "Approval mode");
+    if (!modeSel) throw new Error("missing Approval mode dropdown");
+    const modeValues = allNodes(modeSel).filter((n) => n.tagName === "OPTION").map((o) => o.value);
+    if (modeValues.includes("run") || !modeValues.includes("ask")) {{
+      throw new Error("SYSTEM action must forbid mode=run, got options: " + JSON.stringify(modeValues));
+    }}
+
+    // 3. Submitting posts /api/automations with wait_s and confirm_grant (never delay_s)
+    (async () => {{
+      const btn = findSave();
+      for (const fn of btn.listeners.click || []) await fn();
+      if (calls.length !== 1 || calls[0].path !== "/api/automations" || calls[0].opts.method !== "POST") {{
+        throw new Error("bad save request: " + JSON.stringify(calls));
+      }}
+      const sent = JSON.parse(calls[0].opts.body);
+      if ("delay_s" in sent || sent.wait_s !== 0 || sent.confirm_grant !== true) {{
+        throw new Error("bad save body (must use wait_s and confirm_grant): " + JSON.stringify(sent));
+      }}
+      if (sent.scope.project !== "p1" || sent.conditions.project !== "p1" || sent.action !== "start_fix") {{
+        throw new Error("bad scope/conditions in save body: " + JSON.stringify(sent));
+      }}
+      if (savedCount !== 1) throw new Error("onSaved callback was not called");
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
