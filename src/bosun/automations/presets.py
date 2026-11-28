@@ -17,6 +17,9 @@ from .schema import (
     ScheduleConditions,
     ScheduleTrigger,
     StartFixScope,
+    UpgradeScope,
+    VerdictConditions,
+    VerdictTrigger,
 )
 
 DELETED_PRESETS_SETTING = "automations_deleted_presets"
@@ -56,6 +59,26 @@ PRESETS: tuple[PresetSpec, ...] = (
         ),
         summary="Daily at 02:00, run Branch + test on Do-now items in a chosen project (sandboxed, never pushes).",
         needs_project=True,
+    ),
+    PresetSpec(
+        slug="retry_when_busy",
+        definition=AutomationDef(
+            name="Retry when busy",
+            trigger=VerdictTrigger(kind="verdict"),
+            conditions=VerdictConditions(
+                categories=("busy_or_locked",),
+                transient=True,
+                needs_person=False,
+                run_kind="upgrade",
+            ),
+            action="upgrade",
+            scope=UpgradeScope(mode="failed_item"),
+            mode="run",
+            delay_s=900,
+            max_per_day=6,
+            cooldown_s=900,
+        ),
+        summary="When an upgrade fails because something was busy or locked, retry that item in 15 minutes.",
     ),
 )
 

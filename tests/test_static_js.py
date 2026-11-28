@@ -1743,9 +1743,14 @@ def test_automations_editor_opens_unrepresentable_rules_readonly_and_grant_inclu
         action: "refresh", scope: {{ only: ["brew", "repos"] }}, mode: "run",
       }},
       {{
-        id: 14, name: "Verdict rule", enabled: false, sentence: "When a failure verdict arrives, upgrade.",
-        trigger: {{ kind: "verdict" }}, conditions: {{ transient: true }},
+        id: 14, name: "Multi-category verdict rule", enabled: false, sentence: "When a failure verdict arrives, upgrade.",
+        trigger: {{ kind: "verdict" }}, conditions: {{ categories: ["busy_or_locked", "network"], transient: true }},
         action: "upgrade", scope: {{ mode: "failed_item", keys: [] }}, mode: "run",
+      }},
+      {{
+        id: 15, name: "Listed keys upgrade", enabled: false, sentence: "When a failure verdict arrives, upgrade.",
+        trigger: {{ kind: "verdict" }}, conditions: {{ categories: ["busy_or_locked"] }},
+        action: "upgrade", scope: {{ mode: "keys", keys: ["brew:jq"] }}, mode: "run",
       }},
     ];
     for (const r of uneditableRules) {{
@@ -1791,3 +1796,106 @@ def test_automations_editor_opens_unrepresentable_rules_readonly_and_grant_inclu
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_supports_verdict_trigger_and_retry_when_busy_preset():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(STATIC / "automations_editor.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        removeAttribute(k) {{
+          delete this.attrs[k];
+          if (k === "disabled") this.disabled = false;
+          if (k === "checked") this.checked = false;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{ calls.push({{ path, opts }}); return {{}}; }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const H = MC.automationsHelpers;
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+
+    const preset = {{
+      id: 3, name: "Retry when busy", preset: "retry_when_busy", enabled: false,
+      trigger: {{ kind: "verdict" }},
+      conditions: {{ categories: ["busy_or_locked"], transient: true, needs_person: false, run_kind: "upgrade" }},
+      action: "upgrade", scope: {{ mode: "failed_item", keys: [] }}, mode: "run",
+      wait_s: 900, max_per_day: 6, cooldown_s: 900,
+    }};
+    const panel = H.editorPanel(preset, [], false, () => {{}}, () => {{}});
+    if (panel.textContent.includes("Edit isn't available")) {{
+      throw new Error("Retry when busy must be editable, got read-only");
+    }}
+    const selects = allNodes(panel).filter((n) => n.tagName === "SELECT");
+    const labels = selects.map((s) => s.getAttribute("aria-label"));
+    for (const req of ["Trigger", "Verdict category", "Failure type", "Transient", "Needs a person", "Verdict source", "Action"]) {{
+      if (!labels.includes(req)) throw new Error("missing verdict dropdown " + req + " in " + JSON.stringify(labels));
+    }}
+    const turnOn = allNodes(panel).find((n) => n.tagName === "INPUT" && n.getAttribute("aria-label") === "Turn on after saving");
+    turnOn.checked = true;
+    turnOn.listeners.change[0]({{ target: turnOn }});
+    const saveBefore = allNodes(panel).find((n) => n.tagName === "BUTTON" && n.textContent === "Save");
+    if (!saveBefore || !saveBefore.disabled) throw new Error("Save must stay disabled until grant checkbox is checked");
+    const grantBox = allNodes(panel).find((n) => n.tagName === "INPUT" && n.getAttribute("aria-label") === "Confirm scope grant");
+    grantBox.checked = true;
+    grantBox.listeners.change[0]({{ target: grantBox }});
+    const saveAfter = allNodes(panel).find((n) => n.tagName === "BUTTON" && n.textContent === "Save");
+    if (!saveAfter || saveAfter.disabled) throw new Error("Save should be enabled after confirming grant");
+    saveAfter.listeners.click[0]();
+    setTimeout(() => {{
+      if (calls.length !== 1) throw new Error("expected 1 save POST");
+      const payload = JSON.parse(calls[0].opts.body);
+      if (payload.trigger.kind !== "verdict") throw new Error("bad trigger: " + JSON.stringify(payload.trigger));
+      if (payload.conditions.categories[0] !== "busy_or_locked" || payload.conditions.transient !== true || payload.conditions.needs_person !== false || payload.conditions.run_kind !== "upgrade") {{
+        throw new Error("bad conditions: " + JSON.stringify(payload.conditions));
+      }}
+      if (payload.action !== "upgrade" || payload.scope.mode !== "failed_item" || payload.wait_s !== 900 || payload.confirm_grant !== true) {{
+        throw new Error("bad payload: " + JSON.stringify(payload));
+      }}
+      if ("delay_s" in payload) throw new Error("must never send delay_s");
+      console.log("VERDICT_EDITOR_OK");
+    }}, 0);
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0 and "VERDICT_EDITOR_OK" in r.stdout, f"stdout={r.stdout}\nstderr={r.stderr}"

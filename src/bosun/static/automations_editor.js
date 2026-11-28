@@ -8,16 +8,34 @@ const UNSET_PROJECT = "__pick_project__";
 const INSTALL_ACTIONS = new Set(["upgrade", "start_fix", "pin_mcp"]);
 const SYSTEM_ACTIONS = new Set(["relaunch_app", "open_app"]);
 const PROJECT_ACTIONS = new Set(["start_fix", "explain_item", "recheck_project"]);
-const TRIGGERS = [["refresh", "After a full refresh"], ["schedule", "On a schedule"]];
+const TRIGGERS = [
+  ["refresh", "After a full refresh"],
+  ["schedule", "On a schedule"],
+  ["verdict", "When a failure verdict arrives"],
+];
 const ACTIONS = [
   ["notify", "Notify (What changed digest)"],
   ["refresh", "Re-scan (no Autopilot)"],
   ["recheck_project", "Re-check one project"],
   ["explain_item", "Run 'Will this break?'"],
+  ["upgrade", "Retry failed item (upgrade)"],
   ["start_fix", "Run Branch + test"],
   ["relaunch_app", "Offer to relaunch app (asks first)"],
   ["open_app", "Offer to open app updater (asks first)"],
 ];
+const VERDICT_CATEGORIES = [
+  ["", "Any category"],
+  ["busy_or_locked", "Busy or locked"],
+  ["in_use", "App in use"],
+  ["network", "Network error"],
+  ["upstream_broken", "Upstream broken"],
+  ["dependency_conflict", "Dependency conflict"],
+  ["tests_failed", "Tests failed"],
+];
+const VERDICT_RUN_KINDS = [["", "Any run"], ["upgrade", "Upgrade"], ["fix", "Branch + test"], ["refresh", "Refresh"]];
+const BOOL_OPTS = [["", "Any"], ["true", "Yes"], ["false", "No"]];
+const CONF_OPTS = [["", "Any"], ["low", "Low+"], ["medium", "Medium+"], ["high", "High"]];
+const VERDICT_SOURCES = [["", "Any"], ["rules", "Rules only"], ["cache", "Cached"], ["model", "Model"]];
 const TIMES = ["00:00", "01:00", "02:00", "03:00", "04:00", "06:00", "08:00", "12:00", "18:00", "22:00"];
 const CADENCES = [
   ["daily", "Every day", []],
@@ -59,6 +77,14 @@ function editableConditions(trig, cond, scope, action) {
     const active = (lanes.length ? 1 : 0) + (cond.newly_exploited ? 1 : 0) + (cond.any_failed ? 1 : 0);
     return active <= 1 && (!lanes.length || (lanes.length === 1 && lanes[0] === "now"));
   }
+  if (trig.kind === "verdict") {
+    const cats = Array.isArray(cond.categories) ? cond.categories : [];
+    if (cats.length > 1 || (cats.length === 1 && !VERDICT_CATEGORIES.some(([k]) => k === cats[0]))) return false;
+    if (cond.run_kind && !VERDICT_RUN_KINDS.some(([k]) => k === cond.run_kind)) return false;
+    if (cond.min_confidence && !CONF_OPTS.some(([k]) => k === cond.min_confidence)) return false;
+    if (cond.verdict_source && !VERDICT_SOURCES.some(([k]) => k === cond.verdict_source)) return false;
+    return !cond.next_step_kind && !cond.next_step_recipe && !cond.next_step_runbook && !cond.source && !cond.project;
+  }
   if (trig.kind !== "schedule" || cadenceKey(trig.days) === null) return false;
   if (!PROJECT_ACTIONS.has(action)) return !cond.project && !cond.lane;
   if (cond.project && scope.project && cond.project !== scope.project) return false;
@@ -66,7 +92,8 @@ function editableConditions(trig, cond, scope, action) {
   return !(cond.lane && scope.lane && cond.lane !== scope.lane);
 }
 
-function editableScope(action, scope) {
+function editableScope(action, scope, trigKind) {
+  if (action === "upgrade") return trigKind === "verdict" && scope.mode === "failed_item";
   if (action === "refresh") {
     const only = scope.only;
     return only == null || (Array.isArray(only) && (!only.length || (only.length === 1 && COLLECTORS.some(([k]) => k === only[0]))));
@@ -83,11 +110,14 @@ function isEditable(rule) {
   const scope = rule.scope || {};
   const action = rule.action || "";
   if (!ACTIONS.some(([k]) => k === action)) return false;
-  if (!editableConditions(trig, cond, scope, action) || !editableScope(action, scope)) return false;
+  if (!editableConditions(trig, cond, scope, action) || !editableScope(action, scope, trig.kind)) return false;
   if (rule.max_per_day != null && !MAX_PER_DAY.includes(Number(rule.max_per_day))) return false;
   if (rule.cooldown_s != null && !COOLDOWNS.some(([v]) => v === Number(rule.cooldown_s))) return false;
   return rule.wait_s == null || WAIT_OPTS.some(([v]) => v === Number(rule.wait_s));
 }
+
+function boolStr(val) { return val === true ? "true" : val === false ? "false" : ""; }
+function parseBool(str) { return str === "true" ? true : str === "false" ? false : null; }
 
 function initState(rule) {
   const r = rule || {};
@@ -98,26 +128,20 @@ function initState(rule) {
   const rawProj = scope.project || cond.project || "";
   const project = rawProj === UNSET_PROJECT ? "" : rawProj;
   const mode = SYSTEM_ACTIONS.has(action) ? "ask" : action === "notify" ? "run" : (r.mode || "run");
+  const triggerKind = trig.kind === "schedule" ? "schedule" : trig.kind === "verdict" ? "verdict" : "refresh";
+  const cats = Array.isArray(cond.categories) ? cond.categories : [];
   return {
-    id: r.id || null,
-    name: r.name || "New automation",
-    triggerKind: trig.kind === "schedule" ? "schedule" : "refresh",
-    time: trig.time || "02:00",
-    cadence: cadenceKey(trig.days) || "daily",
+    id: r.id || null, name: r.name || "New automation", triggerKind,
+    time: trig.time || "02:00", cadence: cadenceKey(trig.days) || "daily",
     refreshCond: cond.newly_exploited ? "kev" : cond.any_failed ? "failed" : (cond.new_in_lanes && cond.new_in_lanes.length) ? "now" : "any",
-    action,
-    mode,
-    project,
-    lane: scope.lane || cond.lane || "now",
-    collector: Array.isArray(scope.only) && scope.only.length ? scope.only[0] : "",
-    app: scope.app || "chrome",
-    maxPerDay: Number(r.max_per_day || 6),
-    cooldownS: Number(r.cooldown_s != null ? r.cooldown_s : 900),
-    waitS: Number(r.wait_s || 0),
-    modelJobs: Number(r.model_jobs_per_day != null ? r.model_jobs_per_day : 3),
-    enabled: !!r.enabled,
-    confirmGrant: false,
-    saving: false,
+    verdictCat: cats[0] || "", verdictRunKind: cond.run_kind || "",
+    verdictTransient: boolStr(cond.transient), verdictNeedsPerson: boolStr(cond.needs_person),
+    verdictConf: cond.min_confidence || "", verdictSource: cond.verdict_source || "",
+    action, mode, project, lane: scope.lane || cond.lane || "now",
+    collector: Array.isArray(scope.only) && scope.only.length ? scope.only[0] : "", app: scope.app || "chrome",
+    maxPerDay: Number(r.max_per_day || 6), cooldownS: Number(r.cooldown_s != null ? r.cooldown_s : 900),
+    waitS: Number(r.wait_s || 0), modelJobs: Number(r.model_jobs_per_day != null ? r.model_jobs_per_day : 3),
+    enabled: !!r.enabled, confirmGrant: false, saving: false,
   };
 }
 
@@ -125,6 +149,10 @@ function triggerPhrase(st) {
   if (st.triggerKind === "schedule") {
     const cad = CADENCES.find((c) => c[0] === st.cadence) || CADENCES[0];
     return `${cad[1]} at ${st.time}`;
+  }
+  if (st.triggerKind === "verdict") {
+    const cat = (VERDICT_CATEGORIES.find((c) => c[0] === st.verdictCat) || ["", ""])[1];
+    return cat && st.verdictCat ? `When a ${cat.toLowerCase()} failure verdict arrives` : "When a matching failure verdict arrives";
   }
   if (st.refreshCond === "now") return "After a full refresh when new items arrive in Do now";
   if (st.refreshCond === "kev") return "After a full refresh when something is newly exploited";
@@ -136,6 +164,10 @@ function scopeSentence(st, projects) {
   const when = triggerPhrase(st);
   const projName = (projects.find((p) => p.key === st.project) || {}).name || st.project || "a chosen project";
   const cap = `at most ${st.maxPerDay} time${st.maxPerDay === 1 ? "" : "s"} a day`;
+  const wait = st.waitS > 0 ? ` after waiting ${Math.round(st.waitS / 60)} min` : "";
+  if (st.action === "upgrade") {
+    return `${when}: upgrade the failed item, same version${wait}, ${cap}; Bosun's waiting period and checks still apply.`;
+  }
   if (st.action === "start_fix") {
     return `${when}: run Branch + test on ${st.lane} items in ${projName}, ${cap} (sandboxed, never pushes; Bosun's checks and 75% quota line still apply).`;
   }
@@ -148,7 +180,9 @@ function scopeSentence(st, projects) {
 
 function buildPayload(st) {
   const cad = CADENCES.find((c) => c[0] === st.cadence) || CADENCES[0];
-  const trigger = st.triggerKind === "schedule" ? { kind: "schedule", time: st.time, days: cad[2] } : { kind: "refresh" };
+  const trigger = st.triggerKind === "schedule"
+    ? { kind: "schedule", time: st.time, days: cad[2] }
+    : { kind: st.triggerKind };
   let conditions = {};
   if (st.triggerKind === "refresh") {
     conditions = {
@@ -156,28 +190,29 @@ function buildPayload(st) {
       newly_exploited: st.refreshCond === "kev",
       any_failed: st.refreshCond === "failed",
     };
+  } else if (st.triggerKind === "verdict") {
+    conditions = {
+      categories: st.verdictCat ? [st.verdictCat] : [],
+      transient: parseBool(st.verdictTransient),
+      needs_person: parseBool(st.verdictNeedsPerson),
+      min_confidence: st.verdictConf || null,
+      run_kind: st.verdictRunKind || null,
+      verdict_source: st.verdictSource || null,
+    };
   } else {
     conditions = PROJECT_ACTIONS.has(st.action) ? { project: st.project || null, lane: st.lane } : {};
   }
   let scope = { digest: "what_changed" };
-  if (st.action === "refresh") scope = { only: st.collector ? [st.collector] : null };
+  if (st.action === "upgrade") scope = { mode: "failed_item", keys: [] };
+  else if (st.action === "refresh") scope = { only: st.collector ? [st.collector] : null };
   else if (st.action === "recheck_project") scope = { mode: "project", project: st.project };
   else if (st.action === "explain_item" || st.action === "start_fix") scope = { project: st.project, lane: st.lane };
   else if (SYSTEM_ACTIONS.has(st.action)) scope = { app: st.app };
   return {
-    id: st.id,
-    name: st.name.trim(),
-    trigger,
-    conditions,
-    action: st.action,
-    scope,
+    id: st.id, name: st.name.trim(), trigger, conditions, action: st.action, scope,
     mode: SYSTEM_ACTIONS.has(st.action) ? "ask" : st.action === "notify" ? "run" : st.mode,
-    enabled: !!st.enabled,
-    wait_s: st.waitS,
-    max_per_day: st.maxPerDay,
-    cooldown_s: st.cooldownS,
-    model_jobs_per_day: st.modelJobs,
-    confirm_grant: !!st.confirmGrant,
+    enabled: !!st.enabled, wait_s: st.waitS, max_per_day: st.maxPerDay,
+    cooldown_s: st.cooldownS, model_jobs_per_day: st.modelJobs, confirm_grant: !!st.confirmGrant,
   };
 }
 
@@ -187,21 +222,44 @@ function modeOptions(action) {
   return [["run", "Runs on its own"], ["ask", "Asks first"]];
 }
 
+function triggerFields(st, timeOpts, isDemo, set) {
+  if (st.triggerKind === "schedule") {
+    return [
+      field("Time (local)", selectEl("Schedule time", timeOpts, st.time, isDemo, set("time"))),
+      field("Days", selectEl("Schedule days", CADENCES.map(([k, l]) => [k, l]), st.cadence, isDemo, set("cadence"))),
+    ];
+  }
+  if (st.triggerKind === "verdict") {
+    return [
+      field("Category", selectEl("Verdict category", VERDICT_CATEGORIES, st.verdictCat, isDemo, set("verdictCat"))),
+      field("Failure type", selectEl("Failure type", VERDICT_RUN_KINDS, st.verdictRunKind, isDemo, set("verdictRunKind"))),
+      field("Transient", selectEl("Transient", BOOL_OPTS, st.verdictTransient, isDemo, set("verdictTransient"))),
+      field("Needs a person", selectEl("Needs a person", BOOL_OPTS, st.verdictNeedsPerson, isDemo, set("verdictNeedsPerson"))),
+      field("Min confidence", selectEl("Min confidence", CONF_OPTS, st.verdictConf, isDemo, set("verdictConf"))),
+      field("Verdict source", selectEl("Verdict source", VERDICT_SOURCES, st.verdictSource, isDemo, set("verdictSource"))),
+    ];
+  }
+  return [
+    field("Condition", selectEl("Refresh condition", [
+      ["any", "Every full refresh"], ["now", "New item in Do now"], ["kev", "Newly exploited item"], ["failed", "Any update failed"],
+    ], st.refreshCond, isDemo, set("refreshCond"))),
+  ];
+}
+
 function buildDropdownControls(st, projects, isDemo, update) {
   const projOpts = [["", "Pick a project…"], ...(projects || []).map((p) => [p.key, p.name || p.key])];
   const timeOpts = TIMES.includes(st.time) ? TIMES.map((t) => [t, t]) : [[st.time, st.time], ...TIMES.map((t) => [t, t])];
+  const actionOpts = ACTIONS.filter(([k]) => k !== "upgrade" || st.triggerKind === "verdict");
   const set = (key, resetGrant = true) => (v) => { st[key] = v; if (resetGrant) st.confirmGrant = false; update(); };
   return [
-    field("When (trigger)", selectEl("Trigger", TRIGGERS, st.triggerKind, isDemo, set("triggerKind"))),
-    st.triggerKind === "schedule"
-      ? field("Time (local)", selectEl("Schedule time", timeOpts, st.time, isDemo, set("time")))
-      : field("Condition", selectEl("Refresh condition", [
-          ["any", "Every full refresh"], ["now", "New item in Do now"], ["kev", "Newly exploited item"], ["failed", "Any update failed"],
-        ], st.refreshCond, isDemo, set("refreshCond"))),
-    st.triggerKind === "schedule"
-      ? field("Days", selectEl("Schedule days", CADENCES.map(([k, l]) => [k, l]), st.cadence, isDemo, set("cadence")))
-      : null,
-    field("Do (action)", selectEl("Action", ACTIONS, st.action, isDemo, (v) => {
+    field("When (trigger)", selectEl("Trigger", TRIGGERS, st.triggerKind, isDemo, (v) => {
+      st.triggerKind = v;
+      if (v !== "verdict" && st.action === "upgrade") { st.action = "notify"; st.mode = "run"; }
+      st.confirmGrant = false;
+      update();
+    })),
+    ...triggerFields(st, timeOpts, isDemo, set),
+    field("Do (action)", selectEl("Action", actionOpts, st.action, isDemo, (v) => {
       st.action = v;
       if (SYSTEM_ACTIONS.has(v)) st.mode = "ask";
       else if (v === "notify") st.mode = "run";

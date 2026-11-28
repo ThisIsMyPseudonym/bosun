@@ -9,9 +9,18 @@ def test_presets_ship_disabled_and_seeding_keeps_user_edits(tmp_path):
     presets.seed(st)
     rows = astore.list_all(st)
     by_preset = {r["preset"]: r for r in rows}
-    assert {"what_changed", "nightly_fix"} <= set(by_preset)
+    assert {"what_changed", "nightly_fix", "retry_when_busy"} <= set(by_preset)
     assert all(r["enabled"] == 0 for r in rows)
     assert all(r["grant_digest"] == "" for r in rows)
+    # Retry when busy matches only busy_or_locked + transient + not needs_person on upgrades, bounded by delay/cap/cooldown
+    rwb = astore.parse_def(by_preset["retry_when_busy"])
+    assert rwb.trigger.kind == "verdict"
+    assert rwb.conditions.categories == ("busy_or_locked",)
+    assert rwb.conditions.transient is True
+    assert rwb.conditions.needs_person is False
+    assert rwb.conditions.run_kind == "upgrade"
+    assert rwb.action == "upgrade" and rwb.scope.mode == "failed_item" and rwb.mode == "run"
+    assert rwb.delay_s == 900 and rwb.max_per_day == 6 and rwb.cooldown_s == 900
     # Every seeded preset parses cleanly through AutomationDef (extra='forbid')
     for row in rows:
         defn = astore.parse_def(row)
