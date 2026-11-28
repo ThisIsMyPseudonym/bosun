@@ -191,3 +191,47 @@ def test_runs_label_automation_actor_with_name(tmp_path):
     assert matched_after[0]["actor_label"] == "Automation: Nightly check"
     tr_after = user.get(f"/api/runs/{tid}").json()
     assert tr_after["run"]["actor_label"] == "Automation: Nightly check"
+
+
+def test_save_automation_preserves_enabled_and_paused_reason(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    app = create_app(load_settings(), st, TOKEN)
+    user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+
+    by_preset = {a["preset"]: a for a in user.get("/api/automations").json()["automations"]}
+    wc = by_preset["what_changed"]
+    assert wc["enabled"] is False
+
+    # Saving a renamed disabled preset without enabling keeps enabled=False
+    base = {
+        "id": wc["id"],
+        "name": "What changed (renamed)",
+        "trigger": {"kind": "refresh"},
+        "conditions": {},
+        "action": "notify",
+        "scope": {"digest": "what_changed"},
+        "mode": "run",
+        "wait_s": 0,
+    }
+    r1 = user.post("/api/automations", json={**base, "enabled": False}, headers=H)
+    assert r1.status_code == 200 and r1.json()["enabled"] is False
+
+    # Enable it, then trip the circuit breaker (set paused_reason)
+    assert user.post(f"/api/automations/{wc['id']}/enabled", json={"enabled": True}, headers=H).status_code == 200
+    astore.set_paused_reason(st, wc["id"], "Paused after 3 consecutive failures")
+
+    # Editing/saving (with omitted enabled or explicit enabled=True) preserves enabled and paused_reason
+    r2 = user.post("/api/automations", json={**base, "name": "Still paused"}, headers=H)
+    assert r2.status_code == 200
+    assert r2.json()["enabled"] is True
+    assert r2.json()["paused_reason"] == "Paused after 3 consecutive failures"
+
+    r3 = user.post("/api/automations", json={**base, "name": "Still paused 2", "enabled": True}, headers=H)
+    assert r3.status_code == 200
+    assert r3.json()["enabled"] is True
+    assert r3.json()["paused_reason"] == "Paused after 3 consecutive failures"
+
+    # Only an explicit resume via set_automation_enabled clears paused_reason
+    r4 = user.post(f"/api/automations/{wc['id']}/enabled", json={"enabled": True}, headers=H)
+    assert r4.status_code == 200
+    assert r4.json()["paused_reason"] == ""

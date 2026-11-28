@@ -64,7 +64,7 @@ def _set_refresh_cursor(db: sqlite3.Connection, automation_id: int, when: float)
 def save(
     store: Store, defn: AutomationDef, *, automation_id: int | None = None, preset: str | None = None,
     enabled: bool = False, grant_digest: str = "", granted_by: str = "", granted_at: float | None = None,
-    now: float | None = None,
+    clear_paused: bool = False, now: float | None = None,
 ) -> int:
     """Create or update an automation; updating cancels waiting firings/offers while preserving history."""
     when = time.time() if now is None else now
@@ -85,8 +85,9 @@ def save(
             )
             aid = int(cur.lastrowid or 0)
         else:
+            paused_sql = "paused_reason='', " if clear_paused else ""
             db.execute(
-                "UPDATE automations SET name=?, enabled=?, paused_reason='', trigger=?, conditions=?, action=?, scope=?, "
+                f"UPDATE automations SET name=?, enabled=?, {paused_sql}trigger=?, conditions=?, action=?, scope=?, "
                 "mode=?, delay_s=?, max_per_day=?, cooldown_s=?, model_jobs_per_day=?, grant_digest=?, granted_by=?, "
                 "granted_at=?, updated=? WHERE id=?", (*vals, automation_id),
             )

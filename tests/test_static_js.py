@@ -1280,12 +1280,16 @@ def test_automations_editor_dropdowns_grant_confirmation_and_system_mode():
     const findSave = () => allNodes(panel).find((n) => n.tagName === "BUTTON" && n.textContent === "Save");
     const findByLabel = (lbl) => allNodes(panel).find((n) => n.attrs["aria-label"] === lbl);
 
-    // Save disabled until project picked AND grant checkbox checked
-    if (!findSave().disabled) throw new Error("Save must be disabled before project and grant are confirmed");
+    // Save disabled until project picked; turning on requires INSTALL grant checkbox
+    if (!findSave().disabled) throw new Error("Save must be disabled before project is picked");
     const projSel = findByLabel("Project");
     if (!projSel) throw new Error("missing Project dropdown");
     projSel.value = "p1";
     (projSel.listeners.change || []).forEach((fn) => fn({{ target: projSel }}));
+    const turnOnBox = findByLabel("Turn on after saving");
+    if (!turnOnBox || turnOnBox.checked) throw new Error("Turn on after saving must start unchecked for disabled preset");
+    turnOnBox.checked = true;
+    (turnOnBox.listeners.change || []).forEach((fn) => fn({{ target: turnOnBox }}));
     if (!findSave().disabled) throw new Error("Save must stay disabled until INSTALL grant checkbox is checked");
     if (!panel.textContent.includes("Branch + test") || !panel.textContent.includes("orchard-api")) {{
       throw new Error("grant sentence missing action or project: " + panel.textContent);
@@ -1325,6 +1329,111 @@ def test_automations_editor_dropdowns_grant_confirmation_and_system_mode():
         throw new Error("bad scope/conditions in save body: " + JSON.stringify(sent));
       }}
       if (savedCount !== 1) throw new Error("onSaved callback was not called");
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_preserves_enabled_state_and_has_turn_on_control():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(STATIC / "automations_editor.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        removeAttribute(k) {{
+          delete this.attrs[k];
+          if (k === "disabled") this.disabled = false;
+          if (k === "checked") this.checked = false;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{ calls.push({{ path, opts }}); return {{ id: 1 }}; }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const H = MC.automationsHelpers;
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const findByLabel = (root, lbl) => allNodes(root).find((n) => n.attrs["aria-label"] === lbl);
+    const findSave = (root) => allNodes(root).find((n) => n.tagName === "BUTTON" && n.textContent === "Save");
+
+    // 1. Disabled preset: "Turn on after saving" starts unchecked; renaming and saving sends enabled: false
+    const disabledRule = {{
+      id: 1, name: "What changed", preset: "what_changed", enabled: false,
+      trigger: {{ kind: "refresh" }}, conditions: {{}},
+      action: "notify", scope: {{ digest: "what_changed" }},
+      mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+    }};
+    const p1 = H.editorPanel(disabledRule, [], false, () => {{}}, () => {{}});
+    const turnOn1 = findByLabel(p1, "Turn on after saving");
+    if (!turnOn1 || turnOn1.checked) throw new Error("Turn on after saving must exist and start unchecked for disabled rule");
+    const name1 = findByLabel(p1, "Automation name");
+    name1.value = "Renamed digest";
+    (name1.listeners.input || []).forEach((fn) => fn({{ target: name1 }}));
+
+    // 2. Already-enabled rule: starts checked and sends enabled: true
+    const enabledRule = {{ ...disabledRule, id: 2, enabled: true }};
+    const p2 = H.editorPanel(enabledRule, [], false, () => {{}}, () => {{}});
+    const turnOn2 = findByLabel(p2, "Turn on after saving");
+    if (!turnOn2 || !turnOn2.checked) throw new Error("Turn on after saving must start checked for already-enabled rule");
+
+    // 3. Disabled rule with "Turn on after saving" explicitly checked sends enabled: true
+    const p3 = H.editorPanel(disabledRule, [], false, () => {{}}, () => {{}});
+    const turnOn3 = findByLabel(p3, "Turn on after saving");
+    turnOn3.checked = true;
+    (turnOn3.listeners.change || []).forEach((fn) => fn({{ target: turnOn3 }}));
+
+    (async () => {{
+      for (const fn of findSave(p1).listeners.click || []) await fn();
+      for (const fn of findSave(p2).listeners.click || []) await fn();
+      for (const fn of findSave(p3).listeners.click || []) await fn();
+      if (calls.length !== 3) throw new Error("expected 3 saves, got " + calls.length);
+      const b1 = JSON.parse(calls[0].opts.body);
+      const b2 = JSON.parse(calls[1].opts.body);
+      const b3 = JSON.parse(calls[2].opts.body);
+      if (b1.enabled !== false || b1.name !== "Renamed digest") throw new Error("disabled rule flipped on: " + JSON.stringify(b1));
+      if (b2.enabled !== true) throw new Error("enabled rule flipped off: " + JSON.stringify(b2));
+      if (b3.enabled !== true) throw new Error("explicitly turned-on rule stayed off: " + JSON.stringify(b3));
       console.log("OK");
     }})().catch((e) => {{ console.error(e); process.exit(1); }});
     """

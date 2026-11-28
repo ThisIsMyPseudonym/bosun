@@ -335,7 +335,7 @@ class SaveAutomationIn(_In):
     action: str = Field(min_length=1, max_length=40, description="Allow-listed Bosun action name")
     scope: dict[str, Any] = Field(default_factory=dict, description="Fixed scope for the chosen action")
     mode: Literal["run", "ask"] = Field(default="run", description="run = runs on its own; ask = asks first")
-    enabled: bool = Field(default=False, description="Whether this automation is turned on")
+    enabled: bool | None = Field(default=None, description="Whether this automation is turned on (omit to keep current state)")
     wait_s: int = Field(default=0, ge=0, le=86400, description="Seconds to wait before running after trigger fires")
     max_per_day: int = Field(default=6, ge=1, le=48, description="Maximum firings per 24 hours (1-48)")
     cooldown_s: int = Field(default=900, ge=0, le=86400, description="Minimum seconds between firings")

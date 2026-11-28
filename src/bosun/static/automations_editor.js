@@ -79,7 +79,7 @@ function initState(rule) {
     cooldownS: Number(r.cooldown_s != null ? r.cooldown_s : 900),
     waitS: Number(r.wait_s || 0),
     modelJobs: Number(r.model_jobs_per_day != null ? r.model_jobs_per_day : 3),
-    enabled: r.id ? true : true,
+    enabled: !!r.enabled,
     confirmGrant: false,
     saving: false,
   };
@@ -193,6 +193,12 @@ function editorPanel(rule, projects, isDemo, onCancel, onSaved) {
     const controls = buildControls(st, projects, isDemo, renderEditor);
     const grantBox = el("div", { class: "auto-grant" },
       el("div", { text: scopeSentence(st, projects || []) }),
+      el("label", { class: "auto-grant-check" },
+        el("input", {
+          type: "checkbox", checked: st.enabled || null, disabled: isDemo || null, "aria-label": "Turn on after saving",
+          onchange: (e) => { st.enabled = !!e.target.checked; renderEditor(); },
+        }),
+        el("span", { text: "Turn on after saving" })),
       needsGrant ? el("label", { class: "auto-grant-check" },
         el("input", {
           type: "checkbox", checked: st.confirmGrant || null, disabled: isDemo || null, "aria-label": "Confirm scope grant",

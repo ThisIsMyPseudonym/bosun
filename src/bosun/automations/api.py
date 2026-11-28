@@ -233,12 +233,11 @@ def save_automation(
     store: Store, body: SaveAutomationIn, *, actor: str = "user", now: float | None = None,
 ) -> dict[str, Any]:
     when = time.time() if now is None else now
-    preset: str | None = None
-    if body.id is not None:
-        existing = astore.get(store, body.id)
-        if existing is None:
-            raise NotFound("No automation with that id")
-        preset = existing.get("preset")
+    existing = astore.get(store, body.id) if body.id is not None else None
+    if body.id is not None and existing is None:
+        raise NotFound("No automation with that id")
+    preset: str | None = existing.get("preset") if existing is not None else None
+    enabled = (bool(existing["enabled"]) if body.enabled is None else body.enabled) if existing is not None else bool(body.enabled)
     try:
         defn = AutomationDef.model_validate({
             "name": body.name,
@@ -254,15 +253,15 @@ def save_automation(
         })
     except ValidationError as exc:
         raise Invalid(_format_validation_error(exc)) from None
-    if body.enabled and needs_project_pick(defn):
+    if enabled and needs_project_pick(defn):
         raise Invalid("Pick a project before enabling this automation")
     need_confirm = needs_grant_confirmation(defn.action, defn.mode)
-    if body.enabled and need_confirm and not body.confirm_grant:
+    if enabled and need_confirm and not body.confirm_grant:
         raise Invalid("Confirm the scope grant checkbox before enabling this automation")
-    grant_ok = (body.confirm_grant or (body.enabled and not need_confirm)) and not needs_project_pick(defn)
+    grant_ok = (body.confirm_grant or (enabled and not need_confirm)) and not needs_project_pick(defn)
     digest = grant_digest(defn) if grant_ok else ""
     aid = astore.save(
-        store, defn, automation_id=body.id, preset=preset, enabled=body.enabled,
+        store, defn, automation_id=body.id, preset=preset, enabled=enabled,
         grant_digest=digest, granted_by=actor if digest else "",
         granted_at=when if digest else None, now=when,
     )
@@ -298,7 +297,7 @@ def set_automation_enabled(
     else:
         astore.save(
             store, defn, automation_id=automation_id, preset=row.get("preset"), enabled=True,
-            grant_digest=expected, granted_by=actor, granted_at=when, now=when,
+            grant_digest=expected, granted_by=actor, granted_at=when, clear_paused=True, now=when,
         )
     return _serialize_one(store, automation_id, when)
 
