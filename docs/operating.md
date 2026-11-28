@@ -13,6 +13,7 @@ its own copy and only looks at itself.
 | **This PC** / **This Mac** | Machine-level software not tied to any project, grouped **by how each item gets updated**, most automatic first: **Bosun updates these** (one click, no prompts; Autopilot's share), **Needs you once** (Bosun runs it; you type a password, or quit an app so it can finish), **Updates itself** (open the app), **Software Update / Windows Update**, **Yours to do** (a download or a command only you can run) and **Watching** (no fix yet). Every row has one button and a "⋯" menu; a group has one button where one call covers it. **Group** switches to *what it is* (this computer itself, apps, behind the scenes, developer tools), *publisher* or one flat list; **Sort** and **Find** (`/`) sit beside it, and Bosun remembers how you left the page, in the app window and the browser alike. A product family such as Microsoft Office is **one row** with one button that opens into its apps. Apps show their own icon, read from this computer |
 | **A project** | That repo's own decisions: its dependencies and container base images, with its activity, checkouts (worktrees and clones merged), remote, containers and tests |
 | **Packages** | Across everything: one row per package, exploited and malware first, then by risk × reach, to fix a shared pattern once |
+| **Automations** | Developer view: owner-written trigger → action rules, shipped-off presets, waiting approval offers, 90-day install grant renewal, the pause switch, and firing history |
 
 **Simple view.** On a computer with no code projects (or when you pick it at the bottom of the
 sidebar), Bosun drops the developer screens (Projects, Packages, the Claude pill) and uses plain
@@ -38,6 +39,9 @@ uv run bosun install-tasks      # daily refresh at 08:30 + dashboard at logon + 
 uv run bosun install-launcher   # just the app icon
 uv run bosun update-scanner     # install or update bin/osv-scanner now
 uv run bosun self-update        # update to the newest signed release now, without the day's wait (the daily refresh does this too)
+uv run bosun automations status # show automation pause state and counts (read-only)
+uv run bosun automations pause  # pause all automations immediately (global kill switch)
+uv run bosun automations resume # resume paused automations
 ```
 
 When the dashboard is running, `bosun refresh` asks it to refresh and waits, so only the dashboard writes the
@@ -262,13 +266,14 @@ uv run bosun query --json "SELECT * FROM v_failures"     # columns and rows as J
 uv run bosun query --schema                                # what can be read
 ```
 
-Eight views answer the usual questions: `v_current_items` (what is outdated or vulnerable now),
+Ten views answer the usual questions: `v_current_items` (what is outdated or vulnerable now),
 `v_item_history` (when an item appeared, changed lane, was fixed), `v_open_vulns` (each open CVE, what it
 touches, how long it has been open), `v_failures` (what failed, with the failing command), `v_triage` (triage
 verdicts, status, source and feedback), `v_ai_spend`
 (AI calls, tokens and window draw per day, provider, login and job), `v_llm_spend`
-(older per-purpose Claude spend view) and `v_actions` (the audit trail: every action that changed
-something, who asked for it, and how it ended). `quota_windows` holds the latest usage-window reading per login. [`data-model.md`](data-model.md) lists every view, table and column.
+(older per-purpose Claude spend view), `v_actions` (the audit trail: every action that changed
+something, who asked for it, and how it ended), `v_automations` (saved automation rules, grant expiry, and pause
+state), and `v_automation_firings` (automation firing history, status, reasons, trace ids, and offer decisions). `quota_windows` holds the latest usage-window reading per login. [`data-model.md`](data-model.md) lists every view, table and column.
 
 Every refresh is stored twice: whole, for the dashboard (the last 60), and as one row per item and per
 vulnerability, kept for a year (after a month, only each day's last snapshot), so history survives after the whole copies are gone.

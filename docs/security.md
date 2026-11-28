@@ -208,6 +208,15 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   so, and the UI renders them with `textContent` only. A model's reading of release notes never authorises an
   unattended install of a major version, and nothing a release note says can make the assistant act: the
   approval card is the only way.
+- Automations run only owner-saved rules through `Actions.permit` as actor `automation:<id>`. Every call
+  re-checks the global kill switch (`bosun automations pause`), the rule's enabled state, its canonical grant
+  digest, 90-day expiry on runs-on-its-own `INSTALL` grants, the action allow-list, the granted scope, and
+  Autopilot's unattended guards (3-day release wait, 24-hour KEV hold, `hands_off`, `caskguard`, `storeguard`).
+  All automation write actions and `decide_offer` are `user_only`: agents, the assistant, triage, and other
+  automations can never create, edit, pause, or approve them. Every `Risk.SYSTEM` action (`relaunch_app`,
+  `open_app`) and every asks-first rule creates a 24-hour expiring offer that runs once only after the owner
+  clicks **Approve**, spending a single-use `Approval` bound to that exact action and input digest. Triage
+  verdicts can only match structured fields; verdict prose never chooses an action or target.
 
 Known limit: Branch + test has no operating-system sandbox on Windows, or on Linux without `bwrap` and `socat`.
 There the allow-list of commands is the only limit, and a dependency's install script or a test still runs
