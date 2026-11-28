@@ -358,6 +358,11 @@ class OfferDecideIn(_In):
     reason: str = Field("", max_length=500, exclude=True, description="Optional note when declining")
 
 
+class HelperTrustIn(_In):
+    prompt: bool = Field(default=False, description="Show the macOS Accessibility prompt if not yet granted")
+    open_settings: bool = Field(default=False, description="Open macOS Accessibility settings if not yet granted")
+
+
 # --- specs ---------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ActionSpec:
@@ -525,6 +530,9 @@ SPECS: dict[str, ActionSpec] = _specs(
     ActionSpec("assistant_delete", "Delete a conversation and its messages",
                Risk.LOCAL, ConversationIn, "POST", "/api/assistant/conversations/{conversation_id}/delete",
                user_only=True, panel=True),
+    # Computer use helper permissions: only the owner at the dashboard may check or prompt Accessibility.
+    ActionSpec("helper_trust", "Check or request macOS Accessibility permission for Bosun Helper",
+               Risk.LOCAL, HelperTrustIn, "POST", "/api/computer-use/trust", user_only=True, panel=True),
 )
 
 # Routes that are deliberately not actions: page plumbing, not a capability.
@@ -566,7 +574,7 @@ DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "triage"
                           "ai_logins", "add_ai_login", "set_ai_login",
                           "ai_routing", "set_ai_routing", "set_quota_override",
                           "save_automation", "set_automation_enabled", "renew_automation",
-                          "delete_automation", "pause_automations", "decide_offer"})
+                          "delete_automation", "pause_automations", "decide_offer", "helper_trust"})
 
 
 def is_agent(actor: Actor) -> bool:

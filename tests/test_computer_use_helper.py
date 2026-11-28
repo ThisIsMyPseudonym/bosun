@@ -187,3 +187,72 @@ def test_helper_client_rejects_bad_reply_mac_bad_peer_uid_and_invalid_targets(tm
 
     with pytest.raises(helper.HelperAuthError, match="peer"):
         helper.call(tmp_path, "trusted", helper_app=app_bundle, run=peer_connect, verify_peer=lambda _c: False)
+
+
+def test_helper_trust_is_owner_only_panel_and_refused_in_demo_or_off_mac(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from conftest import SESSION_KEY, signed_in
+    from bosun import auth, demo, server
+    from bosun.config import load_settings
+    from bosun.store import Store
+
+    token = "t" * 32
+    headers = {"x-bosun-token": token}
+    st = Store(tmp_path / "bosun.db")
+    app = server.create_app(load_settings(), st, token)
+    user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+    agent = TestClient(app, base_url="http://127.0.0.1:8787")
+
+    # Agents cannot prompt Accessibility
+    r = agent.post("/api/computer-use/trust", json={"prompt": True}, auth=auth.AgentAuth(SESSION_KEY))
+    assert r.status_code == 403
+
+    # Off macOS: clean 404
+    monkeypatch.setattr(machine, "IS_MAC", False)
+    assert user.post("/api/computer-use/trust", json={"prompt": False}, headers=headers).status_code == 404
+
+    # On macOS with mocked helper: returns trusted state, opens settings only when untrusted + open_settings=True
+    monkeypatch.setattr(machine, "IS_MAC", True)
+    seen_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "bosun.computer_use.helper.call",
+        lambda data_dir, verb, **kw: seen_calls.append((verb, kw)) or {"ok": True, "trusted": True},
+    )
+    r = user.post("/api/computer-use/trust", json={"prompt": False, "open_settings": True}, headers=headers)
+    assert r.status_code == 200 and r.json() == {"trusted": True, "opened_settings": False}
+    assert seen_calls == [("trusted", {"params": {"prompt": False}})]
+
+    opened_urls: list[list[str]] = []
+    monkeypatch.setattr(
+        "bosun.computer_use.helper.call",
+        lambda data_dir, verb, **kw: {"ok": True, "trusted": False},
+    )
+    with monkeypatch.context() as mp:
+        mp.setattr(server.subprocess, "Popen", lambda argv, **kw: opened_urls.append(list(argv)))
+        r = user.post("/api/computer-use/trust", json={"prompt": True, "open_settings": True}, headers=headers)
+    assert r.status_code == 200 and r.json() == {"trusted": False, "opened_settings": True}
+    assert opened_urls == [
+        ["/usr/bin/open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]
+    ]
+
+    # HelperUnavailable -> 404, HelperError -> 502
+    monkeypatch.setattr(
+        "bosun.computer_use.helper.call",
+        lambda *a, **kw: (_ for _ in ()).throw(helper.HelperUnavailable("not installed")),
+    )
+    assert user.post("/api/computer-use/trust", json={"prompt": False}, headers=headers).status_code == 404
+
+    monkeypatch.setattr(
+        "bosun.computer_use.helper.call",
+        lambda *a, **kw: (_ for _ in ()).throw(helper.HelperTimeout("timed out")),
+    )
+    assert user.post("/api/computer-use/trust", json={"prompt": False}, headers=headers).status_code == 502
+
+    # Demo mode refuses
+    s = load_settings()
+    s = type(s)(**{**s.__dict__, "demo": True, "self_update": False, "data_dir": tmp_path})
+    dst = Store(tmp_path / "demo.db")
+    demo.seed(dst)
+    dc = TestClient(server.create_app(s, dst, token), base_url=f"http://127.0.0.1:{s.port}", cookies=signed_in(s.port))
+    assert dc.post("/api/computer-use/trust", json={"prompt": False}, headers=headers).status_code == 403

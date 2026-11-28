@@ -70,9 +70,9 @@ def test_every_action_is_a_tool_with_exactly_its_schema_and_nothing_else_is(dash
     listed = {t.name: t for t in session(dash, lambda c: c.list_tools()).tools}
     offered = mcp_server.tool_specs()
     assert set(listed) == set(offered) | set(HELPERS) and set(HELPERS) == {"wait_run"}
-    # the panels (Ask Bosun, the terminal) are the browser's, not tools
+    # the panels (Ask Bosun, the terminal, computer-use controls) are the browser's, not tools
     assert set(SPECS) - set(offered) == {n for n in SPECS if n.startswith("assistant_")} | {
-        "run_recipe", "run_recipes", "terminal_input", "terminal_stop", "set_list_prefs"}
+        "run_recipe", "run_recipes", "terminal_input", "terminal_stop", "set_list_prefs", "helper_trust"}
     for name, spec in offered.items():
         tool = listed[name]
         assert tool.input_schema == spec.input.model_json_schema(), name

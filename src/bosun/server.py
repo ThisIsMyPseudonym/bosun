@@ -47,10 +47,12 @@ from .config import Settings
 from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, AutomationFiringsIn,
                        AutomationIdIn, AutomationToggleIn, Conflict, ConversationIn, ConversationsIn, DecideIn, Empty,
-                       Failed, FixIdIn, FixIn, Forbidden, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
-                       NotFound, OfferDecideIn, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk,
-                       RunbookIn, RunIn, RunManyIn, RunsIn, SaveAutomationIn, TraceIn, TriageFeedbackIn, TriageIn,
-                       TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+                       Failed, FixIdIn, FixIn, Forbidden, HelperTrustIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn,
+                       KeysIn, ListPrefsIn, NotFound, OfferDecideIn, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn,
+                       RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn, SaveAutomationIn,
+                       TraceIn, TriageFeedbackIn, TriageIn, TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn,
+                       AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+from .computer_use import helper as cu_helper, policy as cu_policy
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, router as ai_router, routing as ai_routing, usage as ai_usage
@@ -211,6 +213,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             return JSONResponse({"error": "app icons are not open to agents"}, status_code=403)
         if path.startswith("/api/terminal"):  # a command that may ask for your password: started and answered by you
             return JSONResponse({"error": "Bosun's terminal is not open to agents"}, status_code=403)
+        if path.startswith("/api/computer-use"):  # Accessibility permission and live panel controls are yours alone
+            return JSONResponse({"error": "computer-use controls are not open to agents"}, status_code=403)
         name = auth.agent_name(request.headers.get(auth.AGENT_HEADER))
         if name is None:
             return JSONResponse({"error": "invalid agent name"}, status_code=400)
@@ -240,6 +244,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             return JSONResponse({"error": "app icons are not open to agents"}, status_code=403)
         if path.startswith("/api/terminal"):
             return JSONResponse({"error": "Bosun's terminal is not open to agents"}, status_code=403)
+        if path.startswith("/api/computer-use"):
+            return JSONResponse({"error": "computer-use controls are not open to agents"}, status_code=403)
         request.state.actor, request.state.surface = registry.ASSISTANT, "assistant"
         request.state.assistant_grant = grant
         request.state.assistant_token = assistant_token
@@ -261,7 +267,7 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         path = request.url.path
         if not path.startswith("/api/") or path == "/api/state":
             return JSONResponse({"error": "triage can only call read-only actions"}, status_code=403)
-        if path.startswith(("/api/assistant", "/api/icon", "/api/terminal")):
+        if path.startswith(("/api/assistant", "/api/icon", "/api/terminal", "/api/computer-use")):
             return JSONResponse({"error": "this panel route is not open to triage"}, status_code=403)
         grant = triage_tokens.consume_call(triage_token)
         if grant is None:
@@ -926,6 +932,33 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         except OSError as exc:
             raise Failed(f"Could not open {machine.UPDATES_LABEL}: {exc}")
         return {"opened": machine.UPDATES_LABEL}
+
+    @actions.bind("helper_trust")
+    def helper_trust(ctx: ActionContext, body: HelperTrustIn):
+        """Check or prompt macOS Accessibility permission for Bosun Helper. Owner at the dashboard only."""
+        if ctx.actor != "user":
+            raise Forbidden("Only the person at the dashboard can manage Bosun Helper permissions")
+        if not machine.IS_MAC:
+            raise NotFound(cu_policy.MAC_ONLY_MSG)
+        try:
+            res = cu_helper.call(s.data_dir, "trusted", params={"prompt": body.prompt})
+        except cu_helper.HelperUnavailable as exc:
+            raise NotFound(str(exc))
+        except cu_helper.HelperError as exc:
+            raise Failed(str(exc))
+        trusted = bool(res.get("trusted"))
+        opened_settings = False
+        if body.open_settings and not trusted:
+            try:
+                subprocess.Popen(
+                    ["/usr/bin/open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                opened_settings = True
+            except OSError as exc:
+                log.warning("could not open macOS Accessibility settings: %s", exc)
+        return {"trusted": trusted, "opened_settings": opened_settings}
 
     @actions.bind("upgrade")
     def upgrade(ctx: ActionContext, body: KeysIn):
