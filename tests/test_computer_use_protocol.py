@@ -83,6 +83,9 @@ def test_browser_denylist_and_helper_request_mac_verification():
         )
     with pytest.raises(ValueError):
         sign_request("too-short", verb="trusted", now=1000.0)
+    with pytest.raises(ValueError):
+        sign_request(key, verb="trusted", nonce="", now=1000.0)
+    assert verify_request(key, {**req.to_dict(), "params": {"bad": object()}}, now=1005.0) is False
 
 
 def test_reply_mac_verification_binds_to_nonce_and_payload():
@@ -99,11 +102,14 @@ def test_reply_mac_verification_binds_to_nonce_and_payload():
     assert verify_reply("x" * 64, "nonce-123", raw) is False
     assert verify_reply(key, "nonce-123", {**raw, "payload": {"ok": True, "trusted": False}}) is False
     assert verify_reply(key, "nonce-123", {**raw, "payload": "not-a-dict"}) is False
+    assert verify_reply(key, "nonce-123", {**raw, "payload": {"bad": object()}}) is False
     assert verify_reply("short", "nonce-123", raw) is False
     with pytest.raises(ValueError):
         sign_reply("short", "nonce-123", {"ok": True})
     with pytest.raises(ValueError):
         sign_reply(key, "", {"ok": True})
+    with pytest.raises(ValueError):
+        sign_reply(key, "nonce-123", "not-a-mapping")  # type: ignore[arg-type]
 
 
 def test_canonical_json_is_deterministic():
@@ -147,7 +153,7 @@ def test_bounded_socket_framing_round_trips_and_rejects_oversized_or_truncated()
         b.close()
 
 
-def test_peer_uid_matches_current_user_and_rejects_mismatch():
+def test_peer_uid_matches_current_user_and_rejects_mismatch(monkeypatch):
     if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
         pytest.skip("POSIX AF_UNIX not available")
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -156,6 +162,11 @@ def test_peer_uid_matches_current_user_and_rejects_mismatch():
             assert peer_uid(a) == os.getuid()
             assert check_peer_uid(a) is True
             assert check_peer_uid(a, expected_uid=os.getuid() + 1) is False
+            # Fails closed if peer_uid cannot be retrieved on macOS/Linux
+            monkeypatch.setattr("bosun.computer_use.protocol.peer_uid", lambda _s: None)
+            assert check_peer_uid(a) is False
     finally:
         a.close()
         b.close()
+    # Closed socket returns None without raising
+    assert peer_uid(a) is None

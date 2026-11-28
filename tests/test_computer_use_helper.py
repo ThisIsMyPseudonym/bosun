@@ -188,6 +188,95 @@ def test_helper_client_rejects_bad_reply_mac_bad_peer_uid_and_invalid_targets(tm
     with pytest.raises(helper.HelperAuthError, match="peer"):
         helper.call(tmp_path, "trusted", helper_app=app_bundle, run=peer_connect, verify_peer=lambda _c: False)
 
+    # Unsupported verb and missing bundle_id for non-trusted verb
+    with pytest.raises(ValueError, match="unsupported"):
+        helper.call(tmp_path, "shell", helper_app=app_bundle)
+    with pytest.raises(helper.HelperError, match="bundle_id"):
+        helper.call(tmp_path, "state", bundle_id="", bundle_path=tmp_path / "Slack.app", helper_app=app_bundle)
+
+    # Helper returns signed auth_failed -> HelperAuthError
+    def auth_failed_run(argv, timeout=30, env=None, **kw):
+        _fake_helper_exchange(
+            argv[argv.index("--sock") + 1], env[protocol.HELPER_KEY_ENV],
+            lambda _r: {"ok": False, "error": "auth_failed", "message": "bad mac"},
+        )
+        return proc.Result(tuple(argv), 0, "", "")
+
+    with pytest.raises(helper.HelperAuthError, match="bad mac"):
+        helper.call(tmp_path, "trusted", helper_app=app_bundle, run=auth_failed_run)
+
+    # Malformed non-JSON reply frame -> HelperAuthError
+    def garbage_reply(argv, timeout=30, env=None, **kw):
+        sock_path = argv[argv.index("--sock") + 1]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(sock_path)
+            protocol.read_frame(s, max_bytes=protocol.MAX_REQUEST_BYTES)
+            protocol.write_frame(s, b"{not-json", max_bytes=protocol.MAX_REPLY_BYTES)
+        return proc.Result(tuple(argv), 0, "", "")
+
+    with pytest.raises(helper.HelperAuthError, match="invalid helper reply"):
+        helper.call(tmp_path, "trusted", helper_app=app_bundle, run=garbage_reply)
+
+    # Subprocess exits without connecting (rc 124 -> HelperTimeout, rc 1 -> HelperError)
+    with pytest.raises(helper.HelperTimeout):
+        helper.call(
+            tmp_path, "trusted", helper_app=app_bundle,
+            run=lambda argv, **kw: proc.Result(tuple(argv), 124, "", "timed out"),
+        )
+    with pytest.raises(helper.HelperError, match="did not answer"):
+        helper.call(
+            tmp_path, "trusted", helper_app=app_bundle,
+            run=lambda argv, **kw: proc.Result(tuple(argv), 1, "", "launch failed"),
+        )
+
+
+def test_private_dir_and_socket_dir_fallback(tmp_path, monkeypatch):
+    assert helper._private_dir(str(tmp_path / "nonexistent")) is False
+    world = tmp_path / "world"
+    world.mkdir()
+    os.chmod(world, 0o755)
+    assert helper._private_dir(str(world)) is False
+    priv = tmp_path / "priv"
+    priv.mkdir(mode=0o700)
+    os.chmod(priv, 0o700)
+    assert helper._private_dir(str(priv)) is True
+    # Symlink to a 0700 dir is still rejected
+    link = tmp_path / "link"
+    link.symlink_to(priv)
+    assert helper._private_dir(str(link)) is False
+
+    # Fallback to /tmp/bosun-<uid> when TMPDIR is too long
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "")
+    monkeypatch.setattr("tempfile.gettempdir", lambda: "/" + "a" * 80)
+    base = helper._base_socket_dir()
+    assert base == f"/tmp/bosun-{os.getuid()}"
+    assert helper._private_dir(base) is True
+
+    # Non-private fallback directory is refused
+    monkeypatch.setattr(helper, "_private_dir", lambda _p: False)
+    with pytest.raises(helper.HelperError, match="private 0700"):
+        helper._base_socket_dir()
+
+    # Helper that connects, reads request, and hangs without replying raises HelperTimeout
+    monkeypatch.undo()
+    monkeypatch.setattr(machine, "IS_MAC", True)
+    app_bundle = tmp_path / "Bosun Helper.app"
+    (app_bundle / "Contents" / "MacOS").mkdir(parents=True)
+    (app_bundle / "Contents" / "MacOS" / "bosun-helper").write_bytes(b"fake")
+
+    def silent_peer(argv, timeout=30, env=None, **kw):
+        import time
+
+        sock_path = argv[argv.index("--sock") + 1]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(sock_path)
+            protocol.read_frame(s, max_bytes=protocol.MAX_REQUEST_BYTES)
+            time.sleep(0.7)
+        return proc.Result(tuple(argv), 0, "", "")
+
+    with pytest.raises(helper.HelperTimeout, match="timed out"):
+        helper.call(tmp_path, "trusted", helper_app=app_bundle, run=silent_peer, timeout=0.1, retries=1)
+
 
 def test_helper_trust_is_owner_only_panel_and_refused_in_demo_or_off_mac(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient

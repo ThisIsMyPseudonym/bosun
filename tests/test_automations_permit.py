@@ -39,6 +39,7 @@ from bosun.registry import (
     FixIdIn,
     FixIn,
     Forbidden,
+    HelperTrustIn,
     JobIn,
     KeyIn,
     ListPrefsIn,
@@ -243,6 +244,7 @@ FORBIDDEN_AUTOMATION_ACTIONS = [
     ("assistant_conversations", ConversationsIn()),
     ("assistant_conversation", ConversationIn(conversation_id="deadbeef1234")),
     ("assistant_delete", ConversationIn(conversation_id="deadbeef1234")),
+    ("helper_trust", HelperTrustIn(prompt=False)),
     # Non-allowlisted local / system / read actions
     ("cancel_job", JobIn(job_id=1)),
     ("discard_fix", FixIdIn(fix_id=1)),
