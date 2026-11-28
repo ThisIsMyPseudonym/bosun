@@ -337,3 +337,169 @@ def test_docs_describe_real_offer_binding_and_in_app_update_placeholder():
     assert "bound to that exact action and input digest" not in sec
     assert "project 4" in ai and "do nothing" in ai and "reader" in ai
 
+
+def test_decide_offer_http_refuses_assistant_triage_and_csrf_without_running(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+    app = create_app(load_settings(), st, TOKEN)
+    ran: list[str] = []
+    app.state.actions.bind("relaunch_app")(lambda ctx, body: ran.append(body.app) or {"app": body.app})
+
+    defn = AutomationDef(
+        name="Offer Chrome", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="relaunch_app", scope=AppActionScope(app="chrome"), mode="ask",
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=now)
+    fid = astore.insert_firing(
+        st, aid, defn.name, "refresh", "snap:1", "http-auth:1",
+        status="offered", deadline=now + 86400.0, input_data={"app": "chrome"}, now=now,
+    )
+    assert fid is not None
+
+    asst_tok = app.state.assistant_tokens.issue("c" * 32, 1)
+    triage_tok = app.state.triage_tokens.issue("a" * 32)
+    raw = TestClient(app, base_url=BASE)
+    csrf_client = TestClient(app, base_url=BASE, cookies=signed_in())
+
+    r_asst = raw.post(f"/api/automations/firings/{fid}/decide", json={"approve": True},
+                      headers={auth.ASSISTANT_TOKEN_HEADER: asst_tok})
+    r_tri = raw.post(f"/api/automations/firings/{fid}/decide", json={"approve": True},
+                     headers={auth.TRIAGE_TOKEN_HEADER: triage_tok})
+    r_csrf = csrf_client.post(f"/api/automations/firings/{fid}/decide", json={"approve": True})
+    r_bad_tok = csrf_client.post(f"/api/automations/firings/{fid}/decide", json={"approve": True},
+                                 headers={"x-bosun-token": "wrong" * 8})
+
+    assert r_asst.status_code == 403
+    assert r_tri.status_code == 403
+    assert r_csrf.status_code == 403
+    assert r_bad_tok.status_code == 403
+    assert ran == []
+    assert astore.get_firing(st, fid)["status"] == "offered"
+
+
+def test_decide_offer_http_concurrent_double_approve_runs_exactly_once(tmp_path):
+    import threading
+
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+    app = create_app(load_settings(), st, TOKEN)
+    ran: list[str] = []
+    lock = threading.Lock()
+
+    def slow_relaunch(_ctx, body):
+        time.sleep(0.03)
+        with lock:
+            ran.append(body.app)
+        return {"app": body.app}
+
+    app.state.actions.bind("relaunch_app")(slow_relaunch)
+    defn = AutomationDef(
+        name="Offer Chrome race", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="relaunch_app", scope=AppActionScope(app="chrome"), mode="ask",
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=now)
+    fid = astore.insert_firing(
+        st, aid, defn.name, "refresh", "snap:1", "http-race:1",
+        status="offered", deadline=now + 86400.0, input_data={"app": "chrome"}, now=now,
+    )
+    assert fid is not None
+
+    barrier = threading.Barrier(2)
+    codes: list[int] = []
+    client = TestClient(app, base_url=BASE, cookies=signed_in())
+
+    def hit():
+        barrier.wait()
+        r = client.post(f"/api/automations/firings/{fid}/decide", json={"approve": True}, headers=HDR)
+        with lock:
+            codes.append(r.status_code)
+
+    threads = [threading.Thread(target=hit) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+
+    assert sorted(codes) == [200, 409]
+    assert ran == ["chrome"]
+    assert astore.get_firing(st, fid)["status"] == "done"
+
+
+def test_decide_offer_http_replay_expiry_and_tampered_stored_input(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+    jq = Item(Source.BREW, "jq", "jq", "1.7", "1.8", lane="now")
+    wget = Item(Source.BREW, "wget", "wget", "1.24", "1.25", lane="now")
+    st.save_snapshot([item_to_dict(jq), item_to_dict(wget)], [])
+
+    app = create_app(load_settings(), st, TOKEN)
+    upgraded: list[list[str]] = []
+    relaunched: list[str] = []
+    app.state.actions.bind("upgrade")(lambda ctx, body: upgraded.append(list(body.keys)) or {"queued": [1], "skipped": []})
+    app.state.actions.bind("relaunch_app")(lambda ctx, body: relaunched.append(body.app) or {"app": body.app})
+    user = TestClient(app, base_url=BASE, cookies=signed_in())
+
+    u_def = AutomationDef(
+        name="Ask jq only", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="upgrade", scope=UpgradeScope(mode="keys", keys=(jq.key,)), mode="ask",
+    )
+    aid_u = astore.save(st, u_def, enabled=True, grant_digest=grant_digest(u_def), granted_by="user", now=now)
+
+    # 1. Replay over HTTP runs once; second POST is 409
+    f_rep = astore.insert_firing(
+        st, aid_u, u_def.name, "refresh", "snap:1", "http-rep:1",
+        status="offered", deadline=now + 86400.0, input_data={"keys": [jq.key]}, now=now,
+    )
+    assert f_rep is not None
+    assert user.post(f"/api/automations/firings/{f_rep}/decide", json={"approve": True}, headers=HDR).status_code == 200
+    assert user.post(f"/api/automations/firings/{f_rep}/decide", json={"approve": True}, headers=HDR).status_code == 409
+    assert upgraded == [[jq.key]]
+
+    # 2. Approve after expiry over HTTP -> 409 and nothing runs
+    f_exp = astore.insert_firing(
+        st, aid_u, u_def.name, "refresh", "snap:2", "http-exp:1",
+        status="offered", deadline=now - 5.0, input_data={"keys": [jq.key]}, now=now - 100.0,
+    )
+    assert f_exp is not None
+    r_exp = user.post(f"/api/automations/firings/{f_exp}/decide", json={"approve": True}, headers=HDR)
+    assert r_exp.status_code == 409 and "expired" in r_exp.json()["detail"].lower()
+    assert astore.get_firing(st, f_exp)["status"] == "expired"
+    assert upgraded == [[jq.key]]
+
+    # 3. Changed stored input (out-of-scope tamper in SQLite) -> 403, refused, nothing runs
+    f_tamper = astore.insert_firing(
+        st, aid_u, u_def.name, "refresh", "snap:3", "http-tamper:1",
+        status="offered", deadline=now + 86400.0, input_data={"keys": [jq.key]}, now=now,
+    )
+    assert f_tamper is not None
+    with st._tx(write=True) as db:
+        db.execute("UPDATE automation_firings SET input=? WHERE id=?", (json.dumps({"keys": [wget.key]}), f_tamper))
+    r_tamper = user.post(f"/api/automations/firings/{f_tamper}/decide", json={"approve": True}, headers=HDR)
+    assert r_tamper.status_code == 403
+    assert astore.get_firing(st, f_tamper)["status"] == "refused"
+    assert upgraded == [[jq.key]]
+
+    # 4. Changed stored input (invalid schema tamper in SQLite) -> 400, refused, nothing runs
+    from bosun.automations.schema import RecheckProjectScope
+
+    rechecked: list[str] = []
+    app.state.actions.bind("recheck_project")(lambda ctx, body: rechecked.append(body.project) or {"project": body.project})
+    p_def = AutomationDef(
+        name="Ask recheck", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="recheck_project", scope=RecheckProjectScope(mode="project", project="proj-a"), mode="ask",
+    )
+    aid_p = astore.save(st, p_def, enabled=True, grant_digest=grant_digest(p_def), granted_by="user", now=now)
+    f_bad = astore.insert_firing(
+        st, aid_p, p_def.name, "refresh", "snap:4", "http-bad:1",
+        status="offered", deadline=now + 86400.0, input_data={"project": "proj-a"}, now=now,
+    )
+    assert f_bad is not None
+    with st._tx(write=True) as db:
+        db.execute("UPDATE automation_firings SET input=? WHERE id=?", (json.dumps({"project": ""}), f_bad))
+    r_bad = user.post(f"/api/automations/firings/{f_bad}/decide", json={"approve": True}, headers=HDR)
+    assert r_bad.status_code == 400
+    assert astore.get_firing(st, f_bad)["status"] == "refused"
+    assert rechecked == []
+    assert relaunched == []
+
+
