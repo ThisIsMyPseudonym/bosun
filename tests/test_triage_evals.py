@@ -22,7 +22,8 @@ import pytest
 import triage_eval_loader as loader
 
 from bosun import actions, machine, mcp_server, recipes
-from bosun.triage import check, rules
+from bosun.store import Store
+from bosun.triage import check, rules, store as tstore, worker
 
 
 def test_fixture_hygiene_rejects_secrets_home_paths_emails_and_duplicates(tmp_path: Path):
@@ -212,3 +213,82 @@ def test_offline_rules_eval_suite_achieves_100_percent(monkeypatch: pytest.Monke
     assert score == 1.0 and not failures, (
         f"rules offline eval score {passed}/{len(rules_cases)} ({score:.1%} < 100%):\n" + "\n".join(failures)
     )
+
+
+def _eval_cache_case(tmp_path: Path, case: loader.EvalCase, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    _apply_platform(monkeypatch, case.platform)
+    st = Store(tmp_path / f"{case.id}.db")
+    try:
+        assert case.cached_origin is not None, f"{case.id}: missing cached_origin"
+        origin_case = loader.parse_case(
+            {
+                "id": f"{case.id}-origin", "family": "cache", "eval_kind": "model",
+                "failure": case.cached_origin["failure"], "expected": {"source": "model"},
+            },
+            source_file=case.source_file,
+        )
+        origin_rec = origin_case.to_record(ts=1000.0)
+        origin_sig = worker.signature_of(origin_rec)
+        origin_verdict = loader.validate_verdict_payload(case.cached_origin["verdict"])
+        origin_id = tstore.save_verdict(
+            st, origin_rec.failure, origin_rec.trace_id, origin_sig, "model", origin_verdict, now=1500.0,
+        )
+        loaded = loader.seed_case_in_store(st, case, now=1900.0)
+        row = worker.evaluate_fast(st, loaded, now=2000.0)
+        if row is None:
+            return [f"{case.id}: cache miss (sig target={worker.signature_of(loaded)} origin={origin_sig})"]
+        errs: list[str] = []
+        if row["source"] != "cache" or row["same_as"] != origin_id:
+            errs.append(f"{case.id}: source={row['source']!r} same_as={row['same_as']!r} != {origin_id}")
+        v = row["verdict"]
+        exp = case.expected
+        if v["category"] != exp.category:
+            errs.append(f"{case.id}: category={v['category']!r}, expected={exp.category!r}")
+        if v["next_step"]["kind"] != exp.step_kind:
+            errs.append(f"{case.id}: step_kind={v['next_step']['kind']!r}, expected={exp.step_kind!r}")
+        if v["next_step"]["runbook"] != exp.runbook or v["next_step"]["recipe"] != exp.recipe:
+            errs.append(f"{case.id}: unexpected runbook/recipe {v['next_step']!r}")
+        return errs
+    finally:
+        st.close()
+
+
+def test_offline_cache_eval_suite_achieves_100_percent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cache_cases = [c for c in loader.load_cases(loader.FIXTURES_DIR) if c.eval_kind == "cache"]
+    assert cache_cases, "expected cache eval fixtures under tests/fixtures/triage/"
+    failures: list[str] = []
+    passed = 0
+    for case in cache_cases:
+        errs = _eval_cache_case(tmp_path, case, monkeypatch)
+        if errs:
+            failures.extend(errs)
+        else:
+            passed += 1
+    score = passed / len(cache_cases)
+    assert score == 1.0 and not failures, (
+        f"cache offline eval score {passed}/{len(cache_cases)} ({score:.1%} < 100%):\n" + "\n".join(failures)
+    )
+
+
+def test_offline_outage_eval_suite_achieves_100_percent():
+    outage_cases = [c for c in loader.load_cases(loader.FIXTURES_DIR) if c.eval_kind == "outage"]
+    assert outage_cases, "expected outage eval fixtures under tests/fixtures/triage/"
+    failures: list[str] = []
+    passed = 0
+    for case in outage_cases:
+        rec = case.to_record()
+        want_auto = bool(case.expected.eligible_auto)
+        errs: list[str] = []
+        if rules.match(rec) is not None:
+            errs.append(f"{case.id}: outage refresh unexpectedly matched a rule")
+        if not worker.eligible_for_rules(rec):
+            errs.append(f"{case.id}: expected eligible_for_rules=True")
+        if worker.eligible_for_auto_model(rec) is not want_auto:
+            errs.append(f"{case.id}: eligible_for_auto_model != {want_auto}")
+        if rules.is_outage_only(rec.error) is want_auto:
+            errs.append(f"{case.id}: is_outage_only != {not want_auto}")
+        if errs:
+            failures.extend(errs)
+        else:
+            passed += 1
+    assert passed == len(outage_cases) and not failures, "\n".join(failures)

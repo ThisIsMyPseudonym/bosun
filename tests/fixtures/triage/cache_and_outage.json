@@ -1,0 +1,157 @@
+{
+  "cases": [
+    {
+      "id": "cache-reuse-brew-cask-upstream-503",
+      "family": "cache",
+      "eval_kind": "cache",
+      "platform": "mac",
+      "cached_origin": {
+        "failure": {
+          "what": "job", "what_id": "300", "kind": "upgrade",
+          "subject": "brew-cask:vlc", "item_source": "brew-cask", "status": "failed", "actor": "autopilot",
+          "command": ["brew", "upgrade", "--cask", "vlc"], "exit_code": 1,
+          "error": "Error: mirror returned HTTP 503 while downloading vlc 3.0.21",
+          "output": "Error: mirror returned HTTP 503 while downloading vlc 3.0.21\n"
+        },
+        "verdict": {
+          "category": "upstream_broken",
+          "cause": "Upstream mirror returned HTTP 503 while fetching the cask archive.",
+          "confidence": "high",
+          "evidence": [{"source": "output", "ref": "", "line": "mirror returned HTTP 503 while downloading"}],
+          "next_step": {"kind": "retry", "recipe": null, "runbook": null, "why": "Retry once the mirror recovers."},
+          "needs_person": false,
+          "transient": true
+        }
+      },
+      "failure": {
+        "what": "job", "what_id": "301", "kind": "upgrade",
+        "subject": "brew-cask:obs", "item_source": "brew-cask", "status": "failed", "actor": "autopilot",
+        "command": ["brew", "upgrade", "--cask", "obs"], "exit_code": 1,
+        "error": "Error: mirror returned HTTP 503 while downloading obs 31.0.0",
+        "output": "Error: mirror returned HTTP 503 while downloading obs 31.0.0\n"
+      },
+      "item": {"source": "brew-cask", "package_id": "obs", "name": "OBS", "installed": "30.2.3", "available": "31.0.0"},
+      "expected": {
+        "source": "cache", "category": "upstream_broken", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "cache-reuse-manual-app-drops-retry",
+      "family": "cache",
+      "eval_kind": "cache",
+      "platform": "mac",
+      "cached_origin": {
+        "failure": {
+          "what": "job", "what_id": "302", "kind": "upgrade",
+          "subject": "mac-app:com.vendor.alpha", "item_source": "mac-app", "status": "failed", "actor": "user",
+          "command": ["open", "com.vendor.alpha"], "exit_code": 1,
+          "error": "Error: upstream feed returned HTTP 502 for com.vendor.alpha 1.2.0",
+          "output": "Error: upstream feed returned HTTP 502 for com.vendor.alpha 1.2.0\n"
+        },
+        "verdict": {
+          "category": "upstream_broken",
+          "cause": "Vendor download server returned HTTP 502.",
+          "confidence": "medium",
+          "evidence": [{"source": "output", "ref": "", "line": "upstream feed returned HTTP 502"}],
+          "next_step": {"kind": "retry", "recipe": null, "runbook": null, "why": "Retry later."},
+          "needs_person": false,
+          "transient": true
+        }
+      },
+      "failure": {
+        "what": "job", "what_id": "303", "kind": "upgrade",
+        "subject": "mac-app:com.vendor.beta", "item_source": "mac-app", "status": "failed", "actor": "user",
+        "command": ["open", "com.vendor.beta"], "exit_code": 1,
+        "error": "Error: upstream feed returned HTTP 502 for com.vendor.beta 2.4.1",
+        "output": "Error: upstream feed returned HTTP 502 for com.vendor.beta 2.4.1\n"
+      },
+      "item": {
+        "source": "mac-app", "package_id": "com.vendor.beta", "name": "Beta App",
+        "installed": "2.3.0", "available": "2.4.1", "manual": "Download from vendor site"
+      },
+      "expected": {
+        "source": "cache", "category": "upstream_broken", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "cache-reuse-repo-fix-rechecks-agent-prompt",
+      "family": "cache",
+      "eval_kind": "cache",
+      "platform": "mac",
+      "cached_origin": {
+        "failure": {
+          "what": "fix", "what_id": "304", "kind": "fix",
+          "subject": "repo:npm:express@service-a", "item_source": "repo", "status": "failed", "actor": "user",
+          "command": ["npm", "test"], "exit_code": 1,
+          "error": "FAIL src/server.test.ts: expected status 200 received 500",
+          "output": "FAIL src/server.test.ts: expected status 200 received 500\n"
+        },
+        "verdict": {
+          "category": "tests_failed",
+          "cause": "Project test suite failed after bumping the dependency.",
+          "confidence": "high",
+          "evidence": [{"source": "output", "ref": "", "line": "FAIL src/server.test.ts: expected status 200 received 500"}],
+          "next_step": {"kind": "retry", "recipe": null, "runbook": null, "why": "Inspect test failures in the branch."},
+          "needs_person": true,
+          "transient": false
+        }
+      },
+      "failure": {
+        "what": "fix", "what_id": "305", "kind": "fix",
+        "subject": "repo:npm:fastify@service-b", "item_source": "repo", "status": "failed", "actor": "user",
+        "command": ["npm", "test"], "exit_code": 1,
+        "error": "FAIL src/server.test.ts: expected status 200 received 500",
+        "output": "FAIL src/server.test.ts: expected status 200 received 500\n"
+      },
+      "item": {
+        "source": "repo", "package_id": "fastify", "name": "fastify",
+        "installed": "4.28.0", "available": "5.0.0", "ecosystem": "npm", "project": "service-b"
+      },
+      "expected": {
+        "source": "cache", "category": "tests_failed", "step_kind": "agent_prompt",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "outage-refresh-partial-nvd",
+      "family": "outage",
+      "eval_kind": "outage",
+      "failure": {
+        "what": "run", "what_id": "eval-outage-nvd", "kind": "refresh",
+        "subject": "everything", "item_source": "", "status": "partial", "actor": "schedule",
+        "command": [], "exit_code": null,
+        "error": "NVD did not answer; CVSS scores may be missing.",
+        "output": "NVD did not answer; CVSS scores may be missing."
+      },
+      "expected": {"source": "outage_skip", "eligible_auto": false}
+    },
+    {
+      "id": "outage-refresh-partial-multi-service",
+      "family": "outage",
+      "eval_kind": "outage",
+      "failure": {
+        "what": "run", "what_id": "eval-outage-multi", "kind": "refresh",
+        "subject": "everything", "item_source": "", "status": "partial", "actor": "schedule",
+        "command": [], "exit_code": null,
+        "error": "NVD did not answer; using cached advisories\nOSV.dev did not answer; skipping new checks",
+        "output": "NVD did not answer; using cached advisories\nOSV.dev did not answer; skipping new checks"
+      },
+      "expected": {"source": "outage_skip", "eligible_auto": false}
+    },
+    {
+      "id": "outage-refresh-partial-format-change",
+      "family": "outage",
+      "eval_kind": "outage",
+      "failure": {
+        "what": "run", "what_id": "eval-outage-fmt", "kind": "refresh",
+        "subject": "everything", "item_source": "", "status": "partial", "actor": "schedule",
+        "command": [], "exit_code": null,
+        "error": "NVD did not answer; cached\nHomebrew answered in a form Bosun could not read; skipped",
+        "output": "NVD did not answer; cached\nHomebrew answered in a form Bosun could not read; skipped"
+      },
+      "expected": {"source": "model", "eligible_auto": true}
+    }
+  ]
+}

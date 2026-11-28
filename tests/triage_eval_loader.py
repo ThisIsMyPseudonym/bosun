@@ -267,17 +267,20 @@ def seed_case_in_store(store: Store, case: EvalCase, *, now: float = 1000.0) -> 
                 r.fail(rec.error or rec.output, status=rec.status)
             store.finish_job(job_id, rec.status, rec.output)
         elif rec.what == "fix":
-            fix_id = store.create_fix(rec.subject, rec.item_source or "proj", "bosun/fix-eval", actor=rec.actor)
+            project = (item.project if item and item.project else "proj")
+            fix_id = store.create_fix(rec.subject, project)
             fix = store.fix(fix_id)
             assert fix is not None
             tid = str(fix["trace_id"])
-            with trace.run("fix", subject=rec.subject, actor=rec.actor, trace_id=tid) as r:
+            with trace.run("fix", subject=project, actor=rec.actor, trace_id=tid) as r:
                 if rec.command:
                     with trace.span("subprocess", rec.command[0], argv=list(rec.command)) as sp:
                         sp.set(returncode=rec.exit_code if rec.exit_code is not None else 1, stderr_tail=rec.output)
                         sp.fail(f"exit {rec.exit_code if rec.exit_code is not None else 1}")
                 r.fail(rec.error or rec.output, status=rec.status)
-            store.finish_fix(fix_id, rec.status, {"error": rec.error, "output": rec.output})
+            store.update_fix(
+                fix_id, status=rec.status, branch="bosun/fix-eval", result={"error": rec.error, "output": rec.output},
+            )
         else:
             with trace.run(rec.kind, subject=rec.subject, actor=rec.actor) as r:
                 if rec.command:
