@@ -381,3 +381,82 @@ def test_v13_adds_triage_disputed_rules_and_backfills_existing_disputes(tmp_path
     assert [(r[0], r[1]) for r in rows] == [("sig-disputed", 1200.0)]
     store.close()
 
+
+def test_v15_adds_automations_tables_views_and_prunes_old_firings(tmp_path):
+    from bosun import query
+
+    path = tmp_path / "bosun.db"
+    db = sqlite3.connect(path)
+    migrate(db, path, migrations.MIGRATIONS[:14])  # a v14 database
+    db.close()
+
+    store = Store(path)
+    assert migrations.current_version(store._db) == 15
+    with store._tx(write=True) as tx:
+        tx.execute(
+            "INSERT INTO automations (name, preset, enabled, trigger, conditions, action, scope, mode, "
+            "grant_digest, granted_by, granted_at, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "What changed",
+                "what_changed",
+                1,
+                '{"kind":"refresh"}',
+                "{}",
+                "notify",
+                '{"digest":"what_changed"}',
+                "run",
+                "abc",
+                "user",
+                1000.0,
+                1000.0,
+                1000.0,
+            ),
+        )
+        aid = tx.execute("SELECT last_insert_rowid()").fetchone()[0]
+        tx.execute(
+            "INSERT INTO automations (name, preset, enabled, trigger, conditions, action, scope, mode, "
+            "grant_digest, granted_by, granted_at, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "Nightly fix",
+                "nightly_fix",
+                1,
+                '{"kind":"schedule","time":"02:00","days":[]}',
+                '{"project":"p1","lane":"now"}',
+                "start_fix",
+                '{"project":"p1","lane":"now"}',
+                "run",
+                "def",
+                "user",
+                2000.0,
+                2000.0,
+                2000.0,
+            ),
+        )
+        tx.execute(
+            "INSERT INTO automation_firings (automation_id, automation_name, event_kind, event_ref, dedup_key, "
+            "depth, status, due, created, finished) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (aid, "What changed", "refresh", "snap:1", "refresh:snap:1", 0, "done", 1000.0, 1000.0, 1001.0),
+        )
+        tx.execute(
+            "INSERT INTO automation_firings (automation_id, automation_name, event_kind, event_ref, dedup_key, "
+            "depth, status, due, created) VALUES (?,?,?,?,?,?,?,?,?)",
+            (aid, "What changed", "refresh", "snap:2", "refresh:snap:2", 0, "scheduled", 1000.0, 1000.0),
+        )
+    got_a = query.run(store.path, "SELECT name, action, mode, enabled, grant_expires_at FROM v_automations ORDER BY id")
+    got_f = query.run(
+        store.path,
+        "SELECT automation_name, event_kind, status, decided_by FROM v_automation_firings ORDER BY id",
+    )
+    assert got_a["rows"] == [
+        ["What changed", "notify", "run", 1, None],
+        ["Nightly fix", "start_fix", "run", 1, 2000.0 + 90 * 86400],
+    ]
+    assert got_f["rows"] == [
+        ["What changed", "refresh", "done", ""],
+        ["What changed", "refresh", "scheduled", ""],
+    ]
+    pruned = store._prune_records(now=1001.0 + 400 * 86400)
+    assert pruned["automation_firings"] == 1  # terminal done pruned; active scheduled kept
+    store.close()
+
+

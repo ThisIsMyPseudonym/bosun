@@ -117,6 +117,22 @@ VIEWS: dict[str, tuple[str, dict[str, str], str]] = {
          "runs_started": "Runs this action started (the upgrade it queued, the refresh it began)."},
         "SELECT datetime(ts, 'unixepoch', 'localtime') AS at, actor, action, input, outcome, error FROM v_actions "
         "ORDER BY ts DESC LIMIT 20"),
+    "v_automations": (
+        "Owner-written automation rules: trigger, conditions, action, scope, mode, limits and 90-day INSTALL grant expiry.",
+        {"enabled": "1 = active, 0 = off.",
+         "paused_reason": "Non-empty when paused by the circuit breaker after consecutive failures.",
+         "mode": "run (runs on its own) or ask (asks first).",
+         "grant_expires_at": "Unix time a runs-on-its-own INSTALL grant expires (granted_at + 90 days); NULL for LOCAL, notify or ask."},
+        "SELECT id, name, action, mode, enabled, paused_reason, grant_expires_at FROM v_automations ORDER BY id"),
+    "v_automation_firings": (
+        "History of every automation firing: matching event, status, resolved input, linked action run and offer decision.",
+        {"automation_name": "Copied when created so history survives rule deletion.",
+         "dedup_key": "Unique per automation_id to prevent double runs.",
+         "status": "scheduled, waiting_quota, offered, running, done, failed, skipped, missed, declined, expired or refused.",
+         "trace_id": "Action run trace_id started by this firing, if any.",
+         "decided_by": "Who approved or declined an offer (`user`), or empty."},
+        "SELECT datetime(created, 'unixepoch', 'localtime') AS at, automation_name, event_kind, status, reason "
+        "FROM v_automation_firings ORDER BY created DESC LIMIT 20"),
 }
 
 TABLES: dict[str, str] = {
@@ -146,6 +162,9 @@ TABLES: dict[str, str] = {
               "Kept for a year.",
     "triage_disputed_rules": "Failure signatures whose deterministic rules verdict the user marked wrong, so later "
                              "runs skip that rule even after a model triage attempt.",
+    "automations": "Owner-written automation rules (trigger, conditions, action, scope, grant and limits).",
+    "automation_firings": "One row per event that matched an automation, with status, resolved input, trace_id and "
+                          "reason. Terminal rows are kept for a year.",
 }
 
 # for columns the schema has no comment on (tables from before comments were written)
