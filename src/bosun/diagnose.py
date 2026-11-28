@@ -107,6 +107,15 @@ def item_record(store: Store, subject: str) -> dict | None:
     return None
 
 
+def _triage_for(store: Store, trace_id: str) -> dict[str, Any] | None:
+    """Return any recorded or rules/cache triage verdict for this run without writing to the database."""
+    try:
+        from .triage import worker as tworker
+        return tworker.triage_for(store, trace_id, save=False)
+    except Exception:
+        return None
+
+
 def bundle(store: Store, settings: Settings, trace_id: str, facts: bool = True) -> dict[str, Any] | None:
     t = store.trace(trace_id)
     if t is None:
@@ -129,6 +138,7 @@ def bundle(store: Store, settings: Settings, trace_id: str, facts: bool = True) 
         "fixes": t["fixes"],
         "item": item_record(store, run["subject"]),
         "related_failures": related(store, run),
+        "triage": _triage_for(store, run["trace_id"]),
         "machine": machine_facts(settings) if facts else None,
     }
     return redact.value(out)

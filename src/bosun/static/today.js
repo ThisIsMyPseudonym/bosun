@@ -1,7 +1,58 @@
 // Today: what needs you (one sentence + one verb each), overall health, and the Autopilot rail.
 "use strict";
 (() => {
-const { el, plural } = MC;
+const { el, api, plural } = MC;
+const STALE_STEPS = new Set();
+
+function rescanFromToday() {
+  return api("/api/refresh", { method: "POST" })
+    .then(() => { STALE_STEPS.clear(); if (MC.refreshNow) MC.refreshNow().catch(() => {}); })
+    .catch((err) => { if (MC.banner) MC.banner(`Could not start re-scan: ${err.message}`); });
+}
+
+async function runTodayStep(staleKey, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    STALE_STEPS.add(staleKey);
+    if (MC.banner) MC.banner(`This step no longer applies: ${err.message}. Re-scan to refresh.`);
+    MC.render();
+  }
+}
+
+function failedEntry(e, lead, job) {
+  const staleKey = `${lead.key}|${job.id}`;
+  if (STALE_STEPS.has(staleKey)) {
+    return { ...e, line: "This step no longer applies. Re-scan to refresh.", verb: "Re-scan", act: rescanFromToday };
+  }
+  const tri = job.triage;
+  if (!tri || tri.status !== "done" || !tri.cause) {
+    return { ...e, line: job.hint || "The last try failed.", verb: "Retry", act: () => MC.actions.upgrade([lead.key]) };
+  }
+  const step = tri.next_step || { kind: "none" };
+  const base = { ...e, line: tri.cause };
+  if (step.kind === "runbook" && step.runbook) {
+    return { ...base, verb: "Open guide", act: () => MC.triageHelpers && MC.triageHelpers.openRunbook(step.runbook) };
+  }
+  if (step.kind === "recipe" && step.recipe) {
+    return { ...base, verb: "Run fix", act: () => runTodayStep(staleKey, async () => {
+      const r = await api("/api/terminal/run", { method: "POST", body: JSON.stringify({ key: lead.key, recipe: step.recipe }) });
+      if (r && r.terminal && MC.termOpen) MC.termOpen(r.job, lead.key, e.name);
+      if (MC.refreshNow) MC.refreshNow().catch(() => {});
+    }) };
+  }
+  if (step.kind === "retry") {
+    return { ...base, verb: "Try again", act: () => runTodayStep(staleKey, async () => {
+      await api("/api/upgrade", { method: "POST", body: JSON.stringify({ keys: [lead.key] }) });
+      if (MC.refreshNow) MC.refreshNow().catch(() => {});
+    }) };
+  }
+  if (step.kind === "rescan") return { ...base, verb: "Re-scan", act: rescanFromToday };
+  if (step.kind === "agent_prompt") {
+    return { ...base, verb: "Details", act: () => { location.hash = MC.runHref(job.trace_id) || "#/runs"; } };
+  }
+  return { ...base, status: "Nothing to do" };
+}
 const HIGH = ["now", "plan", "watch"];
 const queuedSet = (S) => new Set(S.autopilot.on ? S.autopilot.queued : []);
 const runTime = (S) => S.autopilot.time ? `at ${S.autopilot.time}` : "on the next daily check";
@@ -19,7 +70,7 @@ function machineEntry(S, p) {
               ver: `${p.installed} → ${p.available || "no fix yet"}`, open: () => MC.actions.open(lead.key) };
   if (job && job.status === "waiting") return { ...e, line: "In use right now. Bosun updates it the moment it's free.", status: "Waiting" };
   if (job && ["queued", "running", "succeeded"].includes(job.status)) return { ...e, line: "Updating now…", status: MC.jobLabel(job) };
-  if (job && job.status === "failed") return { ...e, line: job.hint || "The last try failed.", verb: "Retry", act: () => MC.actions.upgrade([lead.key]) };
+  if (job && job.status === "failed") return failedEntry(e, lead, job);
   if (lead.malicious) return { ...e, line: "Reported as malware. Remove it, then change the keys and tokens on this machine.", verb: "Details", act: e.open };
   if (p.lane === "watch") return { ...e, line: "No fixed version yet. Bosun checks again every day.", status: "Watching" };
   // the same button the row and the details show; where there is none, one sentence says the next step
@@ -76,6 +127,8 @@ function systemUpdatesEntry(pkgs) {
            line: `${names.slice(0, 2).join(" · ")}${names.length > 2 ? ` and ${names.length - 2} more` : ""}`,
            verb: `Open ${MC.MACHINE.updates}`, act: () => MC.actions.openUpdates(), open: () => { location.hash = "#/pc"; } };
 }
+
+MC.todayHelpers = { machineEntry, failedEntry };
 
 MC.needsYou = function needsYou(S, scopes) {
   const staged = S.relaunch || [], covered = new Set(staged.flatMap((r) => r.keys));

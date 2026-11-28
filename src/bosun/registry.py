@@ -176,6 +176,17 @@ class TriageFeedbackIn(TraceIn):
     feedback: Literal["helpful", "wrong"] = Field(description="Whether Bosun's triage verdict was helpful or wrong")
 
 
+class TriageSettingsIn(_In):
+    auto: bool | None = Field(
+        default=None,
+        description="Run automatic background model triage on unplaced failures (rules and cache always run)",
+    )
+    daily_limit: int | None = Field(
+        default=None, ge=0, le=100,
+        description="Maximum automatic background model triages per 24 hours (0-100)",
+    )
+
+
 class RunbookIn(_In):
     topic: str = Field(pattern=r"^[a-z0-9-]{1,60}$", description="A runbook topic name under docs/runbooks/")
 
@@ -357,6 +368,10 @@ SPECS: dict[str, ActionSpec] = _specs(
                Risk.LOCAL, TriageIn, "POST", "/api/runs/{trace_id}/triage", user_only=True),
     ActionSpec("triage_feedback", "Mark a triage verdict as helpful or wrong (removes wrong verdicts from the cache)",
                Risk.LOCAL, TriageFeedbackIn, "POST", "/api/runs/{trace_id}/triage/feedback", user_only=True),
+    ActionSpec("triage_settings", "Automatic error triage settings: whether background model triage is on, daily limit, "
+               "and today's count", Risk.READ, Empty, "GET", "/api/triage/settings"),
+    ActionSpec("set_triage_settings", "Turn automatic background model triage on or off and set its daily limit "
+               "(rules and cache always run)", Risk.LOCAL, TriageSettingsIn, "POST", "/api/triage/settings", user_only=True),
     ActionSpec("get_runbook", "Read one Bosun troubleshooting runbook by topic name",
                Risk.READ, RunbookIn, "GET", "/api/runbooks/{topic}"),
     ActionSpec("llm_usage", "AI plan usage windows, pace, Bosun's share, top jobs, notices, and token detail",
@@ -491,8 +506,8 @@ TRIAGE_ALLOWED_ACTIONS = frozenset({"diagnose", "get_trace", "get_triage", "get_
 
 # What `bosun demo` refuses, besides everything that installs, upgrades, pins, fixes, quits, opens or restores
 # (Risk.INSTALL and above): the small actions that would look at, or run something on, the real computer.
-DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "triage", "discard_fix", "watch_app", "check_app",
-                          "assistant_ask", "terminal_input", "terminal_stop",
+DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "triage", "set_triage_settings", "discard_fix",
+                          "watch_app", "check_app", "assistant_ask", "terminal_input", "terminal_stop",
                           "ai_logins", "add_ai_login", "set_ai_login",
                           "ai_routing", "set_ai_routing", "set_quota_override"})
 

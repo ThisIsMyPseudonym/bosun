@@ -66,7 +66,7 @@ def _title(item: Item) -> str:
     return f"`{item.package_id}` {item.installed} → {target} ({item.ecosystem})"
 
 
-def facts(item: Item, assessment: dict | None = None) -> list[str]:
+def facts(item: Item, assessment: dict | None = None, verdict: dict | None = None) -> list[str]:
     """What Bosun knows about one finding, as bullet lines."""
     out: list[str] = []
     if item.source == Source.SECRET:
@@ -110,12 +110,18 @@ def facts(item: Item, assessment: dict | None = None) -> list[str]:
                    f"{_quoted([str(b.get('where', '')) + ': ' + str(b.get('why', ''))])}")
     if a.get("before_upgrading"):
         out.append(f"Before/after upgrading, AI assessment (unverified): {_quoted(a['before_upgrading'])}")
+    if verdict and verdict.get("cause"):
+        parts = [str(verdict["cause"])]
+        step = verdict.get("next_step")
+        if isinstance(step, dict) and step.get("why"):
+            parts.append(str(step["why"]))
+        out.append(f"Bosun's triage of the last failed fix (may be wrong, unverified): {_quoted(parts)}")
     return out
 
 
 def _quoted(parts) -> str:
     """Text a model wrote from release notes anyone could have written: quoted, so it reads as a claim."""
-    return "; ".join('"' + str(p).replace('"', "'").replace("\n", " ")[:400] + '"' for p in parts)
+    return "; ".join('"' + str(p).replace('"', "'").replace("`", "").replace("\n", " ")[:400] + '"' for p in parts)
 
 
 SECTIONS = {
@@ -155,7 +161,8 @@ HEADLINES = {
 }
 
 
-def prompt(items: list[Item], assessments: dict[str, dict] | None = None) -> str:
+def prompt(items: list[Item], assessments: dict[str, dict] | None = None,
+           verdicts: dict[str, dict] | None = None) -> str:
     """One prompt for one project's findings (one item, a lane, or the whole project)."""
     if not items:
         raise ValueError("Nothing to hand off")
@@ -166,6 +173,7 @@ def prompt(items: list[Item], assessments: dict[str, dict] | None = None) -> str
     items = sorted(items, key=lambda i: -i.risk)
     items, cut = items[:MAX_ITEMS], len(items) - MAX_ITEMS
     assessments = assessments or {}
+    verdicts = verdicts or {}
     groups = {m: [i for i in items if mode(i) == m] for m in ORDER}
     first = items[0]
     if len(items) == 1:
@@ -181,7 +189,7 @@ def prompt(items: list[Item], assessments: dict[str, dict] | None = None) -> str
             continue
         lines += ["", f"## {SECTIONS[m][0]}" if len(items) > 1 else "## What Bosun found"]
         for it in group:
-            lines += ["", f"### {_title(it)}", *(f"- {f}" for f in facts(it, assessments.get(it.key)))]
+            lines += ["", f"### {_title(it)}", *(f"- {f}" for f in facts(it, assessments.get(it.key), verdicts.get(it.key)))]
         lines += ["", SECTIONS[m][1]]
     if cut > 0:
         lines += ["", f"(Bosun left out {cut} more lower-priority findings; ask it for those separately.)"]

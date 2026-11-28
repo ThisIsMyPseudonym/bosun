@@ -48,11 +48,11 @@ from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, Conflict, ConversationIn,
                        ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
                        NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn,
-                       TraceIn, TriageFeedbackIn, TriageIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
+                       TraceIn, TriageFeedbackIn, TriageIn, TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, routing as ai_routing, usage as ai_usage
-from .triage import model as tmodel, store as tstore, worker as tworker
+from .triage import model as tmodel, settings as tsettings, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
@@ -427,6 +427,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     app.state.assistant, app.state.approvals, app.state.assistant_tokens = assistant, approvals, assistant_tokens
     triager = tworker.Triager(store, s, triage_tokens)
     app.state.triage_tokens, app.state.triager = triage_tokens, triager
+    if not s.demo and not store.read_only:
+        threading.Thread(target=triager.run, daemon=True, name="triage").start()
     app.state.terminals, app.state.upgrader = terminals, upgrader
     if store.close_open_messages():
         log.info("closed approvals and tool calls a previous dashboard left open")
@@ -688,9 +690,40 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             log.warning("explain failed for %s: %s", body.keys[0], exc)
             raise Failed(f"Assessment failed: {exc}")
 
+    def _job_triage_summary(trace_id: str | None) -> dict | None:
+        if not trace_id:
+            return None
+        row = tstore.get_by_trace(store, trace_id)
+        if not isinstance(row, dict) or row.get("status") != "done":
+            return None
+        v = row.get("verdict")
+        if not isinstance(v, dict):
+            return None
+        category, cause, confidence, next_step = (
+            v.get("category"), v.get("cause"), v.get("confidence"), v.get("next_step"),
+        )
+        if not (isinstance(category, str) and isinstance(cause, str) and isinstance(confidence, str)
+                and isinstance(next_step, dict) and isinstance(next_step.get("kind"), str)):
+            return None
+        return {
+            "status": str(row.get("status") or ""),
+            "source": str(row.get("source") or ""),
+            "category": category,
+            "cause": cause,
+            "confidence": confidence,
+            "next_step": next_step,
+        }
+
     @actions.bind("list_jobs")
     def jobs(ctx: ActionContext, body: Empty):
-        return [{**j, "hint": failure_hint(j["item_key"], j["output"]) if j["status"] == "failed" else ""} for j in store.jobs()]
+        return [
+            {
+                **j,
+                "hint": failure_hint(j["item_key"], j["output"]) if j["status"] == "failed" else "",
+                "triage": _job_triage_summary(j.get("trace_id")) if j["status"] == "failed" else None,
+            }
+            for j in store.jobs()
+        ]
 
     @actions.bind("cancel_job")
     def cancel_job(ctx: ActionContext, body: JobIn):
@@ -929,6 +962,22 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         except RuntimeError as exc:
             raise Conflict(str(exc))
 
+    def _fix_verdicts_for(items: list) -> dict[str, dict]:
+        want = {i.key for i in items}
+        found: dict[str, dict] = {}
+        for fx in store.fixes():
+            if fx.get("status") not in ("failed", "partial", "needs_human") or not fx.get("trace_id"):
+                continue
+            keys = (fx.get("result") or {}).get("keys") if isinstance(fx.get("result"), dict) else None
+            matched = [k for k in (keys or [fx.get("item_key")]) if k in want and k not in found]
+            if not matched:
+                continue
+            tri = tstore.get_by_trace(store, str(fx["trace_id"]))
+            if tri and tri.get("status") == "done" and isinstance(tri.get("verdict"), dict):
+                for k in matched:
+                    found[k] = tri["verdict"]
+        return found
+
     @actions.bind("agent_prompt")
     def agent_prompt(ctx: ActionContext, body: FixIn):
         """A prompt for the user's own coding agent: Bosun's diagnosis, the agent does the work."""
@@ -938,8 +987,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
             raise NotFound("Unknown item; refresh and try again")
         items = [item_from_dict(known[k]) for k in body.keys]
         assessments = {i.key: a for i in items if (a := explainer.cached(i))}
+        verdicts = _fix_verdicts_for(items)
         try:
-            return {"prompt": handoff.prompt(items, assessments), "count": len(items)}
+            return {"prompt": handoff.prompt(items, assessments, verdicts=verdicts), "count": len(items)}
         except ValueError as exc:
             raise Invalid(str(exc))
 
@@ -1051,6 +1101,14 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         if row is None:
             raise NotFound("No triage verdict recorded for this run")
         return tstore.set_feedback(store, row["failure"], body.feedback)
+
+    @actions.bind("triage_settings")
+    def triage_settings_get(ctx: ActionContext, body: Empty):
+        return tsettings.overview(store)
+
+    @actions.bind("set_triage_settings")
+    def triage_settings_set(ctx: ActionContext, body: TriageSettingsIn):
+        return tsettings.update(store, auto=body.auto, daily_limit=body.daily_limit)
 
     @actions.bind("get_runbook")
     def get_runbook(ctx: ActionContext, body: RunbookIn):

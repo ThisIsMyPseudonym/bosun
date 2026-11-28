@@ -261,6 +261,11 @@ def _run_one(
         ledger.seed_from_coho(store, cand.bucket, now=now())
     before = {r.window: r for r in ledger.readings(store, cand.bucket)}
     chosen_model = catalog.models_for(cand.provider, tier, settings=settings)
+    item_key = rec.subject if ":" in rec.subject else ""
+    call_id = llm.start(
+        store, "triage", model=chosen_model, item_key=item_key, provider=cand.provider,
+        account=cand.login.id, job="triage", trace_id=triage_trace, ts=now(), failure=rec.failure,
+    )
     res, took_ms, prompt_chars = _invoke_candidate(
         cand, chosen_model, settings, bundle, offered, tokens, rec.trace_id, remaining,
     )
@@ -273,13 +278,12 @@ def _run_one(
             outcome, error = "schema_error", val_err or "the reply didn't match the expected Verdict schema"
     provider_run._record_side_effects(store, cand, rep, outcome, cd, at)
     window_draw = quota.draw(before, rep.readings)
-    item_key = rec.subject if ":" in rec.subject else ""
-    llm.record(
-        "triage", outcome=outcome, usage=rep.usage, model=chosen_model, item_key=item_key,
+    llm.finish(
+        store, call_id, "triage", outcome=outcome, usage=rep.usage, model=chosen_model, item_key=item_key,
         duration_ms=rep.duration_ms or took_ms, api_ms=rep.api_ms, turns=rep.turns,
         prompt_chars=prompt_chars or None, session_id=rep.session_id, error=error,
         provider=cand.provider, account=cand.login.id, job="triage",
-        window_draw=window_draw, estimated=rep.estimated, failure=rec.failure,
+        window_draw=window_draw, estimated=rep.estimated, ts=at, failure=rec.failure,
     )
     return router.Outcome(outcome, value=(validated, chosen_model) if outcome == "ok" else None, error=error)
 

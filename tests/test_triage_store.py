@@ -218,3 +218,39 @@ def test_save_verdict_overwrite_keeps_user_feedback_until_user_acts_again(tmp_pa
     assert updated is not None
     assert updated["feedback"] == "helpful" and updated["feedback_ts"] == 130.0
     assert updated["status"] == "done"
+
+
+def test_reset_running_marks_user_clicked_rows_failed_interrupted_instead_of_queued(tmp_path, monkeypatch):
+    from bosun import auth
+    from bosun.config import load_settings
+    from bosun.providers import accounts
+    from bosun.triage import model as tmodel
+    from bosun.triage import worker
+
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        # 1. Background running row -> returned to queued
+        tstore.save_status(st, "job:bg", "tbg", "sig-bg", "running", now=100.0)
+        # 2. User-clicked row interrupted mid-click (simulated SystemExit inside _run_cli)
+        jid = st.create_job("brew:jq", ["brew", "upgrade", "jq"])
+        job = st.job(jid)
+        assert job is not None
+        with trace.run("upgrade", subject="brew:jq", trace_id=job["trace_id"]) as r:
+            r.fail("novel error for click crash")
+        st.finish_job(jid, "failed", "novel error for click crash")
+
+        monkeypatch.setattr(accounts, "installed", lambda: {"codex": "/test/bin/codex"})
+        monkeypatch.setattr(tmodel, "_run_cli", lambda *a, **k: (_ for _ in ()).throw(SystemExit(137)))
+        triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+        with pytest.raises(SystemExit):
+            triager.triage_click(job["trace_id"], deep=True)
+
+        assert tstore.reset_running(st) == 2
+        assert tstore.get(st, "job:bg")["status"] == "queued"
+        clicked = tstore.get(st, f"job:{jid}")
+        assert clicked is not None
+        assert clicked["status"] == "failed"
+        assert clicked["last_error"] == "interrupted"
+    finally:
+        trace.configure(None)

@@ -230,8 +230,13 @@ tail of its output when it failed) and every HTTP request. A run started by anot
 clicked, a re-check after it) links to it.
 
 - **Runs** in the sidebar (developer view) lists them; *Problems* shows only what failed. A failed upgrade's
-  details link straight to its run. On a run, **Copy for an agent** puts what failed on the clipboard for
-  Claude Code or any other agent (with Bosun's MCP server installed, Claude Code reads the whole run itself), and **Download diagnostic bundle** saves the whole record as JSON.
+  details link straight to its run. Each failed run shows Bosun's **error triage** verdict (likely cause, evidence,
+  and one next step); Today and failed-update notifications carry that cause once ready. Under **AI usage → Error
+  triage**, you can turn **Triage failures automatically** off (`triage_auto`) or change the 24-hour automatic model
+  limit (`triage_daily_limit`, default 10); rules and cache still run when it is off. Only you can change these
+  settings from the dashboard. On a run, **Copy for an agent** puts what failed (and any triage verdict as quoted
+  data) on the clipboard for Claude Code or any other agent (with Bosun's MCP server installed, Claude Code reads
+  the whole run itself), and **Download diagnostic bundle** saves the whole record as JSON.
 - From a terminal:
 
   ```
@@ -257,9 +262,10 @@ uv run bosun query --json "SELECT * FROM v_failures"     # columns and rows as J
 uv run bosun query --schema                                # what can be read
 ```
 
-Seven views answer the usual questions: `v_current_items` (what is outdated or vulnerable now),
+Eight views answer the usual questions: `v_current_items` (what is outdated or vulnerable now),
 `v_item_history` (when an item appeared, changed lane, was fixed), `v_open_vulns` (each open CVE, what it
-touches, how long it has been open), `v_failures` (what failed, with the failing command), `v_ai_spend`
+touches, how long it has been open), `v_failures` (what failed, with the failing command), `v_triage` (triage
+verdicts, status, source and feedback), `v_ai_spend`
 (AI calls, tokens and window draw per day, provider, login and job), `v_llm_spend`
 (older per-purpose Claude spend view) and `v_actions` (the audit trail: every action that changed
 something, who asked for it, and how it ended). `quota_windows` holds the latest usage-window reading per login. [`data-model.md`](data-model.md) lists every view, table and column.

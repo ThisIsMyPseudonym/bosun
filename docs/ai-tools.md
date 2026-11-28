@@ -109,9 +109,9 @@ running, the server starts it the way the app icon does.
 (`uv run bosun actions` prints it), with the same input checks:
 
 - *Read:* `status` (what needs attention today), `get_item`, `list_runs`, `get_trace`, `diagnose` (the failed
-  command and its output for one run), `list_jobs`, `list_fixes`, `llm_usage`, `query` (read-only SQL, see Ask
-  the database), `agent_prompt`, `list_recipes` (what Bosun's terminal can run for an item or a failed run;
-  only you can start one).
+  command, its output, and its triage verdict for one run), `get_triage`, `get_runbook`, `triage_settings`,
+  `list_jobs`, `list_fixes`, `llm_usage`, `query` (read-only SQL, see Ask the database), `agent_prompt`,
+  `list_recipes` (what Bosun's terminal can run for an item or a failed run; only you can start one).
 - *Act:* `refresh`, `recheck_project`, `upgrade`, `pin_mcp`, `start_fix`, `explain_item`, `cancel_job`,
   `discard_fix`, `set_pref`, `set_view`, `set_notify`. Each answers at once with the id of its run;
   `wait_run` follows it until the work it started has finished.
@@ -125,7 +125,7 @@ running, the server starts it the way the app icon does.
    state and install. It may **not** quit and reopen apps, open system updaters, push a branch or open a pull
    request unless you turn that on: **AI usage → Agents** has two switches, "Let agents quit and reopen apps
    and open system updaters" and "Let agents push branches and open pull requests", both off at first. An
-   agent can never change those switches, AI logins, routing, quota overrides, or Autopilot, and never gets a password window:
+   agent can never change those switches, AI logins, routing, quota overrides, automatic triage settings, or Autopilot, and never gets a password window:
    an update that needs your password waits for you.
 
 The MCP server does nothing itself. Every call goes to the dashboard, so upgrades still run one at a time
@@ -162,7 +162,7 @@ your reason if you type one. A card nobody answers counts as declined after five
 allow": the next action gets its own card. **Stop** ends an answer and declines whatever was waiting.
 
 **What it will never do,** approved or not: acknowledge, snooze or ignore an item or a project, turn Autopilot or notifications on
-or off, change AI logins, routing, or quota overrides, or change what agents may do. Those are yours; it tells you where in the
+or off, change AI logins, routing, or quota overrides, start error triage or change automatic triage settings, or change what agents may do. Those are yours; it tells you where in the
 dashboard they are. It cannot ask itself questions, answer its own cards, or read your other conversations.
 An upgrade that needs your password is not started for it: it looks up what Bosun's terminal can run for that
 item and the panel shows it as a button under the answer, for you to press (see [Run it here](sources.md#run-it-here)). When something
@@ -187,7 +187,7 @@ can see that a conversation happened and which tools ran, but not what was said 
 Bosun measures AI use by each plan's own usage windows (5-hour, weekly) rather than list-price dollars.
 
 - **Windows and pace:** every call parses the CLI's own quota report and saves the latest reading in `quota_windows`. **Pace** is share used divided by share of window time gone (`1.0×` finishes the window right at reset). A stale or missing reading shows as **unknown**, never `0% used`. CLIs that do not report windows yet are counted from calls and tokens and marked **Estimated**.
-- **The 75% line:** background work (release-note summaries) skips any login whose current window is at or past 75% and raises one notice per window. Jobs you click ("Will this break?", Branch + test, Ask Bosun) keep going until the provider refuses.
+- **The 75% line:** background work (release-note summaries and automatic error triage) skips any login whose current window is at or past 75% and raises one notice per window. Jobs you click ("Will this break?", Branch + test, Ask Bosun, clicked **Triage**) keep going until the provider refuses.
 - **Logins that report no window** (Gemini CLI, and the other estimated CLIs): there is no 75% line to read, so background work there stops after 40 calls in one refresh or 200 in a day. Jobs you click are not counted.
 - **Owner-only override:** on **AI usage**, click **Let background work go past 75% until it resets** on any paused login to lift the 75% line until that window resets. Agents and Ask Bosun can never set overrides or change routing.
 - **Bosun's share and detail:** each login card shows Bosun's own share (the sum of `window_draw` since that window started) and the top jobs by draw. Tokens, prompt-cache hit rates, and list-price cost stay collapsed under **Detail**. `uv run bosun usage` prints the token breakdown from a terminal.
@@ -195,3 +195,20 @@ Bosun measures AI use by each plan's own usage windows (5-hour, weekly) rather t
 
 When several releases' notes run long (over 16,000 characters), each release keeps its opening and every
 line about breaking changes or security, so no release in the range is dropped.
+
+## Error triage
+
+When an upgrade, fix, or refresh fails, Bosun produces one **verdict**: the likely cause, a confidence level, quoted evidence lines, and one next step. Triage never runs an action on its own, and Autopilot never acts on verdicts.
+
+**Cheapest step first.** Every failure passes through the same pipeline:
+
+1. **Superseded:** if a later run of the same kind and item already succeeded, Bosun marks the failure `fixed_since` and stops.
+2. **Rules:** deterministic patterns match known errors (permissions, locks, passwords, recipes, and runbooks) on this machine with no AI call.
+3. **Cache:** if the same normalized failure signature already has a non-disputed verdict from the last 30 days, Bosun reuses it and re-checks the next step for this item.
+4. **Model:** only failures that rules and cache cannot place go to a locked-down AI CLI (`claude`, `codex`, or `gemini`).
+
+**Automatic background triage.** Every 30 seconds the dashboard checks new failures. Rules and cache run right away. Unplaced failures queue one at a time for the light model, deduplicated by failure signature so a burst of identical failures makes one call. Automatic model triage skips outage-only partial refreshes and runs started by agents or Ask Bosun. It pauses at the 75% line (and unmeasured call caps), retries after the quota reset while the failure is under 24 hours old, and stops at the daily limit (default 10 automatic runs per 24 hours). Clicking **Triage** or **Look deeper** on a run uses the strong model, bypasses the 75% line, and does not count toward the daily limit.
+
+**Privacy and off switch.** Model triage sends redacted failure output (secrets stripped) to your chosen AI provider. Open **AI usage → Error triage** to turn **Triage failures automatically** off or change the daily limit (0–100). Turning it off keeps failure output on your computer unless you click **Triage**; rules and cache still run. Only you can change this setting, start model triage, or mark a verdict **Helpful** or **Wrong**; agents and Ask Bosun can read verdicts (`get_triage`, `diagnose`, `v_triage`) and nothing more.
+
+**Safety.** A model triage call runs as actor `triage` with read-only tools scoped to that single run and Bosun's runbooks, capped at 8 tool calls and 120 seconds. Before saving a verdict, Bosun verifies every evidence line against redacted output, checks any recipe or runbook name against what Bosun actually offers, and strips URLs, shell commands, or markup from text fields. Demo mode runs rules only and never starts an AI CLI.

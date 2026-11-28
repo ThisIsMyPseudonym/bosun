@@ -30,8 +30,10 @@ import pytest  # noqa: E402
 SESSION_KEY = "k" * 48
 
 from bosun import auth as _auth  # noqa: E402
+from bosun.triage import worker as _tworker  # noqa: E402
 
 REAL_LOAD_KEY = _auth.load_key  # for the tests of the key file itself
+REAL_TRIAGER_RUN = _tworker.Triager.run  # for tests of the background triage loop itself
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +75,12 @@ def _no_notification_loop(monkeypatch):
     ticks every two minutes: listing processes and reading apps while a later test has swapped proc.run for a
     recorder. Tests call Notifier.tick themselves (tests/test_notify.py)."""
     monkeypatch.setattr("bosun.notify.Notifier.run", lambda self, interval=0: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_triage_loop(monkeypatch):
+    """Every dashboard a test builds would start the background triage loop; tests drive Triager.tick directly."""
+    monkeypatch.setattr("bosun.triage.worker.Triager.run", lambda self, interval=0: None)
 
 
 @pytest.fixture(autouse=True)

@@ -566,3 +566,41 @@ def test_get_trace_and_get_triage_never_run_cli_subprocess_synchronously(tmp_pat
         assert proc_calls == []
     finally:
         trace.configure(None)
+
+
+def test_list_jobs_includes_done_triage_verdict_summary_for_failed_jobs(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        j1 = st.create_job("brew:jq", ["brew", "upgrade", "--formula", "jq"])
+        job1 = st.job(j1)
+        assert job1 is not None
+        with trace.run("upgrade", subject="brew:jq", trace_id=job1["trace_id"]) as r1:
+            r1.fail("Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq")
+        st.finish_job(j1, "failed", "Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq")
+        tstore.save_verdict(
+            st, f"job:{j1}", r1.trace_id, "sig-perm", "rules",
+            Verdict(
+                category="permissions", cause="Homebrew cannot write to its folder.", confidence="high", evidence=[],
+                next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Fix folder ownership."),
+                needs_person=True, transient=False,
+            ),
+        )
+
+        j2 = st.create_job("brew:rg", ["brew", "upgrade", "--formula", "rg"])
+        st.finish_job(j2, "succeeded", "ok")
+
+        app = create_app(load_settings(), st, TOKEN)
+        user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+        rows = {j["id"]: j for j in user.get("/api/jobs").json()}
+        assert rows[j1]["triage"]["cause"] == "Homebrew cannot write to its folder."
+        assert rows[j1]["triage"]["next_step"]["kind"] == "runbook"
+        assert rows[j1]["triage"]["next_step"]["runbook"] == "homebrew-permissions"
+        assert rows[j2]["triage"] is None
+
+        # Disputed verdict is omitted from /api/jobs summary
+        tstore.set_feedback(st, f"job:{j1}", "wrong")
+        rows2 = {j["id"]: j for j in user.get("/api/jobs").json()}
+        assert rows2[j1]["triage"] is None
+    finally:
+        trace.configure(None)

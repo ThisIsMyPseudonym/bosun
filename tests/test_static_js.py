@@ -95,6 +95,7 @@ def test_usage_page_never_uses_innerhtml_or_retired_budget_endpoint():
     assert "/api/ai/override" in src
     assert "/api/ai/routing" in src
     assert "/api/ai/notice/dismiss" in src
+    assert "/api/triage/settings" in src
 
 
 def test_usage_rendering_helpers_handle_windows_stale_overrides_and_escaping():
@@ -179,6 +180,19 @@ def test_usage_rendering_helpers_handle_windows_stale_overrides_and_escaping():
       [{{ bucket: "claude", installed: true, provider_label: "Claude Code", label: "Default" }}, {{ bucket: "codex", installed: true, provider_label: "Codex", label: "Default" }}, {{ bucket: "gone", installed: false, provider_label: "Gone CLI", label: "Default" }}], false);
     if (!rpanel.textContent.includes("Balance by pace") || !rpanel.textContent.includes("Branch + test")) throw new Error("routing panel missing controls");
     if (rpanel.textContent.includes("Gone CLI")) throw new Error("an uninstalled login must not be offered for routing");
+
+    // Triage panel renders owner-only switch, privacy explanation, and daily limit control
+    if (typeof H.triagePanel !== "function") throw new Error("MC.usageHelpers.triagePanel missing");
+    const tpanel = H.triagePanel({{ auto: true, daily_limit: 10, daily_used: 3, daily_remaining: 7 }}, false);
+    const ttext = tpanel.textContent;
+    if (!ttext.includes("Triage failures automatically") || !ttext.includes("redacted") || !ttext.includes("3 / 10")) {{
+      throw new Error("triage panel missing label, privacy text, or count: " + ttext);
+    }}
+    const tdemo = H.triagePanel({{ auto: true, daily_limit: 10, daily_used: 0, daily_remaining: 10 }}, true);
+    const demoInputs = allNodes(tdemo).filter((n) => n.tagName === "INPUT");
+    if (demoInputs.length < 2 || !demoInputs.every((n) => n.attrs.disabled !== undefined || n.disabled)) {{
+      throw new Error("triage panel inputs must be disabled in demo mode");
+    }}
 
     console.log("OK");
     """
@@ -703,6 +717,12 @@ def test_triage_buttons_look_deeper_disabled_provenance_and_related_seen():
       throw new Error("failed Look deeper must keep rules verdict and note failure: " + errCard.textContent);
     }}
 
+    // 6. Copy for an agent appends Bosun's triage (may be wrong) as quoted data
+    const handoffText = H.agentText({{ ...baseTrace, triage: rulesTriage }});
+    if (!handoffText.includes("Bosun's triage (may be wrong") || !handoffText.includes('"Not writable."')) {{
+      throw new Error("agentText missing quoted triage verdict: " + handoffText);
+    }}
+
     (async () => {{
       for (const fn of triBtn.listeners.click || []) await fn();
       for (const fn of lookBtn.listeners.click || []) await fn();
@@ -716,6 +736,214 @@ def test_triage_buttons_look_deeper_disabled_provenance_and_related_seen():
       }}
       console.log("OK");
     }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_today_shows_verdict_cause_step_button_and_rescan_fallback_without_innerhtml():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    src = (STATIC / "today.js").read_text(encoding="utf-8")
+    assert "innerHTML" not in code_only(src)
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    today_js = str(STATIC / "today.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.location = {{ hash: "#/" }};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    let openedRunbook = "", rendered = 0;
+    const apiCalls = [];
+    MC.api = async (path, opts) => {{
+      apiCalls.push({{ path, opts }});
+      if (path === "/api/terminal/run") throw new Error("recipe vanished");
+      return {{}};
+    }};
+    MC.render = () => {{ rendered += 1; }};
+    MC.banner = () => {{}};
+    MC.runHref = (id) => "#/runs/" + id;
+    MC.triageHelpers = {{ openRunbook: (topic) => {{ openedRunbook = topic; }} }};
+    MC.actions = {{ open: () => {{}}, upgrade: () => {{}}, upgradeKeys: () => {{}}, copyPrompt: () => {{}}, relaunch: () => {{}}, openUpdates: () => {{}}, showActivity: () => {{}}, setAutopilot: () => {{}} }};
+    eval(fs.readFileSync({json.dumps(today_js)}, "utf8"));
+
+    if (!MC.todayHelpers) throw new Error("MC.todayHelpers missing");
+    const mkPkg = (key, name) => ({{
+      key, name, installed: "1.0", available: "2.0", lane: "now", risk: 8, kev: false,
+      members: [{{ key, name, installed: "1.0", available: "2.0", lane: "now", risk: 8, source: "brew", upgradable: true }}],
+    }});
+    const S = {{ snapTs: 100, autopilot: {{ on: false, queued: [], waiting: [] }}, jobs: [] }};
+
+    // 1. Runbook verdict shows cause (escaped as text) and Open guide button
+    S.jobs = [{{
+      id: 1, item_key: "brew:jq", status: "failed", finished: 200, trace_id: "aa11bb22", hint: "See the output",
+      triage: {{
+        status: "done", source: "rules", category: "permissions",
+        cause: "Folder <img onerror=alert(1)> not writable.", confidence: "high",
+        next_step: {{ kind: "runbook", recipe: null, runbook: "homebrew-permissions", why: "Fix ownership." }},
+      }},
+    }}];
+    const e1 = MC.todayHelpers.machineEntry(S, mkPkg("brew:jq", "jq"));
+    if (e1.line !== "Folder <img onerror=alert(1)> not writable." || e1.verb !== "Open guide") {{
+      throw new Error("bad runbook entry: " + JSON.stringify(e1));
+    }}
+    e1.act();
+    if (openedRunbook !== "homebrew-permissions") throw new Error("expected openRunbook call");
+
+    // 2. None verdict shows "Nothing to do" status with no action button
+    S.jobs = [{{
+      id: 2, item_key: "brew:rg", status: "failed", finished: 200, trace_id: "bb22cc33",
+      triage: {{
+        status: "done", source: "rules", category: "already_current",
+        cause: "App updates itself.", confidence: "high",
+        next_step: {{ kind: "none", recipe: null, runbook: null, why: "Nothing to do." }},
+      }},
+    }}];
+    const e2 = MC.todayHelpers.machineEntry(S, mkPkg("brew:rg", "rg"));
+    if (e2.line !== "App updates itself." || e2.verb || e2.status !== "Nothing to do") {{
+      throw new Error("bad none entry: " + JSON.stringify(e2));
+    }}
+
+    // 3. Recipe verdict whose action refuses switches the card to Re-scan
+    S.jobs = [{{
+      id: 3, item_key: "apt:curl", status: "failed", finished: 200, trace_id: "cc33dd44",
+      triage: {{
+        status: "done", source: "rules", category: "busy_or_locked",
+        cause: "dpkg was interrupted.", confidence: "high",
+        next_step: {{ kind: "recipe", recipe: "dpkg-configure", runbook: null, why: "Finish dpkg." }},
+      }},
+    }}];
+    const e3 = MC.todayHelpers.machineEntry(S, mkPkg("apt:curl", "curl"));
+    if (e3.verb !== "Run fix") throw new Error("expected Run fix, got " + e3.verb);
+    (async () => {{
+      await e3.act();
+      const after = MC.todayHelpers.machineEntry(S, mkPkg("apt:curl", "curl"));
+      if (after.verb !== "Re-scan" || !after.line.includes("Re-scan")) {{
+        throw new Error("expected Re-scan fallback after refusal, got: " + JSON.stringify(after));
+      }}
+      console.log("OK");
+    }})().catch((err) => {{ console.error(err); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
+
+
+def test_usage_triage_switch_refetches_and_restores_server_state_on_failed_save():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    usage_js = str(STATIC / "usage.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "value") this.value = String(v);
+          if (k === "checked") this.checked = true;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    const alerts = [];
+    globalThis.alert = (msg) => alerts.push(msg);
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    let usageFetches = 0;
+    const serverUsage = () => ({{
+      days: 30, demo: false, logins: [], top_jobs: [], routing: {{ mode: "default", order: [], pins: {{}}, jobs: [] }},
+      notices: [], budgets_retired: null,
+      triage: {{ auto: true, daily_limit: 10, daily_used: 1, daily_remaining: 9 }},
+      detail: {{ days: 30, totals: {{}}, cache: {{}}, by_day: [], by_purpose: [], by_model: [], by_source: [], top_items: [], outliers: [], top_calls: [] }},
+    }});
+    MC.api = async (path) => {{
+      if (path.startsWith("/api/usage")) {{ usageFetches += 1; return serverUsage(); }}
+      if (path === "/api/triage/settings") throw new Error("server rejected");
+      return {{}};
+    }};
+    let renders = 0;
+    let lastTree = null;
+    const S = {{ agents: {{ system: false, external: false }} }};
+    MC.route = {{ parse: () => ({{ page: "usage" }}) }};
+    MC.nameOf = (_S, k) => k;
+    MC.runHref = (id) => "#/runs/" + id;
+    MC.ago = () => "1m ago";
+    MC.render = () => {{ renders += 1; lastTree = MC.views.usage(S); }};
+    eval(fs.readFileSync({json.dumps(usage_js)}, "utf8"));
+
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    (async () => {{
+      MC.views.usage(S);
+      await new Promise((r) => setTimeout(r, 10));
+      if (usageFetches !== 1 || !lastTree) throw new Error("initial usage fetch did not render");
+      const findBox = (tree) => allNodes(tree).find((n) => n.tagName === "INPUT" && n.attrs["aria-label"] === "Triage failures automatically");
+      const box = findBox(lastTree);
+      if (!box || !box.checked) throw new Error("initial switch must be checked");
+
+      // User unchecks the box, but POST /api/triage/settings fails
+      box.checked = false;
+      const rendersBefore = renders;
+      for (const fn of box.listeners.change || []) await fn();
+      await new Promise((r) => setTimeout(r, 10));
+
+      if (alerts.length !== 1 || !alerts[0].includes("server rejected")) {{
+        throw new Error("expected alert on failed save, got: " + JSON.stringify(alerts));
+      }}
+      if (usageFetches !== 2) {{
+        throw new Error("expected fetchUsage(true) after failed save, got usageFetches=" + usageFetches);
+      }}
+      if (renders <= rendersBefore) {{
+        throw new Error("expected re-render after failed save");
+      }}
+      const refreshedBox = findBox(lastTree);
+      if (!refreshedBox || !refreshedBox.checked) {{
+        throw new Error("switch did not revert to server value (auto=true) after failed save");
+      }}
+      console.log("OK");
+    }})().catch((err) => {{ console.error(err); process.exit(1); }});
     """
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"

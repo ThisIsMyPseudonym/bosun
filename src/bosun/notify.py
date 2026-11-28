@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import time
 from collections.abc import Callable
@@ -24,7 +25,10 @@ log = logging.getLogger(__name__)
 
 SETTING = "notify"  # "off" silences everything; on unless turned off
 SEEN = "notify_seen"  # what has already been said (or seen on screen), as a JSON list of marks
+SEEN_SIGS = "notify_triage_sigs"  # (signature, item_key) -> delivered timestamp; expires after SIG_TTL_S or a success
 CURSOR = "notify_cursor"  # jobs that finished after this time haven't been reported yet
+MAX_SEEN_SIGS = 500
+SIG_TTL_S = 7 * 86400.0
 TICK_S = 120.0
 WATCHING_S = 45.0  # the open page polls every 15 s; a visible poll this recent means you're looking
 GAP_S = 600.0  # at most one notification per 10 minutes; anything newer waits and joins the next
@@ -95,8 +99,16 @@ def _names(names: list[str], limit: int = 3) -> str:
     return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
+def _failed_body(causes: tuple[str, ...] | list[str]) -> str:
+    unique = list(dict.fromkeys(c.strip() for c in causes if c and c.strip()))
+    if not unique:
+        return "Open Bosun to see why and retry."
+    joined = " ".join(c if c.endswith((".", "!", "?")) else f"{c}." for c in unique[:2])
+    return f"{joined} Open Bosun to see why and retry."
+
+
 def compose(exploited: list[str], failed: list[str], ready: list[str], fresh: list[str], updated: int,
-            held: list[str] = ()) -> Note | None:
+            held: list[str] = (), failed_causes: tuple[str, ...] | list[str] = ()) -> Note | None:
     """One notification for everything new, headed by the most urgent part."""
     lines: list[tuple[str, str]] = []
     full: set[int] = set()  # lines said in full wherever they come: a hold asks for a choice
@@ -114,7 +126,7 @@ def compose(exploited: list[str], failed: list[str], ready: list[str], fresh: li
                       "the Bosun dashboard."))
     if failed:
         lines.append((f"{_names(failed, 2)} didn't update" if len(failed) <= 2 else f"{len(failed)} updates didn't finish",
-                      "Open Bosun to see why and retry."))
+                      _failed_body(failed_causes)))
     if ready:
         lines.append((f"{_names(ready, 2)}: update ready", "Relaunch it from Bosun to finish; your tabs come back."))
     if fresh:
@@ -149,6 +161,64 @@ class Notifier:
     def _job_names(self, keys: list[str], items: dict[str, dict]) -> list[str]:
         return [items[k]["name"] if k in items else k.split(":", 1)[-1] for k in keys]
 
+    def _triage_for_job(self, job: dict) -> dict | None:
+        from .triage import store as tstore
+
+        tid = job.get("trace_id") or ""
+        row = tstore.get_by_trace(self.store, tid) if tid else None
+        if row is None and job.get("id") is not None:
+            row = tstore.get(self.store, f"job:{job['id']}")
+        return row
+
+    def _collect_failed(
+        self, finished: list[dict], seen_sigs: dict[str, float],
+    ) -> tuple[list[str], list[str], list[str], dict[str, float]]:
+        """Filter failed jobs by per-item delivered signatures, clearing marks on success and keeping unready verdicts."""
+        succeeded = {j["item_key"] for j in finished if j["status"] == "succeeded"}
+        cleared = {k: v for k, v in seen_sigs.items() if k.split("|", 1)[-1] not in succeeded}
+        in_tick: set[str] = set()
+        keys: list[str] = []
+        causes: list[str] = []
+        new_sigs: list[str] = []
+        for job in finished:
+            if job["status"] != "failed":
+                continue
+            item_key = job["item_key"]
+            row = self._triage_for_job(job)
+            verdict = row.get("verdict") if isinstance(row, dict) else None
+            cause = str(verdict.get("cause") or "") if isinstance(verdict, dict) else ""
+            ready = bool(row and row.get("status") == "done" and cause)
+            sig = str(row.get("signature") or "") if isinstance(row, dict) else ""
+            if ready and sig:
+                mark = f"{sig}|{item_key}"
+                if mark in cleared or mark in in_tick:
+                    continue
+                keys.append(item_key)
+                causes.append(cause)
+                new_sigs.append(mark)
+                in_tick.add(mark)
+            else:
+                keys.append(item_key)
+        return keys, causes, new_sigs, cleared
+
+    def _seen_sigs(self, now: float) -> dict[str, float]:
+        raw = self.store.setting(SEEN_SIGS)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        out: dict[str, float] = {}
+        for k, v in parsed.items():
+            if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool):
+                ts = float(v)
+                if math.isfinite(ts) and now - ts < SIG_TTL_S:
+                    out[k] = ts
+        return out
+
     def tick(self) -> Note | None:
         """Say what's new, if anything; remember it either way. Returns what was sent."""
         now = self.clock()
@@ -168,8 +238,9 @@ class Notifier:
             self._remember(marks, now)
             return None
         seen, cursor = set(json.loads(raw_seen)), float(raw_cursor)
+        seen_sigs = self._seen_sigs(now)
         finished = [j for j in jobs if (j.get("finished") or 0) > cursor and not j["item_key"].startswith("relaunch:")]
-        failed = [j["item_key"] for j in finished if j["status"] == "failed"]
+        failed, failed_causes, new_sigs, cleared_sigs = self._collect_failed(finished, seen_sigs)
         updated = sum(j["status"] == "succeeded" for j in finished)
         new = {m: v for m, v in current.items() if m not in seen and m.split("#")[0] not in failed}  # failed says it
 
@@ -182,18 +253,29 @@ class Notifier:
             ready=[n for m, n in ready.items() if m not in seen],
             fresh=[n for n, kev in new.values() if not kev],
             updated=updated,
-            held=[n for m, n in held.items() if m not in seen])
+            held=[n for m, n in held.items() if m not in seen],
+            failed_causes=failed_causes)
+        delivered = False
         if note:
             if not self.say(note):
                 return None  # try again next tick rather than lose it
             self.last_sent = now
-        self._remember(marks, now)
+            delivered = True
+        next_sigs: dict[str, float] | None = None
+        if delivered and new_sigs:
+            next_sigs = {**cleared_sigs, **{k: now for k in new_sigs}}
+        elif cleared_sigs != seen_sigs:
+            next_sigs = cleared_sigs
+        self._remember(marks, now, next_sigs)
         return note
 
-    def _remember(self, marks: set[str], now: float) -> None:
+    def _remember(self, marks: set[str], now: float, sigs: dict[str, float] | None = None) -> None:
         # only what's still true: something that goes away and comes back is news again
         self.store.set_setting(SEEN, json.dumps(sorted(marks)))
         self.store.set_setting(CURSOR, repr(now))
+        if sigs is not None:
+            kept = dict(sorted(sigs.items(), key=lambda kv: kv[1])[-MAX_SEEN_SIGS:])
+            self.store.set_setting(SEEN_SIGS, json.dumps(kept, separators=(",", ":")))
 
     def run(self, interval: float = TICK_S) -> None:
         while True:

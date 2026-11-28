@@ -31,7 +31,8 @@ USER_ONLY = {"set_autopilot": {"on": True},
              "set_quota_override": {"bucket": "claude", "on": True},
              "dismiss_ai_notice": {},
              "triage": {"trace_id": "abcdef01", "deep": False},
-             "triage_feedback": {"trace_id": "abcdef01", "feedback": "helpful"}}
+             "triage_feedback": {"trace_id": "abcdef01", "feedback": "helpful"},
+             "set_triage_settings": {"auto": False, "daily_limit": 5}}
 YOURS_ALONE = {"restore_app"}  # not a limit: it replaces an app with an older copy, which only a person decides
 PANEL = {n for n, sp in SPECS.items() if sp.panel}  # the Ask Bosun panel's own actions: tests/test_assistant.py
 

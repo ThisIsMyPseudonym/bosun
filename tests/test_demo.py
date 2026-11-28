@@ -49,6 +49,7 @@ def test_demo_refuses_an_install(client):
 def test_demo_refuses_actions_that_open_or_look_at_the_machine(client):
     for path, body in (("/api/open-updates", {}), ("/api/refresh", {}),
                        ("/api/runs/abcdef01/triage", {"deep": True}),
+                       ("/api/triage/settings", {"auto": False}),
                        ("/api/ai/logins", {"provider": "claude", "id": "work", "label": "Work", "home": "/tmp"}),
                        ("/api/ai/logins/claude/default", {"excluded": True}),
                        ("/api/ai/routing", {"mode": "balance"}),
@@ -109,3 +110,56 @@ def test_the_demo_never_starts_on_a_port_something_else_holds(tmp_path, monkeypa
         assert cli.cmd_demo(None, s) == 1
     said = capsys.readouterr()
     assert f"Port {taken} is in use" in said.err and "login?code=" not in said.out
+
+
+def test_demo_seeds_rules_only_triage_verdicts_and_never_starts_a_cli(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from bosun import proc
+    from bosun.providers import catalog
+    from bosun.triage import model as tmodel
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    ai_binaries = frozenset(spec.binary for spec in catalog.CATALOG.values())
+    allowed_probes = frozenset({"git", "launchctl", "defaults", "sw_vers", "uname"})
+    seen_bins: list[str] = []
+    real_run = proc.run
+
+    def guard_proc(argv, *a, **k):
+        exe = Path(argv[0]).name if argv else ""
+        seen_bins.append(exe)
+        if exe in ai_binaries:
+            raise AssertionError(f"demo started an AI CLI: {argv}")
+        if exe not in allowed_probes:
+            raise AssertionError(f"demo started an unexpected CLI: {argv}")
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(proc, "run", guard_proc)
+    monkeypatch.setattr(tmodel, "run_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError("demo called a model")))
+    monkeypatch.setattr(tmodel, "_run_cli", lambda *a, **k: (_ for _ in ()).throw(AssertionError("demo ran a model CLI")))
+
+    s = load_settings()
+    s = type(s)(**{**s.__dict__, "demo": True, "self_update": False, "data_dir": tmp_path})
+    store = Store(tmp_path / "demo-triage.db")
+    demo.seed(store)
+    c = TestClient(create_app(s, store, TOKEN), base_url=f"http://127.0.0.1:{s.port}", cookies=signed_in(s.port))
+    c.headers["x-bosun-token"] = TOKEN
+
+    problems = c.get("/api/runs", params={"status": "problems"}).json()
+    assert len(problems) >= 2
+    categories = set()
+    for run in problems:
+        tri = c.get(f"/api/runs/{run['trace_id']}/triage")
+        assert tri.status_code == 200
+        body = tri.json()
+        assert body["status"] == "done" and body["source"] == "rules"
+        assert body["triage_available"] is False
+        categories.add(body["verdict"]["category"])
+    assert {"permissions", "busy_or_locked"} <= categories
+    assert not (set(seen_bins) & ai_binaries)
+
+    # Failed demo jobs on /api/jobs also carry their seeded verdict summary
+    failed_jobs = [j for j in c.get("/api/jobs").json() if j["status"] == "failed"]
+    assert len(failed_jobs) >= 2
+    assert all(j["triage"] is not None and j["triage"]["source"] == "rules" for j in failed_jobs)

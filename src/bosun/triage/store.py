@@ -288,11 +288,22 @@ def superseded(store: Store, rec: FailureRecord) -> bool:
         return hit is not None
 
 
-def reset_running(store: Store) -> int:
-    """Return interrupted 'running' triage rows back to 'queued' on startup."""
+def reset_running(store: Store, *, now: float | None = None) -> int:
+    """Recover interrupted 'running' rows on startup: mark clicked rows failed ('interrupted'), re-queue background rows."""
+    ts = time.time() if now is None else now
     with store._tx(write=True) as db:
-        cur = db.execute("UPDATE triage SET status = 'queued' WHERE status = 'running'")
-        return int(cur.rowcount)
+        clicked = db.execute(
+            "UPDATE triage SET "
+            "status = CASE WHEN feedback IN ('wrong', 'disputed') THEN 'disputed' ELSE 'failed' END, "
+            "source = CASE WHEN source = 'click' THEN '' ELSE source END, "
+            "last_error = 'interrupted', finished = ? "
+            "WHERE status = 'running' AND ("
+            "source = 'click' OR EXISTS (SELECT 1 FROM runs r WHERE r.trace_id = triage.triage_trace AND r.actor = 'user')"
+            ")",
+            (ts,),
+        )
+        requeued = db.execute("UPDATE triage SET status = 'queued' WHERE status = 'running'")
+        return int(clicked.rowcount) + int(requeued.rowcount)
 
 
 def _parse_argv(raw: str | None) -> tuple[str, ...]:
@@ -356,22 +367,26 @@ def _failing_span_id(db: sqlite3.Connection, trace_id: str) -> str:
     return str(row["span_id"]) if row is not None else ""
 
 
+def record_from_row(db: sqlite3.Connection, row: sqlite3.Row) -> FailureRecord:
+    """Normalize one v_failures row into a FailureRecord using an existing DB connection."""
+    trace_id = str(row["trace_id"] or "")
+    error = redact.text(str(row["error"] or ""))
+    what, what_id, subject, status, command, output = _resolve_fallbacks(
+        db, str(row["what"]), str(row["id"]), str(row["kind"] or ""), str(row["subject"] or ""),
+        str(row["status"] or ""), trace_id, _parse_argv(row["failed_command"]),
+        redact.text(str(row["failed_output"] or "")), error,
+    )
+    return FailureRecord(
+        failure=f"{what}:{what_id}", what=what, what_id=what_id, kind=str(row["kind"] or ""),
+        subject=subject, item_source=_item_source(subject), status=status, ts=float(row["ts"] or 0.0),
+        actor=str(row["actor"] or ""), trace_id=trace_id, error=error, command=command,
+        exit_code=int(row["failed_exit"]) if row["failed_exit"] is not None else None,
+        output=output, span_id=_failing_span_id(db, trace_id),
+    )
+
+
 def load_failure(store: Store, trace_id: str) -> FailureRecord | None:
     """Load and normalize one failure from v_failures by trace_id."""
     with store._tx() as db:
         row = db.execute("SELECT * FROM v_failures WHERE trace_id = ? LIMIT 1", (trace_id,)).fetchone()
-        if row is None:
-            return None
-        error = redact.text(str(row["error"] or ""))
-        what, what_id, subject, status, command, output = _resolve_fallbacks(
-            db, str(row["what"]), str(row["id"]), str(row["kind"] or ""), str(row["subject"] or ""),
-            str(row["status"] or ""), trace_id, _parse_argv(row["failed_command"]),
-            redact.text(str(row["failed_output"] or "")), error,
-        )
-        return FailureRecord(
-            failure=f"{what}:{what_id}", what=what, what_id=what_id, kind=str(row["kind"] or ""),
-            subject=subject, item_source=_item_source(subject), status=status, ts=float(row["ts"] or 0.0),
-            actor=str(row["actor"] or ""), trace_id=trace_id, error=error, command=command,
-            exit_code=int(row["failed_exit"]) if row["failed_exit"] is not None else None,
-            output=output, span_id=_failing_span_id(db, trace_id),
-        )
+        return None if row is None else record_from_row(db, row)

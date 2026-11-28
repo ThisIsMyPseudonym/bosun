@@ -247,6 +247,42 @@ function breakdown(title, rows, total, name) {
       usd(r.cost_usd), shareBar(r.cost_usd || 0, total)]), [false, true, true, true, true, false]));
 }
 
+async function saveTriageSettings(body) {
+  try {
+    await api("/api/triage/settings", { method: "POST", body: JSON.stringify(body) });
+  } catch (err) {
+    alert(`Could not save triage settings: ${err.message}`);
+  } finally {
+    await fetchUsage(true);
+  }
+}
+
+function triagePanel(triage, isDemo) {
+  const t = triage || { auto: true, daily_limit: 10, daily_used: 0, daily_remaining: 10 };
+  const autoBox = el("input", {
+    type: "checkbox", checked: t.auto ? "" : null, disabled: isDemo || null,
+    "aria-label": "Triage failures automatically",
+    onchange: () => saveTriageSettings({ auto: autoBox.checked }),
+  });
+  const limitInput = el("input", {
+    type: "number", min: "0", max: "100", value: String(t.daily_limit ?? 10), disabled: isDemo || null,
+    "aria-label": "Daily automatic triage limit",
+    onchange: () => {
+      const n = parseInt(limitInput.value, 10);
+      if (!isNaN(n) && n >= 0 && n <= 100) saveTriageSettings({ daily_limit: n });
+    },
+  });
+  return el("section", { class: "panel" },
+    el("h3", { text: "Error triage" }),
+    el("p", { class: "hint", text: "Rules and the 30-day cache always run on this computer. For failures rules cannot place, Bosun sends redacted output (secrets stripped) to your chosen AI provider with the light model. Turning automatic triage off keeps failure output on this computer unless you click Triage." }),
+    el("label", { class: "uswitch" }, autoBox, el("span", {},
+      el("span", { text: "Triage failures automatically" }),
+      el("span", { class: "hint", text: "Background model triage pauses at the 75% line and respects the daily limit below. Agents and Ask Bosun cannot change this setting." }))),
+    el("label", { class: "qpin" },
+      el("span", { text: `Daily automatic limit (${t.daily_used ?? 0} / ${t.daily_limit ?? 10} used in 24 h)` }),
+      limitInput));
+}
+
 function agentPolicy(S) {
   const row = (key, label, hint) => {
     const box = el("input", { type: "checkbox", checked: S.agents[key] ? "" : null, "aria-label": label, onchange: async () => {
@@ -290,7 +326,7 @@ function detailSection(S, det) {
         [false, false, false, false, true, true, true, false])) : null);
 }
 
-MC.usageHelpers = { fmtPct, fmtPace, fmtDraw, windowRow, loginCard, retiredBanner, routingPanel, topJobsPanel };
+MC.usageHelpers = { fmtPct, fmtPace, fmtDraw, windowRow, loginCard, retiredBanner, routingPanel, topJobsPanel, triagePanel };
 
 MC.views.usage = function usage(S) {
   fetchUsage();
@@ -311,7 +347,7 @@ MC.views.usage = function usage(S) {
     d.budgets_retired ? retiredBanner(d.budgets_retired) : null,
     noticesPanel(d.notices),
     cards,
-    el("div", { class: "ugrid" }, topJobsPanel(d.top_jobs), routingPanel(d.routing, logins, !!d.demo), agentPolicy(S)),
+    el("div", { class: "ugrid" }, topJobsPanel(d.top_jobs), routingPanel(d.routing, logins, !!d.demo), triagePanel(d.triage, !!d.demo), agentPolicy(S)),
     detailSection(S, d.detail || d));
 };
 })();

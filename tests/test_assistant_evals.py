@@ -54,6 +54,39 @@ def test_a_failed_upgrade_is_diagnosed_from_the_run_and_its_output(panel):
     assert not panel.audit("upgrade")  # and nothing was changed
 
 
+def test_assistant_reads_triage_verdict_and_starts_from_context_verdict(panel):
+    from bosun.triage import store as tstore
+    from bosun.triage.schema import NextStep, Verdict
+
+    trace_id = failed_upgrade(panel.store)
+    tstore.save_verdict(
+        panel.store, f"run:{trace_id}", trace_id, "sig-perm", "rules",
+        Verdict(
+            category="permissions", cause="Homebrew cannot write to its folder.", confidence="high", evidence=[],
+            next_step=NextStep(kind="runbook", runbook="homebrew-permissions", why="Fix folder ownership."),
+            needs_person=True, transient=False,
+        ),
+    )
+
+    async def script(model):
+        tri = await model.call("get_triage", {"trace_id": trace_id})
+        diag = await model.call("diagnose", {"trace_id": trace_id, "facts": False})
+        assert tri["ok"] and tri["result"]["verdict"]["category"] == "permissions"
+        assert diag["ok"] and diag["result"]["triage"]["verdict"]["cause"] == "Homebrew cannot write to its folder."
+        await model.say("Bosun's triage points to Homebrew permissions.")
+
+    panel.script(script)
+    asked = panel.ask("Why did this fail?", context={"page": "runs", "run": trace_id})
+    events = panel.wait(asked["conversation_id"])
+    assert events[-1][1]["status"] == "ok"
+    assert not [k for k, _ in events if k == "approval"]
+    prompt = panel.fakes[0].model.prompt
+    ctx = json.loads(prompt.splitlines()[1])
+    assert ctx["run"]["trace_id"] == trace_id and "triage" not in ctx["run"]
+    assert "<<<BOSUN_TRIAGE_UNTRUSTED_" in prompt
+    assert '"cause":"Homebrew cannot write to its folder."' in prompt
+
+
 # --- approvals ---------------------------------------------------------------------------------------------------------
 def test_an_approved_action_runs_exactly_as_shown_and_the_audit_says_who_approved(panel):
     async def script(model):
@@ -150,6 +183,8 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
         model.auto = await model.call("set_autopilot", {"on": True})
         model.override = await model.call("set_quota_override", {"bucket": "claude", "on": True})
         model.ignore = await model.call("set_pref", {"key": JQ, "ignored": True})
+        model.triage = await model.call("triage", {"trace_id": "abcdef01", "deep": True})
+        model.triage_cfg = await model.call("set_triage_settings", {"auto": False, "daily_limit": 0})
         await model.say("Turn Autopilot on from the Today page.")
 
     panel.script(script)
@@ -157,14 +192,18 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
     events = panel.wait(cid)
     assert events[-1][1]["status"] == "ok" and not [k for k, _ in events if k == "approval"]
     model = panel.fakes[0].model
-    for result in (model.auto, model.override, model.ignore):
+    for result in (model.auto, model.override, model.ignore, model.triage, model.triage_cfg):
         assert not result["ok"] and "only be done by you" in result["error"]
     assert panel.store.setting("autopilot") in (None, "0") and panel.store.prefs() == {}
+    assert panel.store.setting("triage_auto") is None
     assert ai_routing.overrides(panel.store) == ()
     refused = panel.audit("set_autopilot")[0]  # the attempt is on record
     assert (refused["actor"], refused["outcome"], refused["approved_by"]) == ("assistant", "error", "")
     tools = [m for m in panel.conversation(cid)["messages"] if m["role"] == "tool"]
-    assert [(t["tool"], t["outcome"]) for t in tools] == [("set_autopilot", "refused"), ("set_quota_override", "refused"), ("set_pref", "refused")]
+    assert [(t["tool"], t["outcome"]) for t in tools] == [
+        ("set_autopilot", "refused"), ("set_quota_override", "refused"), ("set_pref", "refused"),
+        ("triage", "refused"), ("set_triage_settings", "refused"),
+    ]
 
 
 def test_an_unanswered_approval_expires_as_declined(panel):

@@ -122,11 +122,12 @@ def test_the_dashboard_decides_what_an_agent_may_do(app, dash):
                        ("set_ai_routing", {"mode": "balance"}), ("set_quota_override", {"bucket": "claude", "on": True}),
                        ("dismiss_ai_notice", {}),
                        ("triage", {"trace_id": "abcdef01", "deep": True}),
-                       ("triage_feedback", {"trace_id": "abcdef01", "feedback": "wrong"})):
+                       ("triage_feedback", {"trace_id": "abcdef01", "feedback": "wrong"}),
+                       ("set_triage_settings", {"auto": False})):
         result, body = call(dash, name, args)
         assert result.is_error and "only be done by you" in body["error"], name
     assert app.store.setting("agents_allow_system") is None and app.store.setting("agents_allow_external") is None
-    assert [r["outcome"] for r in app.store.audit(limit=10)] == ["error"] * 10
+    assert [r["outcome"] for r in app.store.audit(limit=11)] == ["error"] * 11
     assert "set_llm_budget" not in {t.name for t in mcp_server.tools()}
 
 

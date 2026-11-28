@@ -204,6 +204,7 @@ def report(store: Store, days: float = 30, now: float | None = None, *, demo: bo
             })
 
     route_info = {**routing.overview(store, now=when), "jobs": list(catalog.JOBS)}
+    from ..triage import settings as tsettings
     return {
         "days": days,
         "since": detail["since"],
@@ -216,6 +217,7 @@ def report(store: Store, days: float = 30, now: float | None = None, *, demo: bo
         "notices": ledger.notices(store, now=when),
         "budgets_retired": budgets_retired(store),
         "routing": route_info,
+        "triage": tsettings.overview(store, now=when),
         "detail": detail,
         "totals": detail["totals"],
         "by_purpose": detail["by_purpose"],
