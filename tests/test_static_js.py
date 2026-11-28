@@ -1440,3 +1440,131 @@ def test_automations_editor_preserves_enabled_state_and_has_turn_on_control():
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_keeps_unsaved_edits_across_rerender():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(STATIC / "automations_editor.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        removeAttribute(k) {{
+          delete this.attrs[k];
+          if (k === "disabled") this.disabled = false;
+          if (k === "checked") this.checked = false;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const rules = [
+      {{
+        id: 1, name: "What changed", preset: "what_changed", enabled: false,
+        trigger: {{ kind: "refresh" }}, conditions: {{}},
+        action: "notify", scope: {{ digest: "what_changed" }},
+        mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+      }},
+      {{
+        id: 2, name: "Nightly", preset: null, enabled: false,
+        trigger: {{ kind: "schedule", time: "02:00", days: [] }}, conditions: {{}},
+        action: "refresh", scope: {{ only: null }},
+        mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+      }},
+    ];
+    MC.api = async (path) => {{
+      if (path === "/api/automations") return {{ paused: false, demo: false, automations: rules.map((r) => ({{ ...r }})), projects: [] }};
+      if (path.startsWith("/api/automations/firings")) return {{ firings: [] }};
+      return {{ id: 1 }};
+    }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    let tree = null;
+    MC.render = () => {{ tree = MC.views.automations(); }};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const findByLabel = (lbl) => allNodes(tree).find((n) => n.attrs["aria-label"] === lbl);
+    const editBtns = () => allNodes(tree).filter((n) => n.tagName === "BUTTON" && n.textContent === "Edit");
+
+    (async () => {{
+      MC.render();
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Open editor on rule 1 and fill fields
+      const b1 = editBtns()[1]; // presets come after custom rules
+      for (const fn of b1.listeners.click || []) fn();
+      const nameIn = findByLabel("Automation name");
+      nameIn.value = "Unsaved edit";
+      (nameIn.listeners.input || []).forEach((fn) => fn({{ target: nameIn }}));
+      const maxSel = findByLabel("Max per day");
+      maxSel.value = "12";
+      (maxSel.listeners.change || []).forEach((fn) => fn({{ target: maxSel }}));
+      const turnOn = findByLabel("Turn on after saving");
+      turnOn.checked = true;
+      (turnOn.listeners.change || []).forEach((fn) => fn({{ target: turnOn }}));
+
+      // Simulate 15-second background fetch + full MC.render()
+      await MC.automationsHelpers.fetchAutomations(true);
+      MC.render();
+
+      const afterName = findByLabel("Automation name");
+      const afterMax = findByLabel("Max per day");
+      const afterTurnOn = findByLabel("Turn on after saving");
+      if (!afterName || afterName.value !== "Unsaved edit") throw new Error("name wiped on re-render: " + (afterName && afterName.value));
+      const selectedMax = allNodes(afterMax).find((o) => o.tagName === "OPTION" && o.attrs.selected !== undefined);
+      if (!selectedMax || selectedMax.value !== "12") throw new Error("maxPerDay wiped on re-render");
+      if (!afterTurnOn || !afterTurnOn.checked) throw new Error("turnOn wiped on re-render");
+
+      // Switching to another rule drops old edits
+      const b2 = editBtns()[0];
+      for (const fn of b2.listeners.click || []) fn();
+      if (findByLabel("Automation name").value !== "Nightly") throw new Error("switching rules did not reset state");
+
+      // Cancel drops edits
+      const name2 = findByLabel("Automation name");
+      name2.value = "Temp";
+      (name2.listeners.input || []).forEach((fn) => fn({{ target: name2 }}));
+      const cancelBtn = allNodes(tree).find((n) => n.tagName === "BUTTON" && n.textContent === "Cancel");
+      for (const fn of cancelBtn.listeners.click || []) fn();
+      for (const fn of editBtns()[0].listeners.click || []) fn();
+      if (findByLabel("Automation name").value !== "Nightly") throw new Error("cancel did not drop state");
+
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"

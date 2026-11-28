@@ -4,7 +4,7 @@
 (() => {
 const { el, api } = MC;
 
-const A = { data: null, firings: null, at: 0, loading: false, error: "", editing: null };
+const A = { data: null, firings: null, at: 0, loading: false, error: "", editing: null, editorState: null };
 const MODE_LABEL = { run: "Runs on its own", ask: "Asks first" };
 const STATUS_CLASS = {
   done: "auto-ok",
@@ -78,7 +78,7 @@ async function deleteRule(rule) {
   if (!confirm(`Delete automation "${rule.name}"? Firing history will stay.`)) return;
   try {
     await api(`/api/automations/${rule.id}/delete`, { method: "POST", body: "{}" });
-    if (A.editing && A.editing.id === rule.id) A.editing = null;
+    if (A.editing && A.editing.id === rule.id) { A.editing = null; A.editorState = null; }
     fetchAutomations(true);
   } catch (err) {
     alert(`Could not delete automation: ${err.message}`);
@@ -205,16 +205,27 @@ MC.views.automations = function automations() {
   const all = data.automations || [];
   const custom = all.filter((r) => !r.preset);
   const presets = all.filter((r) => !!r.preset);
-  const openEdit = (rule) => { A.editing = rule || { id: null }; MC.render(); };
-  const closeEdit = () => { A.editing = null; MC.render(); };
+  const openEdit = (rule) => {
+    const next = rule || { id: null };
+    if (!A.editing || A.editing.id !== next.id || next.id === null) {
+      A.editing = next;
+      A.editorState = MC.automationsHelpers.initEditorState ? MC.automationsHelpers.initEditorState(next) : null;
+    }
+    MC.render();
+  };
+  const closeEdit = () => { A.editing = null; A.editorState = null; MC.render(); };
+  const onSaved = () => { A.editing = null; A.editorState = null; fetchAutomations(true); };
   const pausedBanner = data.paused
     ? el("div", { class: "callout auto-paused-banner", text: "All automations are paused. Waiting firings stay frozen until you resume them." })
     : null;
   const demoBanner = isDemo
     ? el("div", { class: "callout auto-demo-banner", text: "Demo mode: switches and editing are disabled. Run `bosun serve` to manage your own automations." })
     : null;
+  if (A.editing && !A.editorState && MC.automationsHelpers.initEditorState) {
+    A.editorState = MC.automationsHelpers.initEditorState(A.editing);
+  }
   const editorNode = A.editing && MC.automationsHelpers.editorPanel
-    ? MC.automationsHelpers.editorPanel(A.editing, data.projects || [], isDemo, closeEdit, () => { A.editing = null; fetchAutomations(true); })
+    ? MC.automationsHelpers.editorPanel(A.editing, data.projects || [], isDemo, closeEdit, onSaved, A.editorState)
     : null;
   return el("div", { class: "automations" },
     headerBar(data, () => openEdit(null)),

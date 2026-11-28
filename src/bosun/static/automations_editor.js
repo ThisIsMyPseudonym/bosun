@@ -182,8 +182,8 @@ function buildControls(st, projects, isDemo, update) {
   ].filter(Boolean);
 }
 
-function editorPanel(rule, projects, isDemo, onCancel, onSaved) {
-  const st = initState(rule);
+function editorPanel(rule, projects, isDemo, onCancel, onSaved, existingState) {
+  const st = existingState || initState(rule);
   const host = el("section", { class: "panel auto-editor" });
 
   function renderEditor() {
@@ -235,5 +235,8 @@ function editorPanel(rule, projects, isDemo, onCancel, onSaved) {
   return host;
 }
 
-if (MC.automationsHelpers) MC.automationsHelpers.editorPanel = editorPanel;
+if (MC.automationsHelpers) {
+  MC.automationsHelpers.editorPanel = editorPanel;
+  MC.automationsHelpers.initEditorState = initState;
+}
 })();
