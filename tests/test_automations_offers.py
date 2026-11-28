@@ -681,4 +681,48 @@ def test_merged_siblings_finalized_on_expiry_tick_and_decide_with_four_items(tmp
         assert srow["finished"] == t_fix
 
 
+def test_waiting_offers_caps_item_key_and_drops_unknown_input_fields(tmp_path):
+    from bosun.automations import offer_decide
+
+    st = Store(tmp_path / "bosun.db")
+    now = 1_700_000_000.0
+    d_open = AutomationDef(
+        name="Ask open", trigger=RefreshTrigger(), conditions=RefreshConditions(),
+        action="open_app", scope=AppActionScope(app="mac-app:slack"), mode="ask",
+    )
+    aid1 = astore.save(st, d_open, enabled=True, grant_digest=grant_digest(d_open), granted_by="user", now=now)
+    astore.insert_firing(
+        st, aid1, d_open.name, "in_app_update", "mac-app:slack@2.0", "cap:1",
+        status="offered", deadline=now + 86400.0,
+        input_data={"key": "mac-app:\x1b[31m" + "A" * 500, "extra_secret": "DO_NOT_LEAK_" + "Z" * 1000},
+        now=now,
+    )
+    d_upg = AutomationDef(
+        name="Ask upgrade", trigger=RefreshTrigger(), conditions=RefreshConditions(),
+        action="upgrade", scope=UpgradeScope(mode="keys", keys=("brew:jq",)), mode="ask",
+    )
+    aid2 = astore.save(st, d_upg, enabled=True, grant_digest=grant_digest(d_upg), granted_by="user", now=now)
+    astore.insert_firing(
+        st, aid2, d_upg.name, "refresh", "snap:1", "cap:2",
+        status="offered", deadline=now + 86400.0,
+        input_data={"keys": [f"brew:{'k' * 400}{i}" for i in range(30)], "raw_blob": "SECRET_BLOB"},
+        now=now,
+    )
+
+    cards = {c["automation_id"]: c for c in offer_decide.waiting_offers(st, now=now)}
+    c1 = cards[aid1]
+    assert "extra_secret" not in c1["input"]
+    assert "DO_NOT_LEAK" not in json.dumps(c1)
+    assert "\x1b" not in json.dumps(c1)
+    assert len(c1["input"]["key"]) <= 200
+    assert len(c1["items"][0]["key"]) <= 200
+
+    c2 = cards[aid2]
+    assert "raw_blob" not in c2["input"]
+    assert "SECRET_BLOB" not in json.dumps(c2)
+    assert len(c2["input"]["keys"]) <= offers.MAX_OFFER_ITEMS
+    assert all(len(k) <= 200 for k in c2["input"]["keys"])
+
+
+
 

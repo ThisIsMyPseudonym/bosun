@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import time
 from typing import Any
 
@@ -10,7 +11,7 @@ from pydantic import ValidationError
 from ..approvals import Approvals
 from ..registry import ActionContext, ActionError, Actions, Conflict, Forbidden, Invalid, NotFound
 from ..store import Store
-from . import api as aapi, match as amatch, offers, store as astore
+from . import api as aapi, digest, match as amatch, offers, store as astore
 from .schema import AutomationDef, grant_digest, grant_digest_matches, grant_expired, has_unset_project
 
 
@@ -178,6 +179,49 @@ def decide_offer(
         return _execute_approved(store, actions, approvals, aid, defn, firing_id, siblings, body, when)
 
 
+def _safe_offer_input(input_data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only known offer input fields, cleaned and length-capped for UI serialization."""
+    out: dict[str, Any] = {}
+    if isinstance(input_data.get("app"), str):
+        out["app"] = digest._clean_name(input_data["app"], limit=80)
+    if isinstance(input_data.get("key"), str):
+        out["key"] = offers._clean_key(input_data["key"])
+    if isinstance(input_data.get("keys"), list):
+        out["keys"] = [offers._clean_key(k) for k in input_data["keys"][: offers.MAX_OFFER_ITEMS] if isinstance(k, str) and k]
+    if isinstance(input_data.get("project"), str):
+        out["project"] = offers._clean_key(input_data["project"])
+    if "only" in input_data:
+        only = input_data["only"]
+        out["only"] = [digest._clean_name(x, limit=40) for x in only[:10] if isinstance(x, str) and x] if isinstance(only, list) else None
+    if isinstance(input_data.get("auto_upgrade"), bool):
+        out["auto_upgrade"] = input_data["auto_upgrade"]
+    return out
+
+
+def serialize_offer(
+    store: Store, firing: dict[str, Any], *, automations: Mapping[int, dict[str, Any]] | None = None,
+    snapshot_items: Mapping[str, dict[str, Any]] | None = None, now: float | None = None,
+) -> dict[str, Any]:
+    """Serialize one offer row with code-built plain text and capped known input fields."""
+    when = time.time() if now is None else now
+    aid = int(firing["automation_id"])
+    rule = automations.get(aid) if automations is not None else astore.get(store, aid)
+    action = str(rule["action"]) if rule is not None else ""
+    input_data = offers._parse_json(firing.get("input"))
+    items = offers.offer_items(store, action, input_data, snapshot_items=snapshot_items)
+    deadline = firing.get("deadline")
+    is_expired = firing.get("status") == "expired" or (deadline is not None and when >= float(deadline))
+    label = (offers.action_summary(action, input_data, items) if action
+             else digest._clean_name(str(firing.get("reason") or "Run automation"), limit=120))
+    return {
+        "id": int(firing["id"]), "automation_id": aid,
+        "automation_name": digest._clean_name(str(firing.get("automation_name") or f"Automation #{aid}"), limit=80),
+        "action": action, "action_label": label, "items": list(items), "input": _safe_offer_input(input_data),
+        "why": offers.offer_why(firing), "status": "expired" if is_expired else str(firing.get("status") or "offered"),
+        "expired": is_expired, "created": firing.get("created"), "deadline": deadline,
+    }
+
+
 def waiting_offers(store: Store, *, now: float | None = None, limit: int = 50) -> list[dict[str, Any]]:
     """Return serialized open offers (including any just-expired rows not yet swept by a tick)."""
     when = time.time() if now is None else now
@@ -186,4 +230,4 @@ def waiting_offers(store: Store, *, now: float | None = None, limit: int = 50) -
         return []
     autos = {int(a["id"]): a for a in astore.list_all(store)}
     snap_items = amatch._snap_items_by_key(store)
-    return [offers.serialize_offer(store, r, automations=autos, snapshot_items=snap_items, now=when) for r in rows]
+    return [serialize_offer(store, r, automations=autos, snapshot_items=snap_items, now=when) for r in rows]

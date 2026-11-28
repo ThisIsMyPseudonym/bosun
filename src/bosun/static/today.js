@@ -140,21 +140,24 @@ async function decideTodayOffer(offer, approve) {
   }
 }
 
+const cleanOffer = (raw, limit = 80) => (MC.automationsHelpers && MC.automationsHelpers.cleanOfferText
+  ? MC.automationsHelpers.cleanOfferText(raw, limit) : String(raw == null ? "" : raw).replace(/\s+/g, " ").trim().slice(0, limit));
+
 function offerCard(offer, isDemo) {
   const expired = !!(offer.expired || offer.status === "expired" || (offer.deadline && Date.now() / 1000 >= offer.deadline));
-  const items = (offer.items || []).slice(0, 4).map((i) =>
-    `${i.name || i.key}${i.installed && i.available ? ` (${i.installed} → ${i.available})` : i.available ? ` (${i.available})` : ""}`).join(", ");
+  const ah = MC.automationsHelpers || {};
+  const items = ah.offerItemsText ? ah.offerItemsText(offer.items, 4) : "";
+  const target = ah.offerTargetText ? ah.offerTargetText(offer) : cleanOffer(offer.action, 40);
+  const sub = [cleanOffer(offer.why || "Waiting for approval", 120), target].filter(Boolean).join(" · ");
   const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
-  return el("div", { class: `need need-offer${expired ? " need-offer-expired" : ""}` },
-    MC.glyph("bolt", "md"),
+  return el("div", { class: `need need-offer${expired ? " need-offer-expired" : ""}` }, MC.glyph("bolt", "md"),
     el("div", { class: "body" },
       el("div", { class: "title" },
-        el("strong", { class: "name", text: offer.automation_name || `Automation #${offer.automation_id}` }),
+        el("strong", { class: "name", text: cleanOffer(offer.automation_name || `Automation #${offer.automation_id}`, 80) }),
         el("span", { class: "chip", text: expired ? "Expired" : "Automation offer" })),
-      el("div", { class: "line", text: offer.action_label || offer.action || "Run automation" }),
+      el("div", { class: "line", text: cleanOffer(offer.action_label || offer.action || "Run automation", 140) }),
       items ? el("div", { class: "line offer-sub", text: items }) : null,
-      el("div", { class: "line offer-sub", text: expired ? "This offer expired after 24 hours and can no longer be approved."
-        : `${offer.why || "Waiting for approval"} · ${JSON.stringify(offer.input || {})}` })),
+      el("div", { class: "line offer-sub", text: expired ? "This offer expired after 24 hours and can no longer be approved." : sub })),
     el("div", { class: "offer-btns" },
       el("button", { class: "quiet", disabled: isDemo || expired || null, text: "Decline", onclick: stop(() => decideTodayOffer(offer, false)) }),
       el("button", { class: "primary", disabled: isDemo || expired || null, text: "Approve", onclick: stop(() => decideTodayOffer(offer, true)) })));

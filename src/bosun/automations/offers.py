@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-import time
 from typing import Any
 
 from pydantic import ValidationError
@@ -19,6 +18,7 @@ OFFER_TTL_S = 24 * 3600.0
 MAX_OFFERS_PER_RULE = 5
 MAX_OFFERS_TOTAL = 20
 MAX_OFFER_ITEMS = 20
+MAX_ITEM_KEY_LEN = 200
 MERGED_REASON_PREFIX = "merged into offer #"
 
 
@@ -73,10 +73,15 @@ def _clean_ver(raw: Any) -> str:
     return digest._clean_name(str(raw or ""), limit=30)
 
 
+def _clean_key(raw: Any) -> str:
+    return digest._clean_name(str(raw or ""), limit=MAX_ITEM_KEY_LEN)
+
+
 def _item_entry(key: str, item: Mapping[str, Any] | None) -> dict[str, str]:
+    ck = _clean_key(key)
     if item is None:
-        return {"key": key[:200], "name": digest._clean_name(key.split(":", 1)[-1]), "installed": "", "available": ""}
-    return {"key": str(item.get("key") or key)[:200], "name": digest._clean_name(str(item.get("name") or key)),
+        return {"key": ck, "name": digest._clean_name(ck.split(":", 1)[-1]), "installed": "", "available": ""}
+    return {"key": _clean_key(item.get("key") or ck), "name": digest._clean_name(str(item.get("name") or ck)),
             "installed": _clean_ver(item.get("installed")), "available": _clean_ver(item.get("available"))}
 
 
@@ -167,33 +172,26 @@ def create_offer(
 ) -> tuple[str, str]:
     """Transition `firing` into an open 24-hour offer, enforcing bounds and notifying at most once."""
     fid = int(firing["id"])
+    reason = ""
     if pending_offer_count(store, automation_id=aid) >= MAX_OFFERS_PER_RULE:
         reason = f"pending offer limit reached ({MAX_OFFERS_PER_RULE} per rule)"
-        _skip_all(store, (fid, *sibling_fids), reason, when)
-        return "skipped", reason
-    if pending_offer_count(store) >= MAX_OFFERS_TOTAL:
+    elif pending_offer_count(store) >= MAX_OFFERS_TOTAL:
         reason = f"pending offer limit reached ({MAX_OFFERS_TOTAL} total)"
-        _skip_all(store, (fid, *sibling_fids), reason, when)
-        return "skipped", reason
-    dup = duplicate_pending_offer(store, defn.action, resolved)
-    if dup is not None:
+    elif (dup := duplicate_pending_offer(store, defn.action, resolved)) is not None:
         reason = f"already offered by {digest._clean_name(str(dup.get('automation_name') or 'another rule'), 60)}"
+    if reason:
         _skip_all(store, (fid, *sibling_fids), reason, when)
         return "skipped", reason
-
     items = offer_items(store, defn.action, resolved)
     summary = action_summary(defn.action, resolved, items)
-    astore.set_firing(
-        store, fid, status="offered", due=None, deadline=when + OFFER_TTL_S,
-        input_data=resolved, reason=summary, now=when,
-    )
-    if sibling_fids:
-        marker = f"{MERGED_REASON_PREFIX}{fid}"
-        for sfid in sibling_fids:
-            astore.set_firing(store, sfid, status="skipped", reason=marker, finished=when, now=when)
+    astore.set_firing(store, fid, status="offered", due=None, deadline=when + OFFER_TTL_S,
+                      input_data=resolved, reason=summary, now=when)
+    marker = f"{MERGED_REASON_PREFIX}{fid}"
+    for sfid in sibling_fids:
+        astore.set_firing(store, sfid, status="skipped", reason=marker, finished=when, now=when)
     if notify.is_on(store):
-        title = f"Approval needed: {digest._clean_name(defn.name, 60)}"
-        notify.enqueue_automation(store, title, f"{summary}. Open Bosun to approve or decline.", now=when)
+        notify.enqueue_automation(store, f"Approval needed: {digest._clean_name(defn.name, 60)}",
+                                  f"{summary}. Open Bosun to approve or decline.", now=when)
     return "offered", summary
 
 
@@ -370,27 +368,3 @@ def expire_offers(store: Store, when: float) -> int:
             if expire_offer_tx(store, aid, fid, reason, when):
                 expired += 1
     return expired
-
-
-def serialize_offer(
-    store: Store, firing: dict[str, Any], *, automations: Mapping[int, dict[str, Any]] | None = None,
-    snapshot_items: Mapping[str, dict[str, Any]] | None = None, now: float | None = None,
-) -> dict[str, Any]:
-    """Serialize one offer row with code-built plain text for Today and Automations cards."""
-    when = time.time() if now is None else now
-    aid = int(firing["automation_id"])
-    rule = automations.get(aid) if automations is not None else astore.get(store, aid)
-    action = str(rule["action"]) if rule is not None else ""
-    input_data = _parse_json(firing.get("input"))
-    items = offer_items(store, action, input_data, snapshot_items=snapshot_items)
-    deadline = firing.get("deadline")
-    is_expired = firing.get("status") == "expired" or (deadline is not None and when >= float(deadline))
-    label = (action_summary(action, input_data, items) if action
-             else digest._clean_name(str(firing.get("reason") or "Run automation"), limit=120))
-    return {
-        "id": int(firing["id"]), "automation_id": aid,
-        "automation_name": digest._clean_name(str(firing.get("automation_name") or f"Automation #{aid}"), limit=80),
-        "action": action, "action_label": label, "items": list(items), "input": input_data,
-        "why": offer_why(firing), "status": "expired" if is_expired else str(firing.get("status") or "offered"),
-        "expired": is_expired, "created": firing.get("created"), "deadline": deadline,
-    }

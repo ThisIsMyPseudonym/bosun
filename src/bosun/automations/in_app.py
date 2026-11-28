@@ -16,6 +16,9 @@ from . import offers, store as astore
 from .schema import AppActionScope, AutomationDef, InAppUpdateConditions
 
 log = logging.getLogger(__name__)
+MAX_ITEM_KEY_LEN = 200
+MAX_APP_LEN = 80
+MAX_VERSION_LEN = 60
 
 
 @dataclass(frozen=True)
@@ -53,9 +56,8 @@ def matches_in_app_update(conditions: InAppUpdateConditions, event: InAppUpdateE
     return bool(ids & wanted)
 
 
-def _event_target(defn: AutomationDef, ev: InAppUpdateEvent) -> str:
+def _event_target(defn: AutomationDef, app_id: str, key: str) -> str:
     """Return the action-appropriate event target (`app` for `relaunch_app`, `item_key` for `open_app`)."""
-    app_id, key = ev.app.strip(), ev.item_key.strip()
     is_trigger_app = isinstance(defn.scope, AppActionScope) and defn.scope.mode == "trigger_app"
     if defn.action == "relaunch_app":
         return app_id if is_trigger_app else (app_id or key)
@@ -81,15 +83,23 @@ def scan_in_app_updates(
         return 0
     created = 0
     for ev in events:
-        ver = ev.version.strip()
-        if not ver or (not ev.item_key.strip() and not ev.app.strip()):
+        app_id = ev.app.strip()[:MAX_APP_LEN]
+        key = ev.item_key.strip()[:MAX_ITEM_KEY_LEN]
+        ver = ev.version.strip()[:MAX_VERSION_LEN]
+        bundle_id = ev.bundle_id.strip()[:MAX_ITEM_KEY_LEN]
+        if not ver or (not key and not app_id):
             continue
+        bounded = InAppUpdateEvent(
+            app=app_id, item_key=key, version=ver,
+            installed=ev.installed.strip()[:MAX_VERSION_LEN], name=ev.name.strip()[:80],
+            bundle_id=bundle_id, detected_at=ev.detected_at,
+        )
         for aid, _row, defn in app_rules:
             if not isinstance(defn.conditions, InAppUpdateConditions):
                 continue
-            if not matches_in_app_update(defn.conditions, ev):
+            if not matches_in_app_update(defn.conditions, bounded):
                 continue
-            target = _event_target(defn, ev)
+            target = _event_target(defn, app_id, key)
             if not target:
                 continue
             subject = f"{target}@{ver}"
@@ -98,7 +108,7 @@ def scan_in_app_updates(
             fid = astore.insert_firing(
                 store, aid, defn.name, "in_app_update", subject, dedup,
                 status="scheduled", depth=0, due=due, deadline=due + offers.OFFER_TTL_S,
-                input_data={"app": ev.app, "item_key": ev.item_key, "version": ver, "bundle_id": ev.bundle_id},
+                input_data={"app": app_id, "item_key": key, "version": ver, "bundle_id": bundle_id},
                 now=when,
             )
             created += int(fid is not None)

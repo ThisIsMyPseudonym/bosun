@@ -2023,3 +2023,93 @@ def test_offer_cards_render_on_automations_and_today_with_approve_decline_expiry
     """
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0 and "OFFER_CARDS_OK" in r.stdout, f"stdout={r.stdout}\nstderr={r.stderr}"
+
+
+def test_offer_cards_never_stringify_raw_input_and_cap_fields():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    for name in ("automations.js", "today.js"):
+        src = (STATIC / name).read_text(encoding="utf-8")
+        assert "JSON.stringify(offer.input" not in src, f"{name} must never JSON.stringify(offer.input)"
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    today_js = str(STATIC / "today.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", disabled: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "disabled") this.disabled = true; }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = []; this.append(...kids); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.location = {{ hash: "#/automations" }};
+    globalThis.alert = () => {{}};
+    globalThis.confirm = () => true;
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    MC.api = async () => ({{}});
+    MC.route = {{ parse: () => ({{ page: "automations" }}), href: (p, id) => `#/${{p}}/${{id}}` }};
+    MC.render = () => {{}};
+    MC.banner = () => {{}};
+    MC.refreshNow = async () => {{}};
+    MC.ago = () => "2m ago";
+    MC.clock = () => "14:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    MC.ask = () => {{}};
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(today_js)}, "utf8"));
+
+    const hostileOffer = {{
+      id: 99, automation_id: 7, automation_name: "Offer\\u202e" + "R".repeat(200),
+      action: "relaunch_app", action_label: "Quit and reopen Chrome " + "L".repeat(300),
+      items: [{{ key: "mac-app:" + "k".repeat(400), name: "Chrome\\u202e" + "N".repeat(200), installed: "1.0" + "0".repeat(80), available: "2.0" + "9".repeat(80) }}],
+      input: {{ app: "chrome", secret: "RAW_JSON_LEAK_" + "X".repeat(1000), nested: {{ boom: true }} }},
+      why: "Triggered\\u202e " + "W".repeat(300),
+      status: "offered", expired: false, created: 1700000000, deadline: 9999999999,
+    }};
+    const keyOnlyOffer = {{
+      id: 100, automation_id: 8, automation_name: "Open app",
+      action: "open_app", action_label: "Open app",
+      items: [],
+      input: {{ key: "mac-app:" + "a".repeat(400), extra: "SHOULD_NOT_SHOW" }},
+      why: "In-app update waiting",
+      status: "offered", expired: false, created: 1700000000, deadline: 9999999999,
+    }};
+
+    for (const [label, node] of [
+      ["auto-hostile", MC.automationsHelpers.offerCard(hostileOffer, false)],
+      ["today-hostile", MC.todayHelpers.offerCard(hostileOffer, false)],
+      ["auto-keyonly", MC.automationsHelpers.offerCard(keyOnlyOffer, false)],
+      ["today-keyonly", MC.todayHelpers.offerCard(keyOnlyOffer, false)],
+    ]) {{
+      const txt = node.textContent;
+      if (txt.includes("RAW_JSON_LEAK") || txt.includes("SHOULD_NOT_SHOW") || txt.includes("secret") || txt.includes("nested") || txt.includes("{{")) {{
+        throw new Error(label + " leaked raw input JSON: " + txt.slice(0, 300));
+      }}
+      if (txt.includes("\\u202e")) throw new Error(label + " leaked bidi char");
+      if (txt.length > 700) throw new Error(label + " uncapped text length: " + txt.length);
+    }}
+    console.log("OFFER_SANITIZED_OK");
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0 and "OFFER_SANITIZED_OK" in r.stdout, f"stdout={r.stdout}\nstderr={r.stderr}"
+

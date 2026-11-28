@@ -259,4 +259,24 @@ def test_trigger_app_event_with_both_app_and_item_key_works_for_both_actions_wit
     assert in_app.app_input_in_scope(st, open_def, open_def.scope, KeyIn(key="chrome"), (int(open_firing["id"]),), aid_open) is False
 
 
+def test_in_app_reader_caps_item_key_length(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+    defn = AutomationDef(
+        name="Offer open", trigger=InAppUpdateTrigger(), conditions=InAppUpdateConditions(),
+        action="open_app", scope=AppActionScope(mode="trigger_app"), mode="ask",
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=now)
+    row = astore.get(st, aid)
+    assert row is not None
+    long_key = "mac-app:" + "x" * 500
+    ev = in_app.InAppUpdateEvent(app="slack", item_key=long_key, version="4.41.0")
+    assert in_app.scan_in_app_updates(st, {aid: (row, defn)}, now, reader=lambda _s, *, now: (ev,)) == 1
+    firing = astore.list_firings(st, automation_id=aid)[0]
+    stored = json.loads(firing["input"])
+    assert len(stored["item_key"]) <= 200
+    assert len(firing["event_ref"].rsplit("@", 1)[0]) <= 200
+
+
+
 
