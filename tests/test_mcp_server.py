@@ -123,11 +123,19 @@ def test_the_dashboard_decides_what_an_agent_may_do(app, dash):
                        ("dismiss_ai_notice", {}),
                        ("triage", {"trace_id": "abcdef01", "deep": True}),
                        ("triage_feedback", {"trace_id": "abcdef01", "feedback": "wrong"}),
-                       ("set_triage_settings", {"auto": False})):
+                       ("set_triage_settings", {"auto": False}),
+                       ("save_automation", {
+                           "name": "Digest", "trigger": {"kind": "refresh"}, "conditions": {},
+                           "action": "notify", "scope": {"digest": "what_changed"}, "mode": "run", "enabled": True,
+                       }),
+                       ("set_automation_enabled", {"automation_id": 1, "enabled": True}),
+                       ("renew_automation", {"automation_id": 1}),
+                       ("delete_automation", {"automation_id": 1}),
+                       ("pause_automations", {"on": True})):
         result, body = call(dash, name, args)
         assert result.is_error and "only be done by you" in body["error"], name
     assert app.store.setting("agents_allow_system") is None and app.store.setting("agents_allow_external") is None
-    assert [r["outcome"] for r in app.store.audit(limit=11)] == ["error"] * 11
+    assert [r["outcome"] for r in app.store.audit(limit=16)] == ["error"] * 16
     assert "set_llm_budget" not in {t.name for t in mcp_server.tools()}
 
 

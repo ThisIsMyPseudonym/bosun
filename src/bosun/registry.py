@@ -327,6 +327,31 @@ class AutomationFiringsIn(_In):
     limit: int = Field(100, ge=1, le=500, description="Most firing rows to return")
 
 
+class SaveAutomationIn(_In):
+    id: int | None = Field(default=None, ge=1, description="Existing automation id when editing; omit to create")
+    name: str = Field(min_length=1, max_length=120, description="Short plain name for this automation")
+    trigger: dict[str, Any] = Field(description="Trigger object (refresh, schedule, verdict, or in_app_update)")
+    conditions: dict[str, Any] = Field(default_factory=dict, description="Conditions for the chosen trigger")
+    action: str = Field(min_length=1, max_length=40, description="Allow-listed Bosun action name")
+    scope: dict[str, Any] = Field(default_factory=dict, description="Fixed scope for the chosen action")
+    mode: Literal["run", "ask"] = Field(default="run", description="run = runs on its own; ask = asks first")
+    enabled: bool = Field(default=False, description="Whether this automation is turned on")
+    wait_s: int = Field(default=0, ge=0, le=86400, description="Seconds to wait before running after trigger fires")
+    max_per_day: int = Field(default=6, ge=1, le=48, description="Maximum firings per 24 hours (1-48)")
+    cooldown_s: int = Field(default=900, ge=0, le=86400, description="Minimum seconds between firings")
+    model_jobs_per_day: int = Field(default=3, ge=0, le=48, description="Maximum AI model jobs per 24 hours (0-48)")
+    confirm_grant: bool = Field(default=False, description="Owner checked the scope grant confirmation box")
+
+
+class AutomationIdIn(_In):
+    automation_id: int = Field(ge=1, description="Automation id")
+
+
+class AutomationToggleIn(AutomationIdIn):
+    enabled: bool = Field(description="True to enable, False to disable")
+    confirm_grant: bool = Field(default=False, description="Owner confirmed the scope grant when enabling")
+
+
 # --- specs ---------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ActionSpec:
@@ -393,6 +418,16 @@ SPECS: dict[str, ActionSpec] = _specs(
                Risk.READ, Empty, "GET", "/api/automations"),
     ActionSpec("list_automation_firings", "Recent automation firing history, newest first, with status, reason and trace id",
                Risk.READ, AutomationFiringsIn, "GET", "/api/automations/firings"),
+    ActionSpec("save_automation", "Create or edit an automation and record its owner scope grant",
+               Risk.LOCAL, SaveAutomationIn, "POST", "/api/automations", user_only=True),
+    ActionSpec("set_automation_enabled", "Turn one automation on or off",
+               Risk.LOCAL, AutomationToggleIn, "POST", "/api/automations/{automation_id}/enabled", user_only=True),
+    ActionSpec("renew_automation", "Renew a 90-day INSTALL automation grant",
+               Risk.LOCAL, AutomationIdIn, "POST", "/api/automations/{automation_id}/renew", user_only=True),
+    ActionSpec("delete_automation", "Delete an automation while keeping its firing history",
+               Risk.LOCAL, AutomationIdIn, "POST", "/api/automations/{automation_id}/delete", user_only=True),
+    ActionSpec("pause_automations", "Pause or resume all automations at once (global kill switch)",
+               Risk.LOCAL, OnIn, "POST", "/api/automations/pause", user_only=True),
     # Bosun's own state
     ActionSpec("set_pref", "Acknowledge, snooze or ignore an item (or ignore a project), bring it back, or opt it "
                "into automatic upgrades", Risk.LOCAL, PrefIn, "POST", "/api/prefs",
@@ -521,7 +556,9 @@ AUTOMATION_PREFIX = "automation:"
 DEMO_REFUSED = frozenset({"refresh", "recheck_project", "explain_item", "triage", "set_triage_settings", "discard_fix",
                           "watch_app", "check_app", "assistant_ask", "terminal_input", "terminal_stop",
                           "ai_logins", "add_ai_login", "set_ai_login",
-                          "ai_routing", "set_ai_routing", "set_quota_override"})
+                          "ai_routing", "set_ai_routing", "set_quota_override",
+                          "save_automation", "set_automation_enabled", "renew_automation",
+                          "delete_automation", "pause_automations"})
 
 
 def is_agent(actor: Actor) -> bool:

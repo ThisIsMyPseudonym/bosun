@@ -29,6 +29,8 @@ from bosun.registry import (
     AiOverrideIn,
     AiRoutingIn,
     AskIn,
+    AutomationIdIn,
+    AutomationToggleIn,
     BundleIn,
     ConversationIn,
     ConversationsIn,
@@ -48,6 +50,7 @@ from bosun.registry import (
     Risk,
     RunIn,
     RunManyIn,
+    SaveAutomationIn,
     TriageFeedbackIn,
     TriageIn,
     TriageSettingsIn,
@@ -217,6 +220,14 @@ FORBIDDEN_AUTOMATION_ACTIONS = [
     ("triage", TriageIn(trace_id="abcdef01", deep=False)),
     ("triage_feedback", TriageFeedbackIn(trace_id="abcdef01", feedback="helpful")),
     ("restore_app", BundleIn(bundle_id="com.example.app")),
+    ("save_automation", SaveAutomationIn(
+        name="Digest", trigger={"kind": "refresh"}, conditions={}, action="notify",
+        scope={"digest": "what_changed"}, mode="run", enabled=True,
+    )),
+    ("set_automation_enabled", AutomationToggleIn(automation_id=1, enabled=True)),
+    ("renew_automation", AutomationIdIn(automation_id=1)),
+    ("delete_automation", AutomationIdIn(automation_id=1)),
+    ("pause_automations", OnIn(on=True)),
     # EXTERNAL action
     ("open_pr", FixIdIn(fix_id=1)),
     # Panel actions (terminal & Ask Bosun)

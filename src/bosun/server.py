@@ -46,11 +46,11 @@ from .fixer import Fixer
 from .config import Settings
 from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, AutomationFiringsIn,
-                       Conflict, ConversationIn, ConversationsIn, DecideIn, Empty, Failed, FixIdIn, FixIn, Invalid,
-                       DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn, NotFound, OnIn, PinIn, PrefIn, ProjectIn,
-                       RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk, RunbookIn, RunIn, RunManyIn, RunsIn, TraceIn,
-                       TriageFeedbackIn, TriageIn, TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn,
-                       AiRoutingIn, AiOverrideIn)
+                       AutomationIdIn, AutomationToggleIn, Conflict, ConversationIn, ConversationsIn, DecideIn, Empty,
+                       Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
+                       NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk,
+                       RunbookIn, RunIn, RunManyIn, RunsIn, SaveAutomationIn, TraceIn, TriageFeedbackIn, TriageIn,
+                       TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, router as ai_router, routing as ai_routing, usage as ai_usage
@@ -1184,6 +1184,28 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         return aapi.list_firings(
             store, automation_id=body.automation_id, status=body.status, limit=body.limit, demo=s.demo,
         )
+
+    @actions.bind("save_automation")
+    def save_automation(ctx: ActionContext, body: SaveAutomationIn):
+        return aapi.save_automation(store, body, actor=ctx.actor)
+
+    @actions.bind("set_automation_enabled")
+    def set_automation_enabled(ctx: ActionContext, body: AutomationToggleIn):
+        return aapi.set_automation_enabled(
+            store, body.automation_id, body.enabled, confirm_grant=body.confirm_grant, actor=ctx.actor,
+        )
+
+    @actions.bind("renew_automation")
+    def renew_automation(ctx: ActionContext, body: AutomationIdIn):
+        return aapi.renew_automation(store, body.automation_id, actor=ctx.actor)
+
+    @actions.bind("delete_automation")
+    def delete_automation(ctx: ActionContext, body: AutomationIdIn):
+        return aapi.delete_automation(store, body.automation_id)
+
+    @actions.bind("pause_automations")
+    def pause_automations(ctx: ActionContext, body: OnIn):
+        return aapi.pause_automations(store, body.on)
 
     @actions.bind("get_runbook")
     def get_runbook(ctx: ActionContext, body: RunbookIn):

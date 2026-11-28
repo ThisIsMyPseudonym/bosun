@@ -4,11 +4,15 @@ from fastapi.testclient import TestClient
 
 from conftest import SESSION_KEY, signed_in
 from bosun import auth, demo
+from bosun.automations import store as astore
 from bosun.config import load_settings
+from bosun.models import Item, Source
+from bosun.serialize import item_to_dict
 from bosun.server import create_app
 from bosun.store import Store
 
 TOKEN = "t" * 32
+H = {"x-bosun-token": TOKEN}
 
 
 def test_list_automations_and_firings_are_readable_by_user_agents_and_demo(tmp_path):
@@ -48,3 +52,101 @@ def test_list_automations_and_firings_are_readable_by_user_agents_and_demo(tmp_p
     assert all(a["enabled"] is False for a in dbody["automations"])
     dfirings = dc.get("/api/automations/firings").json()
     assert dfirings["demo"] is True and len(dfirings["firings"]) >= 2
+
+
+def test_automation_write_actions_are_owner_only_check_grant_and_refuse_demo(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot(
+        [item_to_dict(Item(Source.REPO, "a", "a", "1.0", "1.1", ecosystem="npm",
+                           project="p1", project_name="App", lane="now"))],
+        [],
+        meta={"projects": [{"key": "p1", "name": "App", "active": True, "days_since_commit": 1,
+                            "checkouts": ["/tmp/p1"], "has_git": True, "has_remote": True}]},
+    )
+    app = create_app(load_settings(), st, TOKEN)
+    user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+    agent = TestClient(app, base_url="http://127.0.0.1:8787")
+
+    payload = {
+        "name": "Nightly fix",
+        "trigger": {"kind": "schedule", "time": "02:00", "days": []},
+        "conditions": {"project": "p1", "lane": "now"},
+        "action": "start_fix",
+        "scope": {"project": "p1", "lane": "now"},
+        "mode": "run",
+        "enabled": True,
+        "wait_s": 0,
+        "confirm_grant": False,
+    }
+    # Agent cannot create, toggle, renew, delete, or pause
+    assert agent.post("/api/automations", json={**payload, "confirm_grant": True},
+                      auth=auth.AgentAuth(SESSION_KEY)).status_code == 403
+    assert agent.post("/api/automations/pause", json={"on": True},
+                      auth=auth.AgentAuth(SESSION_KEY)).status_code == 403
+
+    # Out-of-bounds limits are refused (422), never clamped silently
+    assert user.post("/api/automations", json={**payload, "confirm_grant": True, "max_per_day": 99},
+                     headers=H).status_code == 422
+    assert user.post("/api/automations", json={**payload, "confirm_grant": True, "wait_s": -1},
+                     headers=H).status_code == 422
+    # Extra unknown fields inside scope/conditions/trigger are refused by extra="forbid"
+    assert user.post("/api/automations",
+                     json={**payload, "confirm_grant": True, "scope": {"project": "p1", "lane": "now", "extra": 1}},
+                     headers=H).status_code == 400
+    # Owner saving INSTALL + run without grant checkbox is refused (400)
+    assert user.post("/api/automations", json=payload, headers=H).status_code == 400
+
+    saved = user.post("/api/automations", json={**payload, "confirm_grant": True}, headers=H)
+    assert saved.status_code == 200 and saved.json()["grant_digest"]
+    aid = saved.json()["id"]
+    old_digest = saved.json()["grant_digest"]
+
+    # Editing re-grants (new digest) and cancels waiting firings
+    fid = astore.insert_firing(st, aid, "Nightly fix", "schedule", "2026-11-27T02:00", "sched:1", status="scheduled")
+    edited = user.post("/api/automations", json={
+        **payload, "id": aid, "scope": {"project": "p1", "lane": "batch"},
+        "conditions": {"project": "p1", "lane": "batch"}, "confirm_grant": True,
+    }, headers=H)
+    assert edited.status_code == 200 and edited.json()["grant_digest"] != old_digest
+    assert astore.get_firing(st, fid)["status"] == "skipped"
+
+    # Toggle off and back on
+    assert user.post(f"/api/automations/{aid}/enabled", json={"enabled": False}, headers=H).json()["enabled"] is False
+    assert user.post(f"/api/automations/{aid}/enabled", json={"enabled": True}, headers=H).json()["enabled"] is True
+
+    # Expire the 90-day grant, then renew as owner
+    with st._tx(write=True) as db:
+        db.execute("UPDATE automations SET granted_at = 1.0 WHERE id = ?", (aid,))
+    renewed = user.post(f"/api/automations/{aid}/renew", json={}, headers=H)
+    assert renewed.status_code == 200 and renewed.json()["grant_expired"] is False
+
+    # Enabling What changed preset sets its grant; enabling unconfigured Nightly preset is refused
+    by_preset = {a["preset"]: a for a in user.get("/api/automations").json()["automations"]}
+    wc_on = user.post(f"/api/automations/{by_preset['what_changed']['id']}/enabled",
+                      json={"enabled": True}, headers=H)
+    assert wc_on.status_code == 200 and wc_on.json()["enabled"] is True and wc_on.json()["grant_digest"]
+    nf_on = user.post(f"/api/automations/{by_preset['nightly_fix']['id']}/enabled",
+                      json={"enabled": True}, headers=H)
+    assert nf_on.status_code == 400
+
+    # Kill switch and delete
+    assert user.post("/api/automations/pause", json={"on": True}, headers=H).json() == {"paused": True}
+    assert user.post("/api/automations/pause", json={"on": False}, headers=H).json() == {"paused": False}
+    assert user.post(f"/api/automations/{aid}/delete", json={}, headers=H).status_code == 200
+    assert astore.get(st, aid) is None
+
+    # Demo mode refuses every write action
+    s = load_settings()
+    s = type(s)(**{**s.__dict__, "demo": True, "self_update": False, "data_dir": tmp_path})
+    dst = Store(tmp_path / "demo-write.db")
+    demo.seed(dst)
+    dc = TestClient(create_app(s, dst, TOKEN), base_url=f"http://127.0.0.1:{s.port}", cookies=signed_in(s.port))
+    for path, body in (
+        ("/api/automations", {**payload, "confirm_grant": True}),
+        ("/api/automations/1/enabled", {"enabled": True}),
+        ("/api/automations/1/renew", {}),
+        ("/api/automations/1/delete", {}),
+        ("/api/automations/pause", {"on": True}),
+    ):
+        r = dc.post(path, json=body, headers=H)
+        assert r.status_code == 403 and "This is demo data" in r.text, path
