@@ -233,3 +233,111 @@ def test_merge_never_widens_scope_and_separates_outside_one_minute_window(tmp_pa
         assert astore.fired_today(st, fid_rule, now=t0 + 1210.0) == 2
     finally:
         trace.configure(None)
+
+
+def test_25_verdicts_with_4h_cooldown_extend_deadline_and_all_run(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        t0 = 1_500_000.0
+        items = _aged_items(st, [f"slow-{i:02d}" for i in range(25)], now=t0)
+        defn = AutomationDef(
+            name="Slow cooldown retry",
+            trigger=VerdictTrigger(kind="verdict"),
+            conditions=VerdictConditions(categories=("busy_or_locked",), transient=True, needs_person=False),
+            action="upgrade",
+            scope=UpgradeScope(mode="failed_item"),
+            mode="run",
+            delay_s=900,
+            max_per_day=10,
+            cooldown_s=4 * 3600,
+        )
+        aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=t0)
+        for idx, it in enumerate(items):
+            _fail_and_verdict(st, it.key, ts=t0 + 5.0 + idx, sig=f"sig-4h-{idx}")
+
+        app = create_app(load_settings(), st, "t" * 32)
+        calls: list[list[str]] = []
+
+        @app.state.actions.bind("upgrade")
+        def fake_upgrade(ctx, body):
+            calls.append(list(body.keys))
+            return {"queued": list(range(1, len(body.keys) + 1)), "skipped": []}
+
+        eng = Automator(st, load_settings(), app.state.actions)
+        assert eng.tick(now=t0 + 40.0).scanned == 25
+
+        # Batch 1 runs 20 items; remaining 5 defer by 4h with extended deadline (> due + 2h)
+        t_batch1 = t0 + 950.0
+        eng.tick(now=t_batch1)
+        assert len(calls) == 1 and len(calls[0]) == MERGE_CAP
+        deferred = [f for f in astore.list_firings(st, automation_id=aid) if f["status"] == "scheduled"]
+        assert len(deferred) == 5
+        assert all(f["deadline"] >= f["due"] + 2 * 3600.0 for f in deferred)
+
+        # Intermediate tick at +3h (past original 2h deadline) must NOT expire deferred overflow
+        eng.tick(now=t_batch1 + 3 * 3600.0)
+        assert sum(1 for f in astore.list_firings(st, automation_id=aid) if f["status"] == "scheduled") == 5
+
+        # After 4h cooldown: remaining 5 run in batch 2 — all 25 complete!
+        eng.tick(now=t_batch1 + 4 * 3600.0 + 5.0)
+        assert len(calls) == 2 and len(calls[1]) == 5
+        assert set(calls[0]) | set(calls[1]) == {it.key for it in items}
+        assert all(f["status"] == "done" for f in astore.list_firings(st, automation_id=aid))
+    finally:
+        trace.configure(None)
+
+
+def test_25_verdicts_overflow_hitting_max_per_day_defers_to_next_day_window(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    trace.configure(st.path, "serve")
+    try:
+        t0 = 1_600_000.0
+        items = _aged_items(st, [f"cap-{i:02d}" for i in range(25)], now=t0)
+        defn = AutomationDef(
+            name="Once-daily retry",
+            trigger=VerdictTrigger(kind="verdict"),
+            conditions=VerdictConditions(categories=("busy_or_locked",), transient=True, needs_person=False),
+            action="upgrade",
+            scope=UpgradeScope(mode="failed_item"),
+            mode="run",
+            delay_s=900,
+            max_per_day=1,
+            cooldown_s=0,
+        )
+        aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user", now=t0)
+        for idx, it in enumerate(items):
+            _fail_and_verdict(st, it.key, ts=t0 + 5.0 + idx, sig=f"sig-cap-{idx}")
+
+        app = create_app(load_settings(), st, "t" * 32)
+        calls: list[list[str]] = []
+
+        @app.state.actions.bind("upgrade")
+        def fake_upgrade(ctx, body):
+            calls.append(list(body.keys))
+            return {"queued": list(range(1, len(body.keys) + 1)), "skipped": []}
+
+        eng = Automator(st, load_settings(), app.state.actions)
+        assert eng.tick(now=t0 + 40.0).scanned == 25
+
+        # Day 1: batch 1 runs 20 items (consumes max_per_day=1); 5 overflow items defer to next day's window
+        t_day1 = t0 + 950.0
+        eng.tick(now=t_day1)
+        assert len(calls) == 1 and len(calls[0]) == MERGE_CAP
+        deferred = [f for f in astore.list_firings(st, automation_id=aid) if f["status"] == "scheduled"]
+        assert len(deferred) == 5
+        assert all(f["due"] > t_day1 + 86400.0 for f in deferred)
+        assert all(f["deadline"] >= f["due"] + 2 * 3600.0 for f in deferred)
+
+        # Mid-day tick must neither run nor expire the deferred overflow
+        eng.tick(now=t_day1 + 12 * 3600.0)
+        assert len(calls) == 1
+        assert sum(1 for f in astore.list_firings(st, automation_id=aid) if f["status"] == "scheduled") == 5
+
+        # Next day window opens: remaining 5 run in batch 2
+        eng.tick(now=t_day1 + 86400.0 + 10.0)
+        assert len(calls) == 2 and len(calls[1]) == 5
+        assert set(calls[0]) | set(calls[1]) == {it.key for it in items}
+        assert all(f["status"] == "done" for f in astore.list_firings(st, automation_id=aid))
+    finally:
+        trace.configure(None)

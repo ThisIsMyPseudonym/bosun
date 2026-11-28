@@ -10,6 +10,7 @@ from ..registry import ActionContext, ActionError, Actions, Forbidden
 from ..store import Store
 from . import recheck, store as astore
 from .schema import AutomationDef
+from .verdict import VERDICT_DEADLINE_S
 
 MERGE_WINDOW_S = 60.0
 MERGE_CAP = 20
@@ -128,14 +129,45 @@ def _apply_result(store: Store, batch: MergeBatch, result: Any, when: float) -> 
     return "done" if any_done else "skipped"
 
 
-def _defer_overflow(store: Store, defn: AutomationDef, overflow_ids: tuple[int, ...], when: float) -> set[int]:
-    """Keep overflow firings scheduled for a second batch; defer past cooldown when `cooldown_s > 0`."""
-    if not overflow_ids or defn.cooldown_s <= 0:
-        return set()
-    next_due = when + defn.cooldown_s
+def _next_daily_window(store: Store, aid: int, max_per_day: int, when: float) -> float | None:
+    """Return the timestamp when `aid`'s rolling 24h call count drops below `max_per_day`, or None if under cap."""
+    with store._tx() as db:
+        rows = db.execute(
+            "SELECT MAX(COALESCE(finished, created)) AS call_ts FROM automation_firings "
+            "WHERE automation_id = ? AND status IN ('running', 'done', 'failed') "
+            "AND COALESCE(finished, created) >= ? "
+            "GROUP BY CASE WHEN trace_id != '' THEN trace_id ELSE CAST(id AS TEXT) END "
+            "ORDER BY call_ts DESC",
+            (aid, when - 86400.0),
+        ).fetchall()
+    if len(rows) < max_per_day:
+        return None
+    return float(rows[max_per_day - 1]["call_ts"]) + 86400.0 + 1.0
+
+
+def _defer_overflow(
+    store: Store, aid: int, defn: AutomationDef, overflow_ids: tuple[int, ...],
+    by_id: dict[int, dict[str, Any]], when: float,
+) -> tuple[set[int], tuple[int, ...]]:
+    """Defer overflow firings past cooldown and daily cap (extending deadline); otherwise return immediate overflow."""
+    if not overflow_ids:
+        return set(), ()
+    next_due = when
+    if defn.cooldown_s > 0:
+        last = astore.last_fired_at(store, aid)
+        if last is not None and when - last < defn.cooldown_s:
+            next_due = max(next_due, last + defn.cooldown_s)
+    daily_win = _next_daily_window(store, aid, defn.max_per_day, when)
+    if daily_win is not None:
+        next_due = max(next_due, daily_win)
+    if next_due <= when:
+        return set(), overflow_ids
+    min_deadline = next_due + VERDICT_DEADLINE_S
     for ofid in overflow_ids:
-        astore.set_firing(store, ofid, due=next_due, now=when)
-    return set(overflow_ids)
+        existing = by_id.get(ofid, {}).get("deadline")
+        new_dl = max(float(existing), min_deadline) if existing is not None else None
+        astore.set_firing(store, ofid, due=next_due, deadline=new_dl, now=when)
+    return set(overflow_ids), ()
 
 
 def run_merged(
@@ -150,6 +182,7 @@ def run_merged(
 ) -> tuple[str, set[int], tuple[int, ...]]:
     """Coalesce and execute due firings for `aid` within 1 minute; returns `(outcome, handled_ids, immediate_overflow)`."""
     siblings = collect_due_siblings(store, aid, lead_firing, when)
+    by_id = {int(r["id"]): r for r in siblings}
     batch = build_batch(store, defn, aid, siblings, when)
     handled: set[int] = set()
     for sfid, sreason in batch.skipped:
@@ -158,15 +191,9 @@ def run_merged(
     if not batch.firing_ids:
         return "skipped", handled, ()
     handled.update(batch.firing_ids)
-    handled.update(_defer_overflow(store, defn, batch.overflow_ids, when))
-    immediate_overflow = () if defn.cooldown_s > 0 else batch.overflow_ids
-
     ctx = ActionContext(
-        actor=f"automation:{aid}",
-        surface="automation",
-        firing_id=batch.firing_ids[0],
-        firing_ids=batch.firing_ids,
-        now=when,
+        actor=f"automation:{aid}", surface="automation",
+        firing_id=batch.firing_ids[0], firing_ids=batch.firing_ids, now=when,
     )
     for fid, fkeys in batch.key_by_firing:
         astore.set_firing(
@@ -178,10 +205,14 @@ def run_merged(
     except Forbidden as exc:
         for fid in batch.firing_ids:
             astore.set_firing(store, fid, status="refused", reason=exc.message, finished=when, now=when)
-        return "skipped", handled, immediate_overflow
+        deferred, immediate = _defer_overflow(store, aid, defn, batch.overflow_ids, by_id, when)
+        return "skipped", handled | deferred, immediate
     except (ActionError, Exception) as exc:
         for fid in batch.firing_ids:
             astore.set_firing(store, fid, status="failed", reason=str(exc), finished=when, now=when)
         on_failure(aid, defn.name, when)
-        return "failed", handled, immediate_overflow
-    return _apply_result(store, batch, result, when), handled, immediate_overflow
+        deferred, immediate = _defer_overflow(store, aid, defn, batch.overflow_ids, by_id, when)
+        return "failed", handled | deferred, immediate
+    outcome = _apply_result(store, batch, result, when)
+    deferred, immediate = _defer_overflow(store, aid, defn, batch.overflow_ids, by_id, when)
+    return outcome, handled | deferred, immediate
