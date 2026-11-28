@@ -20,8 +20,8 @@ _TOKENS = [
     r"gh[pousr]_[A-Za-z0-9]{20,}",  # GitHub
     r"github_pat_[A-Za-z0-9_]{20,}",
     r"glpat-[A-Za-z0-9_-]{20,}",  # GitLab
-    r"sk-ant-[A-Za-z0-9_-]{20,}",  # Anthropic
-    r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}",  # OpenAI
+    r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}",  # Anthropic
+    r"(?<![A-Za-z0-9])sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}",  # OpenAI (not inside a word: cask-…)
     r"xox[abposr]-[A-Za-z0-9-]{10,}",  # Slack
     r"(?:AKIA|ASIA)[A-Z0-9]{16}",  # AWS access key id
     r"AIza[0-9A-Za-z_-]{35}",  # Google API key

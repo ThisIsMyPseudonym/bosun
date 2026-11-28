@@ -87,3 +87,14 @@ def test_proc_timeout_log_honors_private_indices(monkeypatch, caplog):
         r = proc.run(["tool", "top-secret-config-blob", "--flag"], timeout=1, private=(1,))
     assert r.returncode == 124
     assert "top-secret-config-blob" not in caplog.text and "[not recorded]" in caplog.text
+
+
+def test_a_word_that_merely_contains_sk_dash_is_not_a_key():
+    from bosun import redact
+
+    text = "see the desk-reservation-system-notes and the task-runner-configuration-file"
+    assert redact.text(text) == text
+    key = "sk-" + "A1b2C3d4E5f6G7h8I9j0K1l2"
+    assert key not in redact.text(f"token={key}") and key not in redact.text(f"({key})")
+    ant = "sk-ant-" + "a" * 30
+    assert ant not in redact.text(f"key {ant}")
