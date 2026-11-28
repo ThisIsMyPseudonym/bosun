@@ -119,14 +119,20 @@ def list_all(store: Store) -> list[dict[str, Any]]:
 
 def delete(store: Store, automation_id: int, *, now: float | None = None) -> bool:
     """Delete an automation, cancelling waiting firings/offers while preserving firing history."""
+    from . import presets
+
     when = time.time() if now is None else now
     with store._tx(write=True) as db:
+        row = db.execute("SELECT preset FROM automations WHERE id=?", (automation_id,)).fetchone()
         db.execute(
             "UPDATE automation_firings SET status='skipped', reason='automation deleted', finished=? "
             "WHERE automation_id=? AND status IN ('scheduled', 'waiting_quota', 'offered')",
             (when, automation_id),
         )
-        return db.execute("DELETE FROM automations WHERE id=?", (automation_id,)).rowcount > 0
+        deleted = db.execute("DELETE FROM automations WHERE id=?", (automation_id,)).rowcount > 0
+        if deleted and row and row["preset"]:
+            presets.record_deleted_preset(db, str(row["preset"]))
+        return deleted
 
 
 def set_enabled(store: Store, automation_id: int, enabled: bool, *, now: float | None = None) -> bool:

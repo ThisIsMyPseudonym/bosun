@@ -30,3 +30,21 @@ def test_presets_seed_skips_read_only_store(tmp_path):
     ro = Store(db_path, read_only=True)
     assert presets.seed(ro) == 0
     assert astore.list_all(ro) == []
+
+
+def test_deleted_preset_is_tombstoned_and_not_reseeded_on_restart(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    assert presets.seed(st) >= 2
+    wc = astore.get_by_preset(st, "what_changed")
+    nf = astore.get_by_preset(st, "nightly_fix")
+    assert wc is not None and nf is not None
+
+    # Owner deletes the what_changed preset
+    assert astore.delete(st, wc["id"]) is True
+    assert astore.get_by_preset(st, "what_changed") is None
+
+    # Re-seeding (as happens on dashboard restart) does NOT bring back deleted preset
+    assert presets.seed(st) == 0
+    assert astore.get_by_preset(st, "what_changed") is None
+    assert astore.get_by_preset(st, "nightly_fix") is not None
+    assert "what_changed" in presets.deleted_presets(st)

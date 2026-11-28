@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import sqlite3
 
 from ..store import Store
 from . import store as astore
@@ -16,6 +18,8 @@ from .schema import (
     ScheduleTrigger,
     StartFixScope,
 )
+
+DELETED_PRESETS_SETTING = "automations_deleted_presets"
 
 
 @dataclass(frozen=True)
@@ -56,13 +60,40 @@ PRESETS: tuple[PresetSpec, ...] = (
 )
 
 
+def _parse_tombstones(raw: str | None) -> set[str]:
+    if not raw:
+        return set()
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return set()
+    return {str(x) for x in parsed if isinstance(x, str) and x} if isinstance(parsed, list) else set()
+
+
+def deleted_presets(store: Store) -> set[str]:
+    """Preset slugs explicitly deleted by the owner; never re-seeded on restart."""
+    return _parse_tombstones(store.setting(DELETED_PRESETS_SETTING))
+
+
+def record_deleted_preset(db: sqlite3.Connection, slug: str) -> None:
+    """Persist a deleted preset slug into the tombstone setting inside an open write transaction."""
+    row = db.execute("SELECT value FROM settings WHERE key=?", (DELETED_PRESETS_SETTING,)).fetchone()
+    seen = _parse_tombstones(row["value"] if row else None)
+    seen.add(slug)
+    db.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        (DELETED_PRESETS_SETTING, json.dumps(sorted(seen))),
+    )
+
+
 def seed(store: Store, *, now: float | None = None) -> int:
-    """Insert any missing shipped presets disabled and ungranted; never overwrites user edits."""
+    """Insert any missing shipped presets disabled and ungranted; never overwrites edits or deleted presets."""
     if store.read_only:
         return 0
+    tombstones = deleted_presets(store)
     added = 0
     for spec in PRESETS:
-        if astore.get_by_preset(store, spec.slug) is not None:
+        if spec.slug in tombstones or astore.get_by_preset(store, spec.slug) is not None:
             continue
         astore.save(
             store,
