@@ -55,3 +55,41 @@ def test_next_due_finds_upcoming_local_slot():
     # Weekday filter: Friday 2026-11-27 -> next Monday 2026-11-30
     mon = ScheduleTrigger(kind="schedule", time="02:00", days=("mon",))
     assert next_due(mon, now=_ts(2026, 11, 27, 1, 0), tz=CHI) == _ts(2026, 11, 30, 2, 0)
+
+
+def test_default_local_tz_resolves_dst_aware_zoneinfo(monkeypatch, tmp_path):
+    from bosun.automations import schedule as asched
+
+    # 1. Production default path (tz=None) with TZ env set: DST-aware across spring-forward, summer, and fall-back
+    monkeypatch.setenv("TZ", "America/Chicago")
+    zone = asched._local_tz(None)
+    assert isinstance(zone, ZoneInfo) and zone.key == "America/Chicago"
+
+    spring = ScheduleTrigger(kind="schedule", time="02:30", days=())
+    assert due_slots(spring, now=_ts(2026, 3, 8, 1, 55)) == ()
+    got_spring = due_slots(spring, now=_ts(2026, 3, 8, 3, 5))
+    assert [(s.slot_key, s.missed) for s in got_spring] == [("2026-03-08T02:30", False)]
+
+    # Summer (CDT = UTC-5): a fixed winter CST offset (UTC-6) would misread 02:05 CDT as 01:05 and miss it
+    summer = ScheduleTrigger(kind="schedule", time="02:00", days=())
+    got_summer = due_slots(summer, now=_ts(2026, 7, 15, 2, 5))
+    assert [(s.slot_key, s.missed) for s in got_summer] == [("2026-07-15T02:00", False)]
+
+    # Fall-back (2026-11-01 01:30 occurs twice)
+    fall = ScheduleTrigger(kind="schedule", time="01:30", days=())
+    first = due_slots(fall, now=_ts(2026, 11, 1, 1, 35, fold=0))
+    second = due_slots(fall, now=_ts(2026, 11, 1, 1, 35, fold=1))
+    assert first[0].slot_key == second[0].slot_key == "2026-11-01T01:30"
+
+    # 2. With TZ unset, resolves ZoneInfo from /etc/localtime symlink target
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(asched, "_LOCALTIME_REALPATH", lambda: "/var/db/timezone/zoneinfo/America/New_York")
+    ny = asched._local_tz(None)
+    assert isinstance(ny, ZoneInfo) and ny.key == "America/New_York"
+
+    # 3. With TZ unset and no zoneinfo symlink, falls back cleanly via time.tzname / system offset
+    monkeypatch.setattr(asched, "_LOCALTIME_REALPATH", lambda: str(tmp_path / "missing"))
+    monkeypatch.setattr(asched, "_ETC_TIMEZONE", tmp_path / "no-timezone")
+    monkeypatch.setattr(asched.time, "tzname", ("UTC", "UTC"))
+    utc_zone = asched._local_tz(None)
+    assert isinstance(utc_zone, ZoneInfo) and utc_zone.key == "UTC"

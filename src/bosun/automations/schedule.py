@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .schema import ScheduleTrigger
 
 MISSED_WINDOW_S = 7200  # 2 hours: catch up once if under 2h late, otherwise record as missed
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_LOCALTIME_REALPATH: Callable[[], str] = lambda: os.path.realpath("/etc/localtime")
+_ETC_TIMEZONE = Path("/etc/timezone")
 
 
 @dataclass(frozen=True)
@@ -19,9 +25,48 @@ class ScheduleSlot:
     missed: bool
 
 
+def _try_zone(name: str) -> ZoneInfo | None:
+    cleaned = name.strip().lstrip(":")
+    if not cleaned:
+        return None
+    try:
+        return ZoneInfo(cleaned)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return None
+
+
+def _zone_from_localtime() -> ZoneInfo | None:
+    try:
+        resolved = _LOCALTIME_REALPATH().replace("\\", "/")
+    except OSError:
+        return None
+    marker = "zoneinfo/"
+    idx = resolved.rfind(marker)
+    if idx != -1:
+        tail = resolved[idx + len(marker):].lstrip("/")
+        for prefix in ("posix/", "right/"):
+            if tail.startswith(prefix):
+                tail = tail[len(prefix):]
+        if (zone := _try_zone(tail)) is not None:
+            return zone
+    try:
+        if _ETC_TIMEZONE.is_file():
+            return _try_zone(_ETC_TIMEZONE.read_text(encoding="utf-8").splitlines()[0])
+    except (OSError, IndexError):
+        return None
+    return None
+
+
 def _local_tz(tz: tzinfo | None) -> tzinfo:
     if tz is not None:
         return tz
+    if (env_zone := _try_zone(os.environ.get("TZ", ""))) is not None:
+        return env_zone
+    if (sys_zone := _zone_from_localtime()) is not None:
+        return sys_zone
+    for name in time.tzname:
+        if (tz_zone := _try_zone(name)) is not None:
+            return tz_zone
     return datetime.now().astimezone().tzinfo or timezone.utc
 
 
