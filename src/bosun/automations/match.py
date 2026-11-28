@@ -148,20 +148,35 @@ def matches_schedule(
     return bool(candidates)
 
 
-def _resolve_fix_keys(store: Store, scope: StartFixScope, now: float | None = None) -> list[str]:
+def _resolve_fix_keys(
+    store: Store, scope: StartFixScope, event: Mapping[str, Any], now: float | None = None, *, is_verdict: bool = False,
+) -> list[str]:
     known = _snap_items_by_key(store)
     prefs, skip = store.prefs(), autopilot.hands_off(store, list(known.values()))
-    return [
+    keys = [
         k for k, i in known.items()
         if i.get("project") == scope.project and i.get("lane") == scope.lane
         and _is_fixable(i) and attention.in_front(i, prefs, now)
         and _item_allowed(i, prefs, skip, now) and not store.active_fix_for(k)
     ][:100]
+    if is_verdict and isinstance(event.get("item_key"), str) and event["item_key"]:
+        return [event["item_key"]] if event["item_key"] in keys else []
+    return keys
 
 
-def _resolve_explain_keys(store: Store, scope: ExplainItemScope, now: float | None = None) -> list[str]:
+def _resolve_explain_keys(
+    store: Store, scope: ExplainItemScope, event: Mapping[str, Any], now: float | None = None, *, is_verdict: bool = False,
+) -> list[str]:
     known = _snap_items_by_key(store)
     prefs, skip = store.prefs(), autopilot.hands_off(store, list(known.values()))
+    if is_verdict and isinstance(event.get("item_key"), str) and event["item_key"]:
+        k = event["item_key"]
+        i = known.get(k)
+        if (i is not None and i.get("project") == scope.project and i.get("lane") == scope.lane
+                and attention.in_front(i, prefs, now) and _item_allowed(i, prefs, skip, now)
+                and _uncached_explain(store, i)):
+            return [k]
+        return []
     for k, i in known.items():
         if (i.get("project") == scope.project and i.get("lane") == scope.lane
                 and attention.in_front(i, prefs, now) and _item_allowed(i, prefs, skip, now)
@@ -171,14 +186,16 @@ def _resolve_explain_keys(store: Store, scope: ExplainItemScope, now: float | No
 
 
 def _resolve_upgrade_keys(
-    store: Store, scope: UpgradeScope, event: Mapping[str, Any], now: float | None = None,
+    store: Store, scope: UpgradeScope, event: Mapping[str, Any], now: float | None = None, *, is_verdict: bool = False,
 ) -> list[str]:
     known = _snap_items_by_key(store)
     prefs, skip = store.prefs(), autopilot.hands_off(store, list(known.values()))
-    if scope.mode == "keys":
+    if scope.mode == "keys" and not is_verdict:
         return [k for k in scope.keys if k in known and _item_allowed(known[k], prefs, skip, now)]
     key = event.get("item_key")
     if not isinstance(key, str) or key not in known or not _item_allowed(known[key], prefs, skip, now):
+        return []
+    if scope.mode == "keys" and key not in scope.keys:
         return []
     wanted_ver = event.get("available")
     if isinstance(wanted_ver, str) and wanted_ver and known[key].get("available") != wanted_ver:
@@ -186,14 +203,20 @@ def _resolve_upgrade_keys(
     return [key]
 
 
-def _resolve_pin_keys(store: Store, scope: PinMcpScope, now: float | None = None) -> list[str]:
+def _resolve_pin_keys(
+    store: Store, scope: PinMcpScope, event: Mapping[str, Any], now: float | None = None, *, is_verdict: bool = False,
+) -> list[str]:
     known = _snap_items_by_key(store)
     prefs, skip = store.prefs(), autopilot.hands_off(store, list(known.values()))
-    return [
+    allowed = [
         k for k in scope.keys
         if k in known and known[k].get("source") == "mcp" and known[k].get("fix_kind") == "pin"
         and _item_allowed(known[k], prefs, skip, now) and not store.active_job_for(k)
     ]
+    if is_verdict:
+        key = event.get("item_key")
+        return [key] if isinstance(key, str) and key in allowed else []
+    return allowed
 
 
 def resolve_input(
@@ -203,6 +226,7 @@ def resolve_input(
     if has_unset_project(defn):
         return None
     scope = defn.scope
+    is_verdict = defn.trigger.kind == "verdict"
     if isinstance(scope, NotifyScope):
         return {
             "digest": scope.digest,
@@ -212,36 +236,83 @@ def resolve_input(
     if isinstance(scope, RefreshScope):
         return {"only": list(scope.only) if scope.only is not None else None, "auto_upgrade": False}
     if isinstance(scope, RecheckProjectScope):
-        proj = scope.project if scope.mode == "project" else event.get("project")
+        if scope.mode == "project":
+            ev_proj = event.get("project")
+            if is_verdict and (not isinstance(ev_proj, str) or not ev_proj or ev_proj != scope.project):
+                return None
+            return {"project": scope.project}
+        proj = event.get("project")
         return {"project": proj} if isinstance(proj, str) and proj else None
     if isinstance(scope, StartFixScope):
-        keys = _resolve_fix_keys(store, scope, now)
+        keys = _resolve_fix_keys(store, scope, event, now, is_verdict=is_verdict)
         return {"keys": keys} if keys else None
     if isinstance(scope, ExplainItemScope):
-        keys = _resolve_explain_keys(store, scope, now)
+        keys = _resolve_explain_keys(store, scope, event, now, is_verdict=is_verdict)
         return {"keys": keys} if keys else None
     if isinstance(scope, UpgradeScope):
-        keys = _resolve_upgrade_keys(store, scope, event, now)
+        keys = _resolve_upgrade_keys(store, scope, event, now, is_verdict=is_verdict)
         return {"keys": keys} if keys else None
     if isinstance(scope, PinMcpScope):
-        keys = _resolve_pin_keys(store, scope, now)
+        keys = _resolve_pin_keys(store, scope, event, now, is_verdict=is_verdict)
         return {"keys": keys} if keys else None
     if isinstance(scope, AppActionScope):
         return {"app": scope.app} if defn.action == "relaunch_app" else {"key": scope.app}
     return None
 
 
-def _firing_input(store: Store, firing_id: int | None) -> dict[str, Any]:
-    if firing_id is None:
-        return {}
-    row = astore.get_firing(store, firing_id)
-    if row is None:
-        return {}
+def _parse_firing_input(row: Mapping[str, Any]) -> dict[str, Any]:
     try:
-        parsed = json.loads(row["input"] or "{}")
+        parsed = json.loads(str(row.get("input") or "{}"))
     except ValueError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _verified_firing_keys(
+    store: Store, fids: tuple[int, ...], automation_id: int | None,
+) -> set[str] | None:
+    """Return allowed item keys across `fids`, cross-checked against recorded failure rows for verdict firings."""
+    from . import verdict as averdict
+
+    if not fids:
+        return None
+    allowed: set[str] = set()
+    for fid in fids:
+        row = astore.get_firing(store, fid)
+        if row is None or (automation_id is not None and int(row["automation_id"]) != automation_id):
+            return None
+        parsed = _parse_firing_input(row)
+        raw_keys = parsed.get("keys")
+        in_keys = {k for k in raw_keys if isinstance(k, str) and k} if isinstance(raw_keys, list) else set()
+        if row["event_kind"] == "verdict":
+            found, rec_key, _ = averdict.recorded_failure_target(store, str(row["event_ref"] or ""))
+            if not found or not rec_key or (in_keys and rec_key not in in_keys):
+                return None
+            allowed.add(rec_key)
+            continue
+        if not in_keys:
+            return None
+        allowed |= in_keys
+    return allowed
+
+
+def _verified_firing_project(
+    store: Store, fids: tuple[int, ...], automation_id: int | None,
+) -> str | None:
+    from . import verdict as averdict
+
+    if len(fids) != 1:
+        return None
+    row = astore.get_firing(store, fids[0])
+    if row is None or (automation_id is not None and int(row["automation_id"]) != automation_id):
+        return None
+    in_proj = _parse_firing_input(row).get("project")
+    if row["event_kind"] == "verdict":
+        found, _, rec_proj = averdict.recorded_failure_target(store, str(row["event_ref"] or ""))
+        if not found or not rec_proj or (isinstance(in_proj, str) and in_proj and in_proj != rec_proj):
+            return None
+        return rec_proj
+    return in_proj if isinstance(in_proj, str) and in_proj else None
 
 
 def _keys_in_project_lane(
@@ -256,41 +327,66 @@ def _keys_in_project_lane(
     return bool(keys)
 
 
+def _verdict_keys_ok(
+    store: Store, keys: list[str], fids: tuple[int, ...], automation_id: int | None,
+) -> bool:
+    allowed = _verified_firing_keys(store, fids, automation_id)
+    return allowed is not None and set(keys) <= allowed
+
+
+def _project_lane_ok(
+    store: Store, scope: StartFixScope | ExplainItemScope, body: BaseModel,
+    fids: tuple[int, ...], automation_id: int | None, *, is_verdict: bool, fixable: bool,
+) -> bool:
+    if not isinstance(body, FixIn) or (not fixable and len(body.keys) != 1):
+        return False
+    if not _keys_in_project_lane(_snap_items_by_key(store), body.keys, scope.project, scope.lane, fixable=fixable):
+        return False
+    return _verdict_keys_ok(store, body.keys, fids, automation_id) if is_verdict else True
+
+
 def input_in_scope(
-    store: Store, defn: AutomationDef, body: BaseModel, *, firing_id: int | None = None,
+    store: Store,
+    defn: AutomationDef,
+    body: BaseModel,
+    *,
+    firing_id: int | None = None,
+    firing_ids: tuple[int, ...] = (),
+    automation_id: int | None = None,
 ) -> bool:
     """Verify at `Actions.permit` time that `body` stays strictly inside `defn.scope`."""
     if has_unset_project(defn):
         return False
-    scope = defn.scope
+    fids = firing_ids if firing_ids else ((firing_id,) if firing_id is not None else ())
+    scope, is_verdict = defn.scope, defn.trigger.kind == "verdict"
     if isinstance(scope, RefreshScope):
-        if not isinstance(body, RefreshIn) or body.auto_upgrade is not False:
-            return False
-        got = tuple(body.only) if body.only is not None else None
-        return got == scope.only
+        return isinstance(body, RefreshIn) and body.auto_upgrade is False and (
+            (tuple(body.only) if body.only is not None else None) == scope.only
+        )
     if isinstance(scope, RecheckProjectScope):
         if not isinstance(body, ProjectIn):
             return False
         if scope.mode == "project":
-            return body.project == scope.project
-        return bool(body.project) and _firing_input(store, firing_id).get("project") == body.project
-    if isinstance(scope, StartFixScope):
-        return isinstance(body, FixIn) and _keys_in_project_lane(
-            _snap_items_by_key(store), body.keys, scope.project, scope.lane, fixable=True,
-        )
-    if isinstance(scope, ExplainItemScope):
-        return isinstance(body, FixIn) and len(body.keys) == 1 and _keys_in_project_lane(
-            _snap_items_by_key(store), body.keys, scope.project, scope.lane, fixable=False,
+            return body.project == scope.project and (
+                not is_verdict or _verified_firing_project(store, fids, automation_id) == scope.project
+            )
+        return bool(body.project) and _verified_firing_project(store, fids, automation_id) == body.project
+    if isinstance(scope, (StartFixScope, ExplainItemScope)):
+        return _project_lane_ok(
+            store, scope, body, fids, automation_id, is_verdict=is_verdict, fixable=isinstance(scope, StartFixScope),
         )
     if isinstance(scope, UpgradeScope):
-        if not isinstance(body, KeysIn) or not body.keys:
+        if not isinstance(body, KeysIn) or not body.keys or (len(fids) > 1 and len(body.keys) > 20):
             return False
-        if scope.mode == "keys":
-            return set(body.keys) <= set(scope.keys)
-        allowed = _firing_input(store, firing_id).get("keys")
-        return isinstance(allowed, list) and bool(allowed) and set(body.keys) <= set(allowed)
+        if scope.mode == "keys" and not (set(body.keys) <= set(scope.keys)):
+            return False
+        return _verdict_keys_ok(store, body.keys, fids, automation_id) if (scope.mode == "failed_item" or is_verdict) else True
     if isinstance(scope, PinMcpScope):
-        return isinstance(body, PinIn) and bool(body.keys) and set(body.keys) <= set(scope.keys)
+        if not isinstance(body, PinIn) or not body.keys or (len(fids) > 1 and len(body.keys) > 20):
+            return False
+        if not (set(body.keys) <= set(scope.keys)):
+            return False
+        return _verdict_keys_ok(store, body.keys, fids, automation_id) if is_verdict else True
     if isinstance(scope, AppActionScope):
         if defn.action == "relaunch_app":
             return isinstance(body, RelaunchIn) and body.app == scope.app

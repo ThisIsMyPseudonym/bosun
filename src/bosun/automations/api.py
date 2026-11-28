@@ -15,8 +15,8 @@ from ..store import Store
 from . import schedule, store as astore
 from .schema import (UNSET_PROJECT, AppActionScope, AutomationDef, ExplainItemScope, NotifyScope, PinMcpScope,
                      RecheckProjectScope, RefreshConditions, RefreshScope, ScheduleConditions, ScheduleTrigger,
-                     StartFixScope, UpgradeScope, describe_scope, grant_digest, grant_digest_matches, grant_expired,
-                     grant_expires_at, has_unset_project)
+                     StartFixScope, UpgradeScope, VerdictConditions, describe_scope, grant_digest, grant_digest_matches,
+                     grant_expired, grant_expires_at, has_unset_project)
 
 _LANE_WORDS = {"now": "Do-now", "plan": "Plan", "watch": "Watch", "batch": "Batch"}
 _DAY_WORDS = {"mon": "Mon", "tue": "Tue", "wed": "Wed", "thu": "Thu", "fri": "Fri", "sat": "Sat", "sun": "Sun"}
@@ -82,6 +82,17 @@ def _condition_phrase(defn: AutomationDef, projects: dict[str, str]) -> str:
             lane = _LANE_WORDS.get(cond.lane or "now", cond.lane or "now")
             return f"if {proj} has {lane} items"
         return ""
+    if isinstance(cond, VerdictConditions):
+        bits = [
+            " or ".join(c.replace("_", " ") for c in cond.categories) if cond.categories else "",
+            "transient" if cond.transient is True else ("not transient" if cond.transient is False else ""),
+            "needs no person" if cond.needs_person is False else ("needs a person" if cond.needs_person is True else ""),
+            f"on a {cond.run_kind}" if cond.run_kind else "",
+            f"from {cond.verdict_source}" if cond.verdict_source else "",
+            f"confidence >= {cond.min_confidence}" if cond.min_confidence else "",
+        ]
+        kept = [b for b in bits if b]
+        return f"if {', '.join(kept)}" if kept else ""
     return ""
 
 

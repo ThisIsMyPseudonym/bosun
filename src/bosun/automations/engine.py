@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
@@ -17,7 +16,7 @@ from ..config import Settings
 from ..providers.router import QuotaHeld
 from ..registry import ActionContext, ActionError, Actions, Forbidden
 from ..store import Store
-from . import digest, match as amatch, schedule, store as astore
+from . import chain, digest, match as amatch, merge as amerge, recheck, schedule, store as astore, verdict as averdict
 from .schema import (MODEL_ACTIONS, AutomationDef, RefreshConditions, ScheduleConditions, ScheduleTrigger,
                      grant_digest, grant_digest_matches, grant_expired, has_unset_project, is_install_action)
 
@@ -55,27 +54,10 @@ def _skip_summary(skipped: Any) -> str:
     return "skipped by safety checks"
 
 
-def _parse_json(raw: str | None) -> dict[str, Any]:
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 class Automator:
     """Single-writer automation engine running in the dashboard process only."""
 
-    def __init__(
-        self,
-        store: Store,
-        settings: Settings,
-        actions: Actions,
-        *,
-        tz: tzinfo | None = None,
-    ) -> None:
+    def __init__(self, store: Store, settings: Settings, actions: Actions, *, tz: tzinfo | None = None) -> None:
         self.store = store
         self.settings = settings
         self.actions = actions
@@ -112,7 +94,11 @@ class Automator:
         if astore.is_paused(self.store):
             return TickReport(paused=True)
         rules = self._active_rules()
-        scanned = self._scan_refreshes(rules, when) + self._scan_schedules(rules, when)
+        scanned = (
+            self._scan_refreshes(rules, when)
+            + self._scan_schedules(rules, when)
+            + averdict.scan_verdicts(self.store, rules, when)
+        )
         ran, skipped, waiting, failed = self._execute_due(when)
         return TickReport(scanned=scanned, ran=ran, skipped=skipped, waiting=waiting, failed=failed)
 
@@ -150,23 +136,23 @@ class Automator:
         if not ref_rules:
             return 0
         floor = when - REFRESH_STALENESS_S
-        since_by_rule: dict[int, float] = {}
-        for aid, row, _defn in ref_rules:
-            raw_cur = astore.cursor(self.store, f"{REFRESH_CURSOR}_{aid}")
-            cur_val = float(raw_cur) if raw_cur is not None else float(row.get("updated") or 0.0)
-            since_by_rule[aid] = max(cur_val, floor)
+        since_by_rule = {
+            aid: max(float(raw) if (raw := astore.cursor(self.store, f"{REFRESH_CURSOR}_{aid}")) is not None
+                     else float(row.get("updated") or 0.0), floor)
+            for aid, row, _defn in ref_rules
+        }
         with self.store._tx() as db:
             runs = db.execute(
-                "SELECT trace_id, started, COALESCE(finished, started) AS ended FROM runs "
+                "SELECT trace_id, actor, started, COALESCE(finished, started) AS ended FROM runs "
                 "WHERE kind='refresh' AND subject='everything' AND status IN ('ok', 'partial') "
                 "AND COALESCE(finished, started) > ? ORDER BY ended ASC LIMIT 20",
                 (min(since_by_rule.values()),),
             ).fetchall()
-        created = 0
-        max_ended = dict(since_by_rule)
+        created, max_ended = 0, dict(since_by_rule)
         for run in runs:
             ended = float(run["ended"])
             snaps = self._snapshot_for_run(float(run["started"]), ended)
+            origin = chain.resolve_origin(self.store, str(run["trace_id"] or ""), actor=str(run["actor"] or ""))
             for aid, _row, defn in ref_rules:
                 if ended <= since_by_rule[aid]:
                     continue
@@ -176,13 +162,16 @@ class Automator:
                 snap_id, prev_id = snaps
                 if not amatch.matches_refresh(self.store, defn.conditions, snapshot_id=snap_id, prev_snapshot_id=prev_id):
                     continue
+                depth = chain.next_depth(origin, aid)
+                if depth is None:
+                    continue
+                due = when + defn.delay_s
                 fid = astore.insert_firing(
                     self.store, aid, defn.name, "refresh", f"snap:{snap_id}", f"refresh:snap:{snap_id}",
-                    status="scheduled", due=when + defn.delay_s, deadline=ended + REFRESH_DEADLINE_S,
+                    status="scheduled", depth=depth, due=due, deadline=due + REFRESH_DEADLINE_S,
                     input_data={"snapshot_id": snap_id, "prev_snapshot_id": prev_id}, now=when,
                 )
-                if fid is not None:
-                    created += 1
+                created += int(fid is not None)
         for aid, ended in max_ended.items():
             if ended > since_by_rule[aid]:
                 astore.set_cursor(self.store, f"{REFRESH_CURSOR}_{aid}", repr(ended))
@@ -252,10 +241,24 @@ class Automator:
     def _execute_due(self, when: float) -> tuple[int, int, int, int]:
         ran = waiting = failed = 0
         skipped = self._expire_past_deadline(when)
-        for firing in astore.due_firings(self.store, now=when, limit=MAX_PER_TICK):
+        queue = list(astore.due_firings(self.store, now=when, limit=MAX_PER_TICK))
+        handled: set[int] = set()
+        steps = 0
+        while queue and steps < MAX_PER_TICK:
+            firing = queue.pop(0)
+            fid = int(firing["id"])
+            if fid in handled:
+                continue
             if astore.is_paused(self.store):
                 break
-            outcome = self._run_isolated(firing, when)
+            steps += 1
+            outcome, done_ids, overflow = self._run_isolated(firing, when)
+            handled.update(done_ids)
+            handled.add(fid)
+            if overflow and steps < MAX_PER_TICK:
+                nxt = astore.get_firing(self.store, overflow[0])
+                if nxt is not None:
+                    queue.append(nxt)
             if outcome == "done":
                 ran += 1
             elif outcome == "skipped":
@@ -266,7 +269,7 @@ class Automator:
                 failed += 1
         return ran, skipped, waiting, failed
 
-    def _run_isolated(self, firing: dict[str, Any], when: float) -> str:
+    def _run_isolated(self, firing: dict[str, Any], when: float) -> tuple[str, set[int], tuple[int, ...]]:
         try:
             return self._run_one(firing, when)
         except Exception as exc:
@@ -281,45 +284,44 @@ class Automator:
                 self._check_circuit_breaker(aid, str(firing.get("automation_name") or ""), when)
             except Exception:
                 log.exception("circuit breaker check failed for automation %s", aid)
-            return "failed"
+            return "failed", {fid}, ()
 
-    def _run_one(self, firing: dict[str, Any], when: float) -> str:
+    def _run_one(self, firing: dict[str, Any], when: float) -> tuple[str, set[int], tuple[int, ...]]:
         fid, aid = int(firing["id"]), int(firing["automation_id"])
         row = astore.get(self.store, aid)
         if row is None or not row["enabled"] or row["paused_reason"]:
             astore.set_firing(self.store, fid, status="skipped", reason="automation disabled or paused", now=when)
-            return "skipped"
+            return "skipped", {fid}, ()
         try:
             defn = astore.parse_def(row)
         except (ValueError, ValidationError):
             astore.set_firing(self.store, fid, status="refused", reason="invalid automation definition", now=when)
-            return "skipped"
+            return "skipped", {fid}, ()
         stop = self._precheck_limits(aid, row, defn, when)
         if stop is not None:
             astore.set_firing(self.store, fid, status=stop[0], reason=stop[1], now=when)
-            return "skipped"
+            return "skipped", {fid}, ()
         if is_install_action(defn.action) and astore.active_install_firing(self.store) is not None:
             astore.set_firing(self.store, fid, due=when + INSTALL_WAIT_BACKOFF_S, now=when)
-            return "waiting"
-        if isinstance(defn.conditions, ScheduleConditions) and not amatch.matches_schedule(
-            self.store, defn.conditions, defn.action, now=when,
-        ):
-            astore.set_firing(self.store, fid, status="skipped", reason="conditions no longer hold", now=when)
-            return "skipped"
-        resolved = amatch.resolve_input(self.store, defn, event=_parse_json(firing.get("input")), now=when)
+            return "waiting", {fid}, ()
+        if defn.action in amerge.MERGEABLE_ACTIONS:
+            return amerge.run_merged(
+                self.store, self.actions, aid, defn, firing, when, on_failure=self._check_circuit_breaker,
+            )
+        resolved, skip_reason = recheck.resolve_for_firing(self.store, defn, firing, when)
         if resolved is None:
-            astore.set_firing(self.store, fid, status="skipped", reason="nothing to do", now=when)
-            return "skipped"
+            astore.set_firing(self.store, fid, status="skipped", reason=skip_reason, now=when)
+            return "skipped", {fid}, ()
         dup = astore.same_work_recent(self.store, defn.action, resolved, exclude_automation_id=aid, now=when)
         if dup is not None:
             astore.set_firing(
                 self.store, fid, status="skipped",
                 reason=f"already handled by {dup['automation_name']} within the last hour", now=when,
             )
-            return "skipped"
+            return "skipped", {fid}, ()
         if defn.action == "notify":
-            return self._run_notify(fid, aid, defn, resolved, when)
-        return self._run_action(firing, aid, defn, resolved, when)
+            return self._run_notify(fid, aid, defn, resolved, when), {fid}, ()
+        return self._run_action(firing, aid, defn, resolved, when), {fid}, ()
 
     def _run_notify(self, fid: int, aid: int, defn: AutomationDef, resolved: dict[str, Any], when: float) -> str:
         ctx = ActionContext(actor=f"automation:{aid}", surface="automation", firing_id=fid, now=when)

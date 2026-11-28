@@ -609,8 +609,9 @@ class ActionContext:
     approval: str | None = None
     # For actor == TRIAGE: the single failed run's trace_id bound to the per-job triage token.
     triage_trace_id: str | None = None
-    # For actor == automation:<id>: the firing row id (used to verify "failed item / failed project" scopes).
+    # For actor == automation:<id>: the firing row id(s) (used to verify "failed item / failed project" & merged scopes).
     firing_id: int | None = None
+    firing_ids: tuple[int, ...] = ()
     # Optional deterministic clock for in-process callers (e.g. Automator.tick(now=...)).
     now: float | None = None
 
@@ -736,7 +737,9 @@ class Actions:
         assert self.store is not None
         if spec.user_only or spec.risk >= Risk.EXTERNAL:
             raise Forbidden(f"{spec.name} is not allowed for automation {aid}")
-        if body is None or not amatch.input_in_scope(self.store, defn, body, firing_id=ctx.firing_id):
+        if body is None or not amatch.input_in_scope(
+            self.store, defn, body, firing_id=ctx.firing_id, firing_ids=ctx.firing_ids, automation_id=aid,
+        ):
             raise Forbidden(f"{spec.name} is refused: input is outside automation {aid}'s granted scope")
         if spec.risk == Risk.SYSTEM or defn.mode == "ask":
             granted = (self.approvals.consume(ctx.approval, spec.name, body)
