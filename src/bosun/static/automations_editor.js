@@ -139,15 +139,11 @@ function modeOptions(action) {
   return [["run", "Runs on its own"], ["ask", "Asks first"]];
 }
 
-function buildControls(st, projects, isDemo, update) {
+function buildDropdownControls(st, projects, isDemo, update) {
   const projOpts = [["", "Pick a project…"], ...(projects || []).map((p) => [p.key, p.name || p.key])];
   const timeOpts = TIMES.includes(st.time) ? TIMES.map((t) => [t, t]) : [[st.time, st.time], ...TIMES.map((t) => [t, t])];
   const set = (key, resetGrant = true) => (v) => { st[key] = v; if (resetGrant) st.confirmGrant = false; update(); };
   return [
-    field("Name", el("input", {
-      type: "text", value: st.name, maxlength: "120", disabled: isDemo || null, "aria-label": "Automation name",
-      oninput: (e) => { st.name = e.target.value; update(); },
-    })),
     field("When (trigger)", selectEl("Trigger", TRIGGERS, st.triggerKind, isDemo, set("triggerKind"))),
     st.triggerKind === "schedule"
       ? field("Time (local)", selectEl("Schedule time", timeOpts, st.time, isDemo, set("time")))
@@ -182,56 +178,76 @@ function buildControls(st, projects, isDemo, update) {
   ].filter(Boolean);
 }
 
+function buildGrantNodes(st, projects, isDemo, onUpdate) {
+  const needsGrant = INSTALL_ACTIONS.has(st.action) && st.mode === "run" && st.enabled;
+  return [
+    el("div", { text: scopeSentence(st, projects || []) }),
+    el("label", { class: "auto-grant-check" },
+      el("input", {
+        type: "checkbox", checked: st.enabled || null, disabled: isDemo || null, "aria-label": "Turn on after saving",
+        onchange: (e) => { st.enabled = !!e.target.checked; onUpdate(); },
+      }),
+      el("span", { text: "Turn on after saving" })),
+    needsGrant ? el("label", { class: "auto-grant-check" },
+      el("input", {
+        type: "checkbox", checked: st.confirmGrant || null, disabled: isDemo || null, "aria-label": "Confirm scope grant",
+        onchange: (e) => { st.confirmGrant = !!e.target.checked; onUpdate(); },
+      }),
+      el("span", { text: "I approve Bosun to run this exact scope on its own (renews every 90 days)." })) : null,
+  ].filter(Boolean);
+}
+
 function editorPanel(rule, projects, isDemo, onCancel, onSaved, existingState) {
   const st = existingState || initState(rule);
   const host = el("section", { class: "panel auto-editor" });
+  const gridHost = el("div", { class: "auto-grid" });
+  const grantHost = el("div", { class: "auto-grant" });
+  const actionsHost = el("div", { class: "auto-editor-actions" });
 
-  function renderEditor() {
+  function renderDependent() {
     const needsGrant = INSTALL_ACTIONS.has(st.action) && st.mode === "run" && st.enabled;
     const missingProject = PROJECT_ACTIONS.has(st.action) && !st.project;
     const saveDisabled = isDemo || st.saving || !st.name.trim() || missingProject || (needsGrant && !st.confirmGrant);
-    const controls = buildControls(st, projects, isDemo, renderEditor);
-    const grantBox = el("div", { class: "auto-grant" },
-      el("div", { text: scopeSentence(st, projects || []) }),
-      el("label", { class: "auto-grant-check" },
-        el("input", {
-          type: "checkbox", checked: st.enabled || null, disabled: isDemo || null, "aria-label": "Turn on after saving",
-          onchange: (e) => { st.enabled = !!e.target.checked; renderEditor(); },
-        }),
-        el("span", { text: "Turn on after saving" })),
-      needsGrant ? el("label", { class: "auto-grant-check" },
-        el("input", {
-          type: "checkbox", checked: st.confirmGrant || null, disabled: isDemo || null, "aria-label": "Confirm scope grant",
-          onchange: (e) => { st.confirmGrant = !!e.target.checked; renderEditor(); },
-        }),
-        el("span", { text: "I approve Bosun to run this exact scope on its own (renews every 90 days)." })) : null);
+    grantHost.replaceChildren(...buildGrantNodes(st, projects, isDemo, renderDependent));
     const saveBtn = el("button", {
       class: "primary",
       disabled: saveDisabled || null,
       text: st.saving ? "Saving…" : "Save",
       onclick: async () => {
         st.saving = true;
-        renderEditor();
+        renderDependent();
         try {
           await api("/api/automations", { method: "POST", body: JSON.stringify(buildPayload(st)) });
           if (onSaved) onSaved();
         } catch (err) {
           st.saving = false;
           alert(`Could not save automation: ${err.message}`);
-          renderEditor();
+          renderDependent();
         }
       },
     });
-    host.replaceChildren(
-      el("h2", { text: st.id ? `Edit automation: ${rule.name}` : "New automation" }),
-      el("div", { class: "auto-grid" }, ...controls),
-      grantBox,
-      el("div", { class: "auto-editor-actions" },
-        el("button", { class: "quiet", text: "Cancel", onclick: () => onCancel && onCancel() }),
-        saveBtn));
+    actionsHost.replaceChildren(
+      el("button", { class: "quiet", text: "Cancel", onclick: () => onCancel && onCancel() }),
+      saveBtn);
   }
 
-  renderEditor();
+  const nameField = field("Name", el("input", {
+    type: "text", value: st.name, maxlength: "120", disabled: isDemo || null,
+    "aria-label": "Automation name", "data-fk": "auto-name",
+    oninput: (e) => { st.name = e.target.value; renderDependent(); },
+  }));
+
+  function renderControls() {
+    gridHost.replaceChildren(nameField, ...buildDropdownControls(st, projects, isDemo, renderControls));
+    renderDependent();
+  }
+
+  host.replaceChildren(
+    el("h2", { text: st.id ? `Edit automation: ${rule.name}` : "New automation" }),
+    gridHost,
+    grantHost,
+    actionsHost);
+  renderControls();
   return host;
 }
 

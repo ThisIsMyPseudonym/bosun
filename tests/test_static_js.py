@@ -1568,3 +1568,95 @@ def test_automations_editor_keeps_unsaved_edits_across_rerender():
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_name_input_keeps_same_node_while_typing():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(STATIC / "automations_editor.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        removeAttribute(k) {{
+          delete this.attrs[k];
+          if (k === "disabled") this.disabled = false;
+          if (k === "checked") this.checked = false;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{ calls.push({{ path, opts }}); return {{ id: 1 }}; }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const rule = {{
+      id: 1, name: "Digest", enabled: false,
+      trigger: {{ kind: "refresh" }}, conditions: {{}},
+      action: "notify", scope: {{ digest: "what_changed" }},
+      mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+    }};
+    const panel = MC.automationsHelpers.editorPanel(rule, [], false, () => {{}}, () => {{}});
+    const findInput = () => allNodes(panel).find((n) => n.attrs["aria-label"] === "Automation name");
+    const findSave = () => allNodes(panel).find((n) => n.tagName === "BUTTON" && n.textContent === "Save");
+
+    const origInput = findInput();
+    if (!origInput) throw new Error("missing name input");
+    for (const nextVal of ["D", "Di", "Dig", "   ", "My Digest"]) {{
+      origInput.value = nextVal;
+      (origInput.listeners.input || []).forEach((fn) => fn({{ target: origInput }}));
+      const nowInput = findInput();
+      if (nowInput !== origInput) throw new Error("name input node was rebuilt while typing: " + nextVal);
+      const wantDisabled = !nextVal.trim();
+      if (!!findSave().disabled !== wantDisabled) {{
+        throw new Error(`Save disabled mismatch for "${{nextVal}}": got ${{findSave().disabled}}`);
+      }}
+    }}
+
+    (async () => {{
+      for (const fn of findSave().listeners.click || []) await fn();
+      if (calls.length !== 1 || JSON.parse(calls[0].opts.body).name !== "My Digest") {{
+        throw new Error("save did not send typed name: " + JSON.stringify(calls));
+      }}
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"
