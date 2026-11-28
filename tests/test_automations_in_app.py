@@ -123,3 +123,35 @@ def test_in_app_update_reader_defaults_empty_and_plugs_into_automator(tmp_path):
                 actor=f"automation:{aid}", surface="automation", approval=asked.id, firing_id=fid, now=now + 80.0,
             ),
         )
+
+
+def test_in_app_matches_and_scope_edge_cases(tmp_path):
+    from bosun.registry import KeyIn, RelaunchIn
+
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+    # Blank version or app never matches
+    assert in_app.matches_in_app_update(InAppUpdateConditions(), in_app.InAppUpdateEvent(app="", item_key="", version="1.0")) is False
+    assert in_app.matches_in_app_update(InAppUpdateConditions(), in_app.InAppUpdateEvent(app="slack", item_key="", version="")) is False
+    # Empty apps list matches any app; bundle_id matches too
+    ev = in_app.InAppUpdateEvent(app="slack", item_key="mac-app:slack", version="4.41", bundle_id="com.slack")
+    assert in_app.matches_in_app_update(InAppUpdateConditions(apps=()), ev) is True
+    assert in_app.matches_in_app_update(InAppUpdateConditions(apps=("com.slack",)), ev) is True
+    assert in_app.matches_in_app_update(InAppUpdateConditions(apps=("zoom",)), ev) is False
+
+    # relaunch_app with trigger_app scope resolves and checks input_in_scope
+    r_def = AutomationDef(
+        name="Offer Chrome", trigger=InAppUpdateTrigger(), conditions=InAppUpdateConditions(apps=("chrome",)),
+        action="relaunch_app", scope=AppActionScope(mode="trigger_app"), mode="ask",
+    )
+    aid = astore.save(st, r_def, enabled=True, grant_digest=grant_digest(r_def), granted_by="user", now=now)
+    assert in_app.resolve_app_scope(st, r_def, r_def.scope, {"app": "chrome"}, now) == {"app": "chrome"}
+    assert in_app.resolve_app_scope(st, r_def, r_def.scope, {"app": "unknown"}, now) is None
+    fid = astore.insert_firing(st, aid, r_def.name, "in_app_update", "chrome@131.0", "inapp:chrome@131.0",
+                               status="offered", deadline=now + 86400, input_data={"app": "chrome"}, now=now)
+    assert fid is not None
+    assert in_app.app_input_in_scope(st, r_def, r_def.scope, RelaunchIn(app="chrome"), (fid,), aid) is True
+    assert in_app.app_input_in_scope(st, r_def, r_def.scope, RelaunchIn(app="chrome"), (fid,), aid + 1) is False
+    assert in_app.app_input_in_scope(st, r_def, r_def.scope, RelaunchIn(app="chrome"), (), aid) is False
+    assert in_app.app_input_in_scope(st, r_def, r_def.scope, KeyIn(key="chrome"), (fid,), aid) is False
+
