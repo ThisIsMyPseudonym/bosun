@@ -310,3 +310,112 @@ def test_unexpected_exception_in_auto_job_marks_failed_with_redacted_error_and_c
         assert row_good is not None and row_good["status"] == "done" and row_good["source"] == "model"
     finally:
         trace.configure(None)
+
+
+def test_auto_off_preserves_cursor_for_deferred_failures_within_24h(tmp_path, monkeypatch):
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([
+        item_to_dict(Item(Source.BREW, "p1", "p1", "1.0", "2.0")),
+        item_to_dict(Item(Source.BREW, "p2", "p2", "1.0", "2.0")),
+    ], [])
+    tsettings.update(st, auto=False)
+    monkeypatch.setattr(accounts, "installed", lambda: {"codex": "/test/bin/codex"})
+    fake = FakeCli(monkeypatch)
+    fake.reply("codex", fake.codex_ok(_valid_verdict_payload("Triaged after re-enabling.")))
+
+    t0 = time.time() - 7200.0
+    trace.configure(st.path, "serve")
+    try:
+        tid1 = _record_failed_job(st, "brew:p1", ["brew", "upgrade", "p1"], "Error: upstream mirror returned 503 p1")
+        tid2 = _record_failed_job(st, "brew:p2", ["brew", "upgrade", "p2"], "Error: upstream mirror returned 503 p2")
+        with st._tx(write=True) as db:
+            db.execute("UPDATE jobs SET started = ?, finished = ? WHERE trace_id = ?", (t0, t0, tid1))
+            db.execute("UPDATE runs SET started = ?, finished = ? WHERE trace_id = ?", (t0, t0, tid1))
+            db.execute("UPDATE jobs SET started = ?, finished = ? WHERE trace_id = ?", (t0 - 100000.0, t0 - 100000.0, tid2))
+            db.execute("UPDATE runs SET started = ?, finished = ? WHERE trace_id = ?", (t0 - 100000.0, t0 - 100000.0, tid2))
+
+        triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+        # Tick while off: neither runs a model, cursor does NOT advance past tid1
+        rep_off = triager.tick(now=t0 + 60.0)
+        assert rep_off.model_ran == 0 and len(fake.calls) == 0
+        assert tstore.get_by_trace(st, tid1) is None
+        assert tsettings.cursor(st) < t0
+
+        # Turning auto back on within 24h triages tid1, while >24h-old tid2 is skipped
+        tsettings.update(st, auto=True)
+        rep_on = triager.tick(now=t0 + 7200.0)
+        assert rep_on.model_ran == 1 and len(fake.calls) == 1
+        assert tstore.get_by_trace(st, tid1)["status"] == "done"
+        assert tstore.get_by_trace(st, tid2)["status"] == "skipped"
+    finally:
+        trace.configure(None)
+
+
+def test_drain_queued_marks_queued_rows_skipped_when_auto_is_off(tmp_path, monkeypatch):
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([
+        item_to_dict(Item(Source.BREW, "q1", "q1", "1.0", "2.0")),
+        item_to_dict(Item(Source.BREW, "q2", "q2", "1.0", "2.0")),
+    ], [])
+    trace.configure(st.path, "serve")
+    try:
+        t0 = time.time()
+        tid1 = _record_failed_job(st, "brew:q1", ["brew", "upgrade", "q1"], "Error: novel q1")
+        tid2 = _record_failed_job(st, "brew:q2", ["brew", "upgrade", "q2"], "Error: novel q2")
+        for tid in (tid1, tid2):
+            rec = tstore.load_failure(st, tid)
+            assert rec is not None
+            tstore.save_status(st, rec.failure, tid, worker.signature_of(rec), "queued", now=t0)
+        tsettings.set_cursor(st, t0 + 10.0)
+        tsettings.update(st, auto=False)
+        monkeypatch.setattr(tmodel, "run_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError("model called")))
+
+        triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+        rep = triager.tick(now=t0 + 20.0)
+        assert rep.model_ran == 0 and rep.skipped == 2
+        for tid in (tid1, tid2):
+            row = tstore.get_by_trace(st, tid)
+            assert row is not None and row["status"] == "skipped"
+            assert "automatic triage is off" in row["last_error"].lower()
+    finally:
+        trace.configure(None)
+
+
+def test_no_cli_skips_are_retried_when_cli_becomes_available_within_24h(tmp_path, monkeypatch):
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([
+        item_to_dict(Item(Source.BREW, "n1", "n1", "1.0", "2.0")),
+        item_to_dict(Item(Source.BREW, "n2", "n2", "1.0", "2.0")),
+    ], [])
+    t0 = time.time()
+    trace.configure(st.path, "serve")
+    try:
+        tid_recent = _record_failed_job(st, "brew:n1", ["brew", "upgrade", "n1"], "Error: upstream mirror returned 503 n1")
+        tid_old = _record_failed_job(st, "brew:n2", ["brew", "upgrade", "n2"], "Error: upstream mirror returned 503 n2")
+        with st._tx(write=True) as db:
+            db.execute("UPDATE jobs SET started = ?, finished = ? WHERE trace_id = ?", (t0, t0, tid_recent))
+            db.execute("UPDATE runs SET started = ?, finished = ? WHERE trace_id = ?", (t0, t0, tid_recent))
+            db.execute("UPDATE jobs SET started = ?, finished = ? WHERE trace_id = ?", (t0 - 86000.0, t0 - 86000.0, tid_old))
+            db.execute("UPDATE runs SET started = ?, finished = ? WHERE trace_id = ?", (t0 - 86000.0, t0 - 86000.0, tid_old))
+
+        # No CLI installed -> both skipped with no spinning on repeated ticks
+        monkeypatch.setattr(accounts, "installed", lambda: {})
+        triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+        rep1 = triager.tick(now=t0 + 10.0)
+        assert rep1.model_ran == 0 and rep1.skipped == 2
+        assert tstore.get_by_trace(st, tid_recent)["status"] == "skipped"
+        assert tstore.get_by_trace(st, tid_old)["status"] == "skipped"
+
+        rep2 = triager.tick(now=t0 + 40.0)
+        assert rep2.model_ran == 0 and rep2.skipped == 0
+
+        # CLI becomes available at t0 + 1000: tid_recent (<24h) is retried, tid_old (>24h now) stays skipped
+        monkeypatch.setattr(accounts, "installed", lambda: {"codex": "/test/bin/codex"})
+        fake = FakeCli(monkeypatch)
+        fake.reply("codex", fake.codex_ok(_valid_verdict_payload("Retried after CLI install.")))
+        rep3 = triager.tick(now=t0 + 1000.0)
+        assert rep3.model_ran == 1 and len(fake.calls) == 1
+        assert tstore.get_by_trace(st, tid_recent)["status"] == "done"
+        assert tstore.get_by_trace(st, tid_old)["status"] == "skipped"
+    finally:
+        trace.configure(None)

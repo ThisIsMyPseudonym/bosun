@@ -40,15 +40,32 @@ def scan_failures(store: Store, since: float) -> list[FailureRecord]:
     return [rec for rec, _ in scan_failures_with_ts(store, since)]
 
 
-def rows_by_status(store: Store, status: str) -> list[dict[str, Any]]:
-    """Return raw triage metadata rows with the given status, oldest first."""
+def rows_by_status(store: Store, status: str, *, source: str | None = None) -> list[dict[str, Any]]:
+    """Return raw triage metadata rows with the given status (and optional source), oldest first."""
     with store._tx() as db:
-        rows = db.execute(
-            "SELECT id, failure, trace_id, signature, status, created FROM triage "
-            "WHERE status = ? ORDER BY created ASC, id ASC",
-            (status,),
-        ).fetchall()
+        if source is None:
+            rows = db.execute(
+                "SELECT id, failure, trace_id, signature, status, source, created FROM triage "
+                "WHERE status = ? ORDER BY created ASC, id ASC",
+                (status,),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT id, failure, trace_id, signature, status, source, created FROM triage "
+                "WHERE status = ? AND source = ? ORDER BY created ASC, id ASC",
+                (status, source),
+            ).fetchall()
     return [dict(r) for r in rows]
+
+
+def requeue_skipped(store: Store, failure: str) -> None:
+    """Move a retryable skipped row (e.g. no_cli) back to queued and clear its skip marker."""
+    with store._tx(write=True) as db:
+        db.execute(
+            "UPDATE triage SET status = 'queued', source = '', last_error = '', finished = NULL "
+            "WHERE failure = ? AND status = 'skipped'",
+            (failure,),
+        )
 
 
 def has_active_signature(store: Store, sig: str, *, exclude_failure: str = "") -> bool:
@@ -175,6 +192,7 @@ def save_skipped(
     sig: str,
     reason: str = "",
     *,
+    source: str = "",
     now: float | None = None,
 ) -> None:
     """Mark a failure skipped and record an optional redacted explanation."""
@@ -183,12 +201,12 @@ def save_skipped(
     with store._tx(write=True) as db:
         db.execute(
             "INSERT INTO triage (failure, trace_id, signature, status, source, last_error, created, finished) "
-            "VALUES (?, ?, ?, 'skipped', '', ?, ?, ?) "
+            "VALUES (?, ?, ?, 'skipped', ?, ?, ?, ?) "
             "ON CONFLICT(failure) DO UPDATE SET "
             "trace_id=excluded.trace_id, signature=excluded.signature, "
             "status=CASE WHEN triage.status='disputed' OR triage.feedback IN ('wrong','disputed') "
             "THEN 'disputed' ELSE 'skipped' END, "
-            "last_error=excluded.last_error, finished=excluded.finished",
-            (failure, trace_id, sig, note, ts, ts),
+            "source=excluded.source, last_error=excluded.last_error, finished=excluded.finished",
+            (failure, trace_id, sig, source, note, ts, ts),
         )
     tsettings.clear_quota_reset(store, failure)

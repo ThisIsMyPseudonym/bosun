@@ -48,27 +48,41 @@ def scan_new(
     records = tqueue.scan_failures_with_ts(store, since)
     cfg = tsettings.read(store)
     max_ts = since
+    deferred = False
     fast_n = queued_n = skipped_n = 0
     seen_failures: set[str] = set()
     for rec, event_ts in records:
-        max_ts = max(max_ts, event_ts)
         if rec.failure in seen_failures:
             continue
         seen_failures.add(rec.failure)
         if not eligible_rules(rec) or tstore.get(store, rec.failure) is not None:
+            if not deferred:
+                max_ts = max(max_ts, event_ts)
             continue
         if eval_fast(rec, when) is not None:
             fast_n += 1
+            if not deferred:
+                max_ts = max(max_ts, event_ts)
             continue
-        if not cfg.auto or not eligible_auto(rec):
+        if not eligible_auto(rec):
+            if not deferred:
+                max_ts = max(max_ts, event_ts)
+            continue
+        if not cfg.auto:
+            if when - rec.ts <= AUTO_MAX_AGE_S:
+                deferred = True
+            elif not deferred:
+                max_ts = max(max_ts, event_ts)
             continue
         sig = sig_of(rec)
         if when - rec.ts > AUTO_MAX_AGE_S:
             tqueue.save_skipped(store, rec.failure, rec.trace_id, sig, "Failure is older than 24 hours", now=when)
             skipped_n += 1
-            continue
-        tstore.save_status(store, rec.failure, rec.trace_id, sig, "queued", now=when)
-        queued_n += 1
+        else:
+            tstore.save_status(store, rec.failure, rec.trace_id, sig, "queued", now=when)
+            queued_n += 1
+        if not deferred:
+            max_ts = max(max_ts, event_ts)
     if max_ts > since:
         tsettings.set_cursor(store, max_ts)
     return fast_n, queued_n, skipped_n
@@ -107,6 +121,40 @@ def revisit_waiting(
     return fixed_n, cached_n, skipped_n
 
 
+def revisit_no_cli(
+    store: Store,
+    when: float,
+    *,
+    eligible_auto: Callable[[FailureRecord], bool],
+    reuse_cached: Callable[[FailureRecord, str, float], dict[str, Any] | None],
+) -> tuple[int, int]:
+    """Re-queue no_cli-skipped failures within 24h once a locked-down CLI becomes available."""
+    if not tsettings.read(store).auto:
+        return 0, 0
+    rows = tqueue.rows_by_status(store, "skipped", source="no_cli")
+    if not rows:
+        return 0, 0
+    avail, _ = tmodel.availability(store, cached_only=True, now=lambda: when)
+    if not avail:
+        return 0, 0
+    fixed_n = cached_n = 0
+    for row in rows:
+        failure, tid, sig = str(row["failure"]), str(row["trace_id"]), str(row["signature"] or "")
+        rec = tstore.load_failure(store, tid)
+        if rec is None or not eligible_auto(rec) or when - rec.ts > AUTO_MAX_AGE_S:
+            tqueue.save_skipped(store, failure, tid, sig, "Expired while waiting for an AI CLI", source="", now=when)
+            continue
+        if tstore.superseded(store, rec):
+            tstore.save_status(store, failure, tid, sig, "fixed_since", now=when)
+            fixed_n += 1
+            continue
+        if reuse_cached(rec, sig, when) is not None:
+            cached_n += 1
+            continue
+        tqueue.requeue_skipped(store, failure)
+    return fixed_n, cached_n
+
+
 def _mark_rest_waiting(store: Store, reset_at: float, reason: str, when: float) -> int:
     count = 0
     for rest in tqueue.rows_by_status(store, "queued"):
@@ -118,12 +166,12 @@ def _mark_rest_waiting(store: Store, reset_at: float, reason: str, when: float) 
     return count
 
 
-def _mark_rest_skipped(store: Store, reason: str, when: float) -> int:
+def _mark_rest_skipped(store: Store, reason: str, when: float, *, source: str = "") -> int:
     count = 0
     for rest in tqueue.rows_by_status(store, "queued"):
         tqueue.save_skipped(
             store, str(rest["failure"]), str(rest["trace_id"]), str(rest["signature"] or ""),
-            reason, now=when,
+            reason, source=source, now=when,
         )
         count += 1
     return count
@@ -180,7 +228,7 @@ def _finish_one_auto(
         sibs = tqueue.mark_siblings_waiting(triager.store, sig, rec.failure, reset_at, reason, now=when)
         return "waiting_quota", 1 + sibs, reset_at, reason
     if outcome.no_cli:
-        tqueue.save_skipped(triager.store, rec.failure, rec.trace_id, sig, outcome.reason, now=when)
+        tqueue.save_skipped(triager.store, rec.failure, rec.trace_id, sig, outcome.reason, source="no_cli", now=when)
         return "no_cli", 1, None, outcome.reason
     reason = outcome.reason or "Triage model call failed"
     tstore.restore_or_fail(
@@ -257,11 +305,14 @@ def drain_queued(
     """Run queued background model triage jobs one at a time up to remaining daily budget."""
     store = triager.store
     if not tsettings.read(store).auto:
-        return 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, _mark_rest_skipped(store, AUTO_OFF_REASON, when)
     budget = tsettings.remaining_budget(store, now=when)
     fixed_n = model_n = cache_n = wait_n = skip_n = started = 0
     seen_sigs: set[str] = set()
     for row in tqueue.rows_by_status(store, "queued"):
+        if not tsettings.read(store).auto:
+            skip_n += _mark_rest_skipped(store, AUTO_OFF_REASON, when)
+            break
         status, rec = _prepare_queued_row(store, row, when, eligible_auto=eligible_auto, reuse_cached=reuse_cached)
         if status == "skipped":
             skip_n += 1
@@ -275,7 +326,7 @@ def drain_queued(
         if status != "ready" or rec is None:
             continue
         sig = str(row["signature"] or "")
-        if sig in seen_sigs or not tsettings.read(store).auto:
+        if sig in seen_sigs:
             continue
         if started >= budget or tsettings.remaining_budget(store, now=when) <= 0:
             break
@@ -290,10 +341,10 @@ def drain_queued(
             wait_n += extra + _mark_rest_waiting(store, reset_at or when + tqueue.UNDATED_RETRY_S, reason, when)
             break
         elif state == "no_cli":
-            skip_n += extra + _mark_rest_skipped(store, reason, when)
+            skip_n += extra + _mark_rest_skipped(store, reason, when, source="no_cli")
             break
         elif state == "auto_off":
-            skip_n += extra
+            skip_n += extra + _mark_rest_skipped(store, reason, when)
             break
         else:
             started += 1
@@ -321,14 +372,17 @@ def run_tick(
             eligible_rules=eligible_rules, eligible_auto=eligible_auto, eval_fast=eval_fast, sig_of=sig_of,
         )
         fix_wait, cache_wait, skip_wait = revisit_waiting(triager.store, when, reuse_cached=reuse_cached)
+        fix_cli, cache_cli = revisit_no_cli(
+            triager.store, when, eligible_auto=eligible_auto, reuse_cached=reuse_cached,
+        )
         fix_q, model_n, cache_q, wait_n, skip_q = drain_queued(
             triager, when, eligible_auto=eligible_auto, reuse_cached=reuse_cached, recheck_fn=recheck_fn,
         )
     return TickReport(
-        rules_or_cache=fast_n + fix_wait + fix_q,
+        rules_or_cache=fast_n + fix_wait + fix_cli + fix_q,
         queued=queued_n,
         model_ran=model_n,
-        cache_filled=cache_wait + cache_q,
+        cache_filled=cache_wait + cache_cli + cache_q,
         waiting_quota=wait_n,
         skipped=skip_scan + skip_wait + skip_q,
     )
