@@ -91,3 +91,38 @@ def test_triage_settings_http_endpoints_enforce_user_only_and_bounds(tmp_path):
     assert ok.status_code == 200 and ok.json()["auto"] is False and ok.json()["daily_limit"] == 0
     assert user.post("/api/triage/settings", json={"daily_limit": -1}, headers=H).status_code == 422
     assert user.post("/api/triage/settings", json={"daily_limit": 101}, headers=H).status_code == 422
+
+
+def test_settings_read_fails_closed_on_auto_and_validates_daily_limit(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    # Missing value keeps the agreed default (on)
+    assert tsettings.read(st).auto is True
+
+    for raw in ("1", "true", "TRUE", "on", " 1 "):
+        st.set_setting(tsettings.AUTO_KEY, raw)
+        assert tsettings.read(st).auto is True, raw
+
+    # Anything other than an explicit on value fails closed (off)
+    for raw in ("0", "false", "off", "", "corrupt", "2", "yes-maybe", "null"):
+        st.set_setting(tsettings.AUTO_KEY, raw)
+        assert tsettings.read(st).auto is False, raw
+
+    # daily_limit validation on read
+    for raw, expected in (
+        ("0", 0),
+        ("7", 7),
+        ("100", 100),
+        ("-5", 0),
+        ("9999", tsettings.MAX_DAILY_LIMIT),
+        ("", tsettings.DEFAULT_DAILY_LIMIT),
+        ("abc", tsettings.DEFAULT_DAILY_LIMIT),
+        ("12.5", tsettings.DEFAULT_DAILY_LIMIT),
+        ("1_000", tsettings.DEFAULT_DAILY_LIMIT),
+    ):
+        st.set_setting(tsettings.DAILY_LIMIT_KEY, raw)
+        assert tsettings.read(st).daily_limit == expected, raw
+
+    # Far-future quota reset is clamped to 24h
+    now = 1_800_000_000.0
+    tsettings.set_quota_reset(st, "job:99", now + 10_000_000.0, now=now)
+    assert tsettings.quota_resets(st)["job:99"] == now + 86400.0

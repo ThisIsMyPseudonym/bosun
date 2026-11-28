@@ -115,7 +115,14 @@ def revisit_waiting(
             cached_n += 1
             continue
         reset_at = resets.get(failure)
-        if cfg.auto and (reset_at is None or when >= reset_at):
+        if reset_at is None:
+            tsettings.set_quota_reset(store, failure, tsettings.next_reset_boundary(when), now=when)
+            continue
+        clamped = tsettings.clamp_reset(reset_at, when)
+        if clamped < reset_at:
+            reset_at = clamped
+            tsettings.set_quota_reset(store, failure, reset_at, now=when)
+        if cfg.auto and when >= reset_at:
             tstore.save_status(store, failure, tid, sig, "queued", now=when)
             tsettings.clear_quota_reset(store, failure)
     return fixed_n, cached_n, skipped_n

@@ -144,7 +144,7 @@ def save_waiting_quota(
             "last_error=excluded.last_error, finished=NULL",
             (failure, trace_id, sig, triage_trace, note, ts),
         )
-    tsettings.set_quota_reset(store, failure, reset_at)
+    tsettings.set_quota_reset(store, failure, reset_at, now=ts)
 
 
 def mark_siblings_waiting(

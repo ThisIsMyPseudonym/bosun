@@ -227,3 +227,59 @@ def test_killed_mid_call_background_attempt_still_counts_toward_daily_limit(tmp_
         assert rep2.model_ran == 0
     finally:
         trace.configure(None)
+
+
+def test_corrupt_or_missing_quota_reset_waits_until_next_15m_boundary_and_clamps_far_future(tmp_path, monkeypatch):
+    from bosun.triage import queue as tqueue
+
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([
+        item_to_dict(Item(Source.BREW, "c1", "c1", "1.0", "2.0")),
+        item_to_dict(Item(Source.BREW, "c2", "c2", "1.0", "2.0")),
+    ], [])
+    monkeypatch.setattr(accounts, "installed", lambda: {"codex": "/test/bin/codex"})
+    fake = FakeCli(monkeypatch)
+    fake.reply("codex", fake.codex_ok(_payload("corrupt reset aaa")))
+
+    t0 = 1_800_000_100.0  # 100s past a 15-minute boundary; next boundary is 1_800_000_900.0
+    next_boundary = 1_800_000_900.0
+    trace.configure(st.path, "serve")
+    try:
+        tid1 = _fail_job(st, "brew:c1", "Error: corrupt reset aaa")
+        tid2 = _fail_job(st, "brew:c2", "Error: far future bbb")
+        with st._tx(write=True) as db:
+            for tid in (tid1, tid2):
+                db.execute("UPDATE jobs SET started = ?, finished = ? WHERE trace_id = ?", (t0 - 10.0, t0 - 10.0, tid))
+                db.execute("UPDATE runs SET started = ?, finished = ? WHERE trace_id = ?", (t0 - 10.0, t0 - 10.0, tid))
+        rec1 = tstore.load_failure(st, tid1)
+        rec2 = tstore.load_failure(st, tid2)
+        assert rec1 and rec2
+
+        tqueue.save_waiting_quota(st, rec1.failure, tid1, worker.signature_of(rec1), t0 + 60.0, "past 75%", now=t0)
+        tqueue.save_waiting_quota(st, rec2.failure, tid2, worker.signature_of(rec2), t0 + 60.0, "past 75%", now=t0)
+        tsettings.set_cursor(st, t0)
+        # Corrupt triage_quota_resets with invalid JSON -> both entries are missing
+        st.set_setting(tsettings.QUOTA_RESETS_KEY, "{not-valid-json")
+
+        triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+        rep1 = triager.tick(now=t0)
+        assert rep1.model_ran == 0 and len(fake.calls) == 0
+        assert tstore.get(st, rec1.failure)["status"] == "waiting_quota"
+        assert tsettings.quota_resets(st)[rec1.failure] == next_boundary
+
+        # Still before the 15-minute boundary: stays waiting_quota, no model call
+        rep2 = triager.tick(now=t0 + 600.0)
+        assert rep2.model_ran == 0 and len(fake.calls) == 0
+
+        # Manually plant a far-future reset for rec2; tick clamps it to <= when + 24h
+        st.set_setting(
+            tsettings.QUOTA_RESETS_KEY,
+            f'{{"{rec1.failure}":{next_boundary},"{rec2.failure}":{t0 + 10_000_000.0}}}',
+        )
+        rep3 = triager.tick(now=next_boundary)
+        assert rep3.model_ran == 1 and len(fake.calls) == 1
+        assert tstore.get(st, rec1.failure)["status"] == "done"
+        assert tstore.get(st, rec2.failure)["status"] == "waiting_quota"
+        assert tsettings.quota_resets(st)[rec2.failure] <= next_boundary + 86400.0
+    finally:
+        trace.configure(None)
