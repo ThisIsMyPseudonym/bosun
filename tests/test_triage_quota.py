@@ -283,3 +283,40 @@ def test_corrupt_or_missing_quota_reset_waits_until_next_15m_boundary_and_clamps
         assert tsettings.quota_resets(st)[rec2.failure] <= next_boundary + 86400.0
     finally:
         trace.configure(None)
+
+
+def test_several_ticks_accumulate_under_daily_limit_until_exhausted(tmp_path, monkeypatch):
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([item_to_dict(Item(Source.BREW, f"m{i}", f"m{i}", "1.0", "2.0")) for i in range(4)], [])
+    tsettings.update(st, daily_limit=3)
+    monkeypatch.setattr(accounts, "installed", lambda: {"codex": "/test/bin/codex"})
+    fake = FakeCli(monkeypatch)
+    for word in ("one", "two", "three", "four"):
+        fake.reply("codex", fake.codex_ok(_payload(f"multi-tick failure {word}")))
+
+    trace.configure(st.path, "serve")
+    try:
+        triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+        t = time.time()
+
+        tid1 = _fail_job(st, "brew:m0", "Error: multi-tick failure one")
+        r1 = triager.tick(now=t + 1.0)
+        assert r1.model_ran == 1 and tsettings.daily_auto_used(st) == 1 and tsettings.remaining_budget(st) == 2
+
+        tid2 = _fail_job(st, "brew:m1", "Error: multi-tick failure two")
+        r2 = triager.tick(now=t + 31.0)
+        assert r2.model_ran == 1 and tsettings.daily_auto_used(st) == 2 and tsettings.remaining_budget(st) == 1
+
+        tid3 = _fail_job(st, "brew:m2", "Error: multi-tick failure three")
+        tid4 = _fail_job(st, "brew:m3", "Error: multi-tick failure four")
+        r3 = triager.tick(now=t + 61.0)
+        assert r3.model_ran == 1 and tsettings.daily_auto_used(st) == 3 and tsettings.remaining_budget(st) == 0
+
+        r4 = triager.tick(now=t + 91.0)
+        assert r4.model_ran == 0 and len(fake.calls) == 3
+        assert tstore.get_by_trace(st, tid1)["status"] == "done"
+        assert tstore.get_by_trace(st, tid2)["status"] == "done"
+        assert tstore.get_by_trace(st, tid3)["status"] == "done"
+        assert tstore.get_by_trace(st, tid4)["status"] == "queued"
+    finally:
+        trace.configure(None)

@@ -419,3 +419,84 @@ def test_no_cli_skips_are_retried_when_cli_becomes_available_within_24h(tmp_path
         assert tstore.get_by_trace(st, tid_old)["status"] == "skipped"
     finally:
         trace.configure(None)
+
+
+def test_switching_off_mid_queue_stops_after_current_job_and_skips_rest(tmp_path, monkeypatch):
+    from bosun.triage.schema import Verdict
+
+    st = Store(tmp_path / "bosun.db")
+    st.save_snapshot([
+        item_to_dict(Item(Source.BREW, "m1", "m1", "1.0", "2.0")),
+        item_to_dict(Item(Source.BREW, "m2", "m2", "1.0", "2.0")),
+        item_to_dict(Item(Source.BREW, "m3", "m3", "1.0", "2.0")),
+    ], [])
+    trace.configure(st.path, "serve")
+    try:
+        tid1 = _record_failed_job(st, "brew:m1", ["brew", "upgrade", "m1"], "Error: novel midqueue aaa")
+        tid2 = _record_failed_job(st, "brew:m2", ["brew", "upgrade", "m2"], "Error: novel midqueue bbb")
+        tid3 = _record_failed_job(st, "brew:m3", ["brew", "upgrade", "m3"], "Error: novel midqueue ccc")
+        called: list[str] = []
+        real_save_verdict = tstore.save_verdict
+
+        def fake_run_model(store, settings, rec, *, clicked, tokens, now=time.time):
+            called.append(rec.subject)
+            verdict = Verdict.model_validate(_valid_verdict_payload(f"Verdict for {rec.subject}."))
+            return tmodel.ModelOutcome(True, verdict, None, "gpt-5-mini", "tr-mid", "")
+
+        def save_and_flip_off(*args, **kwargs):
+            row_id = real_save_verdict(*args, **kwargs)
+            tsettings.update(st, auto=False)  # switched off right after 1st job finishes
+            return row_id
+
+        monkeypatch.setattr(tmodel, "run_model", fake_run_model)
+        monkeypatch.setattr(tstore, "save_verdict", save_and_flip_off)
+
+        triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+        rep = triager.tick(now=time.time() + 1.0)
+        assert called == ["brew:m1"]
+        assert rep.model_ran == 1 and rep.skipped == 2
+        assert tstore.get_by_trace(st, tid1)["status"] == "done"
+        assert tstore.get_by_trace(st, tid2)["status"] == "skipped"
+        assert tstore.get_by_trace(st, tid3)["status"] == "skipped"
+    finally:
+        trace.configure(None)
+
+
+def test_real_triager_run_loop_sleeps_first_handles_exceptions_and_continues(tmp_path, monkeypatch, caplog):
+    import pytest
+
+    from conftest import REAL_TRIAGER_RUN
+
+    class _StopLoop(BaseException):
+        pass
+
+    st = Store(tmp_path / "bosun.db")
+    triager = worker.Triager(st, load_settings(), auth.TriageTokens())
+    events: list[tuple[str, float | int]] = []
+    sleeps = 0
+    ticks = 0
+
+    def fake_sleep(interval: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        events.append(("sleep", interval))
+        if sleeps >= 3:
+            raise _StopLoop
+
+    def fake_tick(*, now: float | None = None) -> worker.TickReport:
+        nonlocal ticks
+        ticks += 1
+        events.append(("tick", ticks))
+        if ticks == 1:
+            raise RuntimeError("transient sqlite lock")
+        return worker.TickReport()
+
+    monkeypatch.setattr(worker.time, "sleep", fake_sleep)
+    monkeypatch.setattr(triager, "tick", fake_tick)
+
+    with caplog.at_level("ERROR", logger=worker.log.name):
+        with pytest.raises(_StopLoop):
+            REAL_TRIAGER_RUN(triager, interval=12.5)
+
+    assert events == [("sleep", 12.5), ("tick", 1), ("sleep", 12.5), ("tick", 2), ("sleep", 12.5)]
+    assert "background triage tick failed" in caplog.text
