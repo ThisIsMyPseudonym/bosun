@@ -80,3 +80,15 @@ def test_digest_includes_failed_items_with_ready_triage_cause_and_redacts(tmp_pa
     s3 = st.save_snapshot([item_to_dict(item)], [])
     quiet_line = build_digest(st, snapshot_id=s3, prev_snapshot_id=s2)
     assert "no changes" in quiet_line.lower()
+
+    # Many new Do-now items and prev_snapshot_id=None exercise _format_names ("and N more") and first-snapshot path
+    many = [Item(Source.BREW, f"pkg{i}", f"pkg{i}", "1.0", "1.1", lane="now") for i in range(5)]
+    s4 = st.save_snapshot([item_to_dict(x) for x in many], [])
+    many_line = build_digest(st, snapshot_id=s4, prev_snapshot_id=None)
+    assert "and 2 more" in many_line and "pkg0" in many_line
+    two = [Item(Source.BREW, "alpha", "alpha", "1.0", "1.1", lane="now"),
+           Item(Source.BREW, "beta", "beta", "1.0", "1.1", lane="now")]
+    s5 = st.save_snapshot([item_to_dict(x) for x in two], [])
+    two_line = build_digest(st, snapshot_id=s5, prev_snapshot_id=s3)
+    assert "alpha and beta" in two_line
+

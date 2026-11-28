@@ -143,3 +143,54 @@ def test_all_action_scopes_resolve_and_validate(tmp_path):
     assert resolve_input(st, open_def, event={}) == {"key": "mac-app:Slack"}
     assert input_in_scope(st, open_def, KeyIn(key="mac-app:Slack"))
     assert not input_in_scope(st, open_def, KeyIn(key="mac-app:Zoom"))
+
+
+def test_failed_origin_scopes_and_schedule_action_filters(tmp_path):
+    from bosun.automations import store as astore
+    from bosun.automations.schema import grant_digest
+    from bosun.enrich import explain
+
+    st = Store(tmp_path / "bosun.db")
+    brew_ok = Item(Source.BREW, "jq", "jq", "1.7.0", "1.7.1", lane="batch")
+    repo_now = Item(Source.REPO, "lodash", "lodash", "4.0", "4.17.21", ecosystem="npm", project="p1", lane="now")
+    st.save_snapshot([item_to_dict(brew_ok), item_to_dict(repo_now)], [])
+
+    # Schedule matching across explain_item (uncached -> cached), upgrade, and other actions
+    assert matches_schedule(st, ScheduleConditions(project="p1", lane="now"), "explain_item")
+    st.cache_put("explain", explain.cache_key(repo_now), {"answer": "cached"})
+    assert not matches_schedule(st, ScheduleConditions(project="p1", lane="now"), "explain_item")
+    assert matches_schedule(st, ScheduleConditions(lane="batch"), "upgrade")
+    assert matches_schedule(st, ScheduleConditions(lane="batch"), "notify")
+
+    # failed_item upgrade scope: matches exact version, rejects changed version, verifies via firing_id
+    fup = AutomationDef(
+        name="Retry failed", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="upgrade", scope=UpgradeScope(mode="failed_item"), mode="run",
+    )
+    assert resolve_input(st, fup, event={"item_key": brew_ok.key, "available": "1.7.1"}) == {"keys": [brew_ok.key]}
+    assert resolve_input(st, fup, event={"item_key": brew_ok.key, "available": "1.7.2"}) is None
+    assert resolve_input(st, fup, event={"item_key": "brew:missing"}) is None
+    aid = astore.save(st, fup, enabled=True, grant_digest=grant_digest(fup), granted_by="user", now=100.0)
+    fid = astore.insert_firing(
+        st, aid, fup.name, "verdict", "job:1", "v:1",
+        status="scheduled", input_data={"keys": [brew_ok.key]}, now=100.0,
+    )
+    assert input_in_scope(st, fup, KeysIn(keys=[brew_ok.key]), firing_id=fid)
+    assert not input_in_scope(st, fup, KeysIn(keys=["brew:other"]), firing_id=fid)
+    assert not input_in_scope(st, fup, KeysIn(keys=[brew_ok.key]), firing_id=None)
+
+    # failed_project recheck scope verifies via firing_id
+    frc = AutomationDef(
+        name="Recheck failed", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="recheck_project", scope=RecheckProjectScope(mode="failed_project"), mode="run",
+    )
+    assert resolve_input(st, frc, event={"project": "p1"}) == {"project": "p1"}
+    assert resolve_input(st, frc, event={}) is None
+    raid = astore.save(st, frc, enabled=True, grant_digest=grant_digest(frc), granted_by="user", now=100.0)
+    rfid = astore.insert_firing(
+        st, raid, frc.name, "verdict", "fix:1", "v:2",
+        status="scheduled", input_data={"project": "p1"}, now=100.0,
+    )
+    assert input_in_scope(st, frc, ProjectIn(project="p1"), firing_id=rfid)
+    assert not input_in_scope(st, frc, ProjectIn(project="p2"), firing_id=rfid)
+

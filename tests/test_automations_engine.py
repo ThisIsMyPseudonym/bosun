@@ -291,4 +291,77 @@ def test_server_startup_recovers_running_firings_and_demo_never_starts_engine(tm
     )
     demo_app = create_app(demo_s, demo_st, "t" * 32)
     assert demo_app.state.automator.tick(now=200.0).ran == 0
+    assert demo_app.state.automator.busy() is False
+
+
+def test_engine_handles_tampered_grant_model_cap_empty_scope_and_quota_past_deadline(tmp_path):
+    from bosun.automations.schema import GRANT_TTL_S
+
+    st = Store(tmp_path / "bosun.db")
+    now = 700_000.0
+    it = Item(Source.REPO, "lodash", "lodash", "4.0", "4.17.21", ecosystem="npm", project="p1", lane="now")
+    st.save_snapshot([item_to_dict(it)], [])
+    app = create_app(load_settings(), st, "t" * 32)
+    eng = Automator(st, load_settings(), app.state.actions, tz=CHI)
+
+    # 1. Tampered grant digest refused by precheck
+    r_def = AutomationDef(
+        name="Tampered", trigger=RefreshTrigger(kind="refresh"), conditions=RefreshConditions(),
+        action="refresh", scope=RefreshScope(only=("brew",)), mode="run",
+    )
+    tid = astore.save(st, r_def, enabled=True, grant_digest="wrong", granted_by="user", now=now)
+    f_bad = astore.insert_firing(st, tid, r_def.name, "refresh", "snap:1", "t:1", status="scheduled", due=now, now=now)
+    eng.tick(now=now + 1)
+    assert astore.get_firing(st, f_bad)["status"] == "refused"
+
+    # 2. Expired 90-day INSTALL grant refused
+    f_def = AutomationDef(
+        name="Expired fix", trigger=ScheduleTrigger(kind="schedule", time="02:00"),
+        conditions=ScheduleConditions(project="p1", lane="now"),
+        action="start_fix", scope=StartFixScope(project="p1", lane="now"), mode="run",
+        cooldown_s=0, model_jobs_per_day=1,
+    )
+    eid = astore.save(
+        st, f_def, enabled=True, grant_digest=grant_digest(f_def),
+        granted_by="user", granted_at=now - GRANT_TTL_S - 10, now=now,
+    )
+    f_exp = astore.insert_firing(st, eid, f_def.name, "schedule", "s1", "e:1", status="scheduled", due=now, now=now)
+    eng.tick(now=now + 2)
+    assert astore.get_firing(st, f_exp)["status"] == "refused"
+
+    # 3. Model jobs daily cap skipped
+    astore.renew_grant(st, eid, granted_by="user", now=now + 3)
+    astore.insert_firing(st, eid, f_def.name, "schedule", "s2", "e:2", status="done", due=now, now=now)
+    f_mcap = astore.insert_firing(st, eid, f_def.name, "schedule", "s3", "e:3", status="scheduled", due=now, now=now)
+    eng.tick(now=now + 4)
+    assert astore.get_firing(st, f_mcap)["status"] == "skipped"
+    assert "model job" in astore.get_firing(st, f_mcap)["reason"].lower()
+
+    # 4. Schedule conditions no longer hold (empty project) -> skipped
+    empty_def = AutomationDef(
+        name="Empty fix", trigger=ScheduleTrigger(kind="schedule", time="02:00"),
+        conditions=ScheduleConditions(project="p_missing", lane="now"),
+        action="start_fix", scope=StartFixScope(project="p_missing", lane="now"), mode="run",
+    )
+    mid = astore.save(st, empty_def, enabled=True, grant_digest=grant_digest(empty_def), granted_by="user", now=now)
+    f_empty = astore.insert_firing(st, mid, empty_def.name, "schedule", "s4", "m:1", status="scheduled", due=now, now=now)
+    eng.tick(now=now + 5)
+    assert astore.get_firing(st, f_empty)["status"] == "skipped"
+
+    # 5. QuotaHeld whose reset is already past deadline -> immediately skipped
+    ledger.save(
+        st, "claude",
+        (windows.Reading("five_hour", "allowed", 0.90, now + 10_000, now, "output"),),
+        now=now,
+    )
+    q_def = f_def.model_copy(update={"name": "Short deadline", "model_jobs_per_day": 5})
+    qid = astore.save(st, q_def, enabled=True, grant_digest=grant_digest(q_def), granted_by="user", now=now)
+    f_q = astore.insert_firing(
+        st, qid, q_def.name, "schedule", "s5", "q:1",
+        status="scheduled", due=now, deadline=now + 500, now=now,
+    )
+    eng.tick(now=now + 6)
+    assert astore.get_firing(st, f_q)["status"] == "skipped"
+    assert "deadline" in astore.get_firing(st, f_q)["reason"].lower()
+
 
