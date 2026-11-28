@@ -252,3 +252,19 @@ def test_evidence_grounding_requires_12_nonspace_chars_in_failure_output_and_val
     assert out_bad_ref.category == "unknown" and out_bad_ref.confidence == "low"
     assert out_bad_ref.next_step.kind == "none"
     assert all("javascript:" not in ev.ref for ev in out_bad_ref.evidence)
+
+
+def test_a_retry_that_cannot_run_here_falls_back_to_the_matching_runbook():
+    # A cask that needs your password can't be upgraded from Bosun: "try again" has nothing to run, but the
+    # password guide still applies, so the verdict keeps it rather than dropping to no step at all.
+    cask = Item(Source.BREW_CASK, "zoom", "Zoom", "6.0", "6.1", manual="Needs your password")
+    step = recheck_step(NextStep(kind="retry", why="it needs your password"), category="password_needed",
+                        item=cask, output="no password was provided", run_kind="upgrade")
+    assert step.kind == "runbook" and step.runbook == "cask-needs-password"
+    # With no item and a run kind that can't be retried, the same fallback applies
+    bare = recheck_step(NextStep(kind="retry", why="w"), category="password_needed", item=None, output="",
+                        run_kind="relaunch")
+    assert bare.kind == "runbook" and bare.runbook == "cask-needs-password"
+    # No runbook for the category: still no step
+    none = recheck_step(NextStep(kind="retry", why="w"), category="unknown", item=cask, output="", run_kind="upgrade")
+    assert none.kind == "none"

@@ -1,0 +1,282 @@
+{
+  "cases": [
+    {
+      "id": "homebrew-permissions",
+      "family": "runbook",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"runbook": "homebrew-permissions"},
+      "failure": {
+        "what": "job", "what_id": "201", "kind": "upgrade",
+        "subject": "brew:jq", "item_source": "brew", "status": "failed", "actor": "user",
+        "command": ["brew", "upgrade", "--formula", "jq"],
+        "exit_code": 1,
+        "error": "exit 1: Error: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq/1.8.0/bin/jq",
+        "output": "==> Upgrading jq\n  1.7.1 -> 1.8.0\nError: Permission denied @ rb_sysopen - /opt/homebrew/Cellar/jq/1.8.0/bin/jq\n"
+      },
+      "item": {"source": "brew", "package_id": "jq", "name": "jq", "installed": "1.7.1", "available": "1.8.0"},
+      "expected": {
+        "source": "rules", "category": "permissions", "step_kind": "runbook",
+        "runbook": "homebrew-permissions", "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "mac-cask-password-required",
+      "family": "runbook",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"runbook": "cask-needs-password"},
+      "failure": {
+        "what": "job", "what_id": "202", "kind": "upgrade",
+        "subject": "brew-cask:wireshark", "item_source": "brew-cask", "status": "failed", "actor": "autopilot",
+        "command": ["brew", "upgrade", "--cask", "wireshark"],
+        "exit_code": 1,
+        "error": "Wireshark needs your password: run it yourself (brew upgrade --cask wireshark)",
+        "output": "Wireshark needs your password: run it yourself (brew upgrade --cask wireshark)\n"
+      },
+      "item": {"source": "brew-cask", "package_id": "wireshark", "name": "Wireshark", "installed": "4.2.6", "available": "4.4.0", "manual": "brew upgrade --cask wireshark"},
+      "expected": {
+        "source": "rules", "category": "password_needed", "step_kind": "runbook",
+        "runbook": "cask-needs-password", "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "claude-not-logged-in",
+      "family": "runbook",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"runbook": "claude-not-logged-in"},
+      "failure": {
+        "what": "fix", "what_id": "203", "kind": "fix",
+        "subject": "repo:npm:lodash@acme-web", "item_source": "repo", "status": "failed", "actor": "user",
+        "command": [],
+        "exit_code": 1,
+        "error": "Claude Code isn't logged in for this session.",
+        "output": "Claude Code isn't logged in for this session. Run claude and type /login.\n"
+      },
+      "item": {"source": "repo", "package_id": "lodash", "name": "lodash", "installed": "4.17.20", "available": "4.17.21", "ecosystem": "npm", "project": "acme-web"},
+      "expected": {
+        "source": "rules", "category": "not_signed_in", "step_kind": "runbook",
+        "runbook": "claude-not-logged-in", "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "osv-scanner-download-failed",
+      "family": "runbook",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"runbook": "osv-scanner-download"},
+      "failure": {
+        "what": "run", "what_id": "eval-osv", "kind": "refresh",
+        "subject": "everything", "item_source": "", "status": "failed", "actor": "schedule",
+        "command": [],
+        "exit_code": 1,
+        "error": "osv-scanner could not be installed: checksum mismatch",
+        "output": "osv-scanner could not be installed: checksum mismatch while verifying release binary\n"
+      },
+      "expected": {
+        "source": "rules", "category": "tool_missing", "step_kind": "runbook",
+        "runbook": "osv-scanner-download", "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "bosun-update-not-signed",
+      "family": "runbook",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"runbook": "update-not-signed"},
+      "failure": {
+        "what": "run", "what_id": "eval-selfupd", "kind": "refresh",
+        "subject": "everything", "item_source": "", "status": "failed", "actor": "schedule",
+        "command": [],
+        "exit_code": 1,
+        "error": "update refused: 9f8e7d6 is not signed by a trusted key",
+        "output": "update refused: 9f8e7d6 is not signed by a trusted key\n"
+      },
+      "expected": {
+        "source": "rules", "category": "signature_check", "step_kind": "runbook",
+        "runbook": "update-not-signed", "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "winget-installer-hash-mismatch",
+      "family": "runbook",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"runbook": "winget-installer-failed"},
+      "failure": {
+        "what": "job", "what_id": "204", "kind": "upgrade",
+        "subject": "winget:Mozilla.Firefox", "item_source": "winget", "status": "failed", "actor": "autopilot",
+        "command": ["winget", "upgrade", "--id", "Mozilla.Firefox", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "Installer hash does not match; this cannot be overridden when running as admin",
+        "output": "Downloading installer...\nInstaller hash does not match; this cannot be overridden when running as admin\n"
+      },
+      "item": {"source": "winget", "package_id": "Mozilla.Firefox", "name": "Firefox", "installed": "132.0", "available": "133.0"},
+      "expected": {
+        "source": "rules", "category": "signature_check", "step_kind": "runbook",
+        "runbook": "winget-installer-failed", "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "caskguard-signature-refused",
+      "family": "needs_person",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"needs_person_index": 4},
+      "failure": {
+        "what": "job", "what_id": "205", "kind": "upgrade",
+        "subject": "brew-cask:vlc", "item_source": "brew-cask", "status": "failed", "actor": "autopilot",
+        "command": ["brew", "upgrade", "--cask", "vlc"],
+        "exit_code": 1,
+        "error": "Stopped: the new VLC.app is signed by someone else (team ID mismatch). Previous copy restored.",
+        "output": "Stopped: the new VLC.app is signed by someone else (team ID mismatch). Previous copy restored.\n"
+      },
+      "item": {"source": "brew-cask", "package_id": "vlc", "name": "VLC", "installed": "3.0.20", "available": "3.0.21"},
+      "expected": {
+        "source": "rules", "category": "signature_check", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "storeguard-app-store-copy",
+      "family": "needs_person",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"needs_person_index": 5},
+      "failure": {
+        "what": "job", "what_id": "206", "kind": "upgrade",
+        "subject": "brew-cask:slack", "item_source": "brew-cask", "status": "failed", "actor": "autopilot",
+        "command": ["brew", "upgrade", "--cask", "slack"],
+        "exit_code": 1,
+        "error": "Not run: Slack.app is the App Store's copy of Slack. Nothing was changed.",
+        "output": "Not run: Slack.app is the App Store's copy of Slack. Nothing was changed.\n"
+      },
+      "item": {"source": "brew-cask", "package_id": "slack", "name": "Slack", "installed": "4.40.0", "available": "4.41.0"},
+      "expected": {
+        "source": "rules", "category": "app_store_copy", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "storeguard-unknown-cask-installs",
+      "family": "needs_person",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"needs_person_index": 6},
+      "failure": {
+        "what": "job", "what_id": "207", "kind": "upgrade",
+        "subject": "brew-cask:custom-pkg", "item_source": "brew-cask", "status": "failed", "actor": "autopilot",
+        "command": ["brew", "upgrade", "--cask", "custom-pkg"],
+        "exit_code": 1,
+        "error": "Not run: Bosun could not tell which app custom-pkg installs while App Store apps are present.",
+        "output": "Not run: Bosun could not tell which app custom-pkg installs while App Store apps are present.\n"
+      },
+      "item": {"source": "brew-cask", "package_id": "custom-pkg", "name": "Custom Pkg", "installed": "1.0", "available": "1.1"},
+      "expected": {
+        "source": "rules", "category": "app_store_copy", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "homebrew-active-lock",
+      "family": "retry_why",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"retry_why_index": 1},
+      "failure": {
+        "what": "job", "what_id": "208", "kind": "upgrade",
+        "subject": "brew:ripgrep", "item_source": "brew", "status": "failed", "actor": "autopilot",
+        "command": ["brew", "upgrade", "--formula", "ripgrep"],
+        "exit_code": 1,
+        "error": "Error: Another active Homebrew update process is already in progress.",
+        "output": "Error: Another active Homebrew update process is already in progress.\nPlease wait for it to finish or terminate it to continue.\n"
+      },
+      "item": {"source": "brew", "package_id": "ripgrep", "name": "ripgrep", "installed": "14.1.0", "available": "14.1.1"},
+      "expected": {
+        "source": "rules", "category": "busy_or_locked", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "sudo-sorry-try-again",
+      "family": "retry_why",
+      "eval_kind": "rules",
+      "platform": "mac",
+      "covers": {"retry_why_index": 0},
+      "failure": {
+        "what": "job", "what_id": "209", "kind": "manual",
+        "subject": "brew-cask:docker", "item_source": "brew-cask", "status": "failed", "actor": "user",
+        "command": ["brew", "upgrade", "--cask", "docker"],
+        "exit_code": 1,
+        "error": "Sorry, try again.",
+        "output": "Password:\nSorry, try again.\nsudo: 3 incorrect attempts\n"
+      },
+      "item": {"source": "brew-cask", "package_id": "docker", "name": "Docker", "installed": "4.34.0", "available": "4.35.0"},
+      "expected": {
+        "source": "rules", "category": "password_needed", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      }
+    },
+    {
+      "id": "winget-git-in-use",
+      "family": "in_use",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"in_use": "winget:Git.Git"},
+      "failure": {
+        "what": "job", "what_id": "210", "kind": "upgrade",
+        "subject": "winget:Git.Git", "item_source": "winget", "status": "failed", "actor": "user",
+        "command": ["winget", "upgrade", "--id", "Git.Git", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "Installer failed with exit code: 1",
+        "output": "Starting package install...\nInstaller failed with exit code: 1\n"
+      },
+      "item": {"source": "winget", "package_id": "Git.Git", "name": "Git", "installed": "2.46.0", "available": "2.47.1"},
+      "expected": {
+        "source": "rules", "category": "in_use", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "winget-virtualbox-in-use",
+      "family": "in_use",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"in_use": "winget:Oracle.VirtualBox"},
+      "failure": {
+        "what": "job", "what_id": "211", "kind": "upgrade",
+        "subject": "winget:Oracle.VirtualBox", "item_source": "winget", "status": "failed", "actor": "user",
+        "command": ["winget", "upgrade", "--id", "Oracle.VirtualBox", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "Installer failed with exit code: 1",
+        "output": "Starting package install...\nInstaller failed with exit code: 1\n"
+      },
+      "item": {"source": "winget", "package_id": "Oracle.VirtualBox", "name": "VirtualBox", "installed": "7.0.20", "available": "7.1.4"},
+      "expected": {
+        "source": "rules", "category": "in_use", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      }
+    },
+    {
+      "id": "winget-docker-desktop-in-use",
+      "family": "in_use",
+      "eval_kind": "rules",
+      "platform": "windows",
+      "covers": {"in_use": "winget:Docker.DockerDesktop"},
+      "failure": {
+        "what": "job", "what_id": "212", "kind": "upgrade",
+        "subject": "winget:Docker.DockerDesktop", "item_source": "winget", "status": "failed", "actor": "user",
+        "command": ["winget", "upgrade", "--id", "Docker.DockerDesktop", "--exact", "--silent"],
+        "exit_code": 1,
+        "error": "Installer failed with exit code: 1",
+        "output": "Starting package install...\nInstaller failed with exit code: 1\n"
+      },
+      "item": {"source": "winget", "package_id": "Docker.DockerDesktop", "name": "Docker Desktop", "installed": "4.34.0", "available": "4.35.0"},
+      "expected": {
+        "source": "rules", "category": "in_use", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      }
+    }
+  ]
+}

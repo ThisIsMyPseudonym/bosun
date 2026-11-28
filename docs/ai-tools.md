@@ -212,3 +212,9 @@ When an upgrade, fix, or refresh fails, Bosun produces one **verdict**: the like
 **Privacy and off switch.** Model triage sends redacted failure output (secrets stripped) to your chosen AI provider. Open **AI usage → Error triage** to turn **Triage failures automatically** off or change the daily limit (0–100). Turning it off keeps failure output on your computer unless you click **Triage**; rules and cache still run. Only you can change this setting, start model triage, or mark a verdict **Helpful** or **Wrong**; agents and Ask Bosun can read verdicts (`get_triage`, `diagnose`, `v_triage`) and nothing more.
 
 **Safety.** A model triage call runs as actor `triage` with read-only tools scoped to that single run and Bosun's runbooks, capped at 8 tool calls and 120 seconds. Before saving a verdict, Bosun verifies every evidence line against redacted output, checks any recipe or runbook name against what Bosun actually offers, and strips URLs, shell commands, or markup from text fields. Demo mode runs rules only and never starts an AI CLI.
+
+**Evaluating error triage.** Normal test runs execute the offline fixture suite under `tests/fixtures/triage/` with zero real AI calls (rules, cache, outage-only, and scripted model/hostile cases). To evaluate real installed locked-down CLIs (`claude`, `codex`, `gemini`) on a bounded temporary database (spends real tokens and prints per-case tokens, window draw, category accuracy, and invalid-step count):
+
+```
+BOSUN_LIVE_EVALS=1 uv run pytest tests/test_triage_evals.py -k live -s
+```

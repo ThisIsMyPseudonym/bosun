@@ -117,10 +117,12 @@ def recheck_step(
                 return NextStep(kind="retry", runbook=rb, why=step.why)
             if item.project_scoped:
                 return NextStep(kind="agent_prompt", why=step.why)
-            return NextStep(kind="runbook", runbook=rb, why=step.why) if rb else NextStep(kind="none", why=step.why)
+            return NextStep(kind="runbook", runbook=rb, why=step.why) if rb else _runbook_or_none(
+                category, item, output, step.why)
         if run_kind in _RETRYABLE_RUN_KINDS:
             return NextStep(kind="retry", runbook=rb, why=step.why)
-        return NextStep(kind="runbook", runbook=rb, why=step.why) if rb else NextStep(kind="none", why=step.why)
+        return NextStep(kind="runbook", runbook=rb, why=step.why) if rb else _runbook_or_none(
+            category, item, output, step.why)
 
     if step.kind == "agent_prompt":
         if (item is not None and item.project_scoped) or run_kind == "fix":

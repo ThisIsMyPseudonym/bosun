@@ -10,6 +10,7 @@ uv run bosun actions          # everything Bosun can do, with its risk tier (--j
 uv run bosun db               # the database's path and schema migrations
 uv run bosun db --doc > docs/data-model.md   # after a schema or view change (a test fails if it is stale)
 BOSUN_LIVE_EVALS=1 uv run pytest tests/test_assistant_evals.py -k live -s   # the assistant against real Claude (cents)
+BOSUN_LIVE_EVALS=1 uv run pytest tests/test_triage_evals.py -k live -s      # error triage against installed CLIs (opt-in)
 uv run pytest -m upgrade      # the upgrade path from the previous release (needs the network; not in the default run)
 ```
 
