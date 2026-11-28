@@ -215,7 +215,14 @@ class PinMcpScope(_Strict):
 
 
 class AppActionScope(_Strict):
-    app: str = Field(min_length=1, max_length=1000)
+    mode: Literal["app", "trigger_app"] = "app"
+    app: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def _require_app(self) -> AppActionScope:
+        if self.mode == "app" and not self.app.strip():
+            raise ValueError("app is required when mode is 'app'")
+        return self
 
 
 Scope = (
@@ -298,6 +305,8 @@ class AutomationDef(_Strict):
             raise ValueError(f"scope must match action {self.action!r}")
         if self.action in SYSTEM_ACTIONS and self.mode != "ask":
             raise ValueError(f"system action {self.action!r} must always ask first (mode='ask')")
+        if isinstance(self.scope, AppActionScope) and self.scope.mode == "trigger_app" and self.trigger.kind != "in_app_update":
+            raise ValueError("trigger_app scope requires the in_app_update trigger")
         if self.action == "notify" and self.mode != "run":
             raise ValueError("notify automations always use mode='run'")
         return self
@@ -325,7 +334,7 @@ def grant_digest(defn: AutomationDef) -> str:
         "trigger": defn.trigger.model_dump(mode="json"),
         "conditions": defn.conditions.model_dump(mode="json"),
         "action": defn.action,
-        "scope": defn.scope.model_dump(mode="json"),
+        "scope": defn.scope.model_dump(mode="json", exclude={"mode"} if isinstance(defn.scope, AppActionScope) and defn.scope.mode == "app" else None),
         "mode": defn.mode,
         "delay_s": defn.delay_s,
         "max_per_day": defn.max_per_day,
@@ -385,4 +394,5 @@ def describe_scope(defn: AutomationDef) -> str:
         return f"Run Branch + test on {scope.lane} items in {proj}, {cap} (sandboxed, never pushes; up to {defn.model_jobs_per_day} AI jobs/day)."
     if isinstance(scope, PinMcpScope):
         return f"Pin {len(scope.keys)} listed MCP server(s), {cap}; the 3-day waiting period still applies."
-    return f"Offer to {defn.action.replace('_', ' ')} {scope.app} (asks for your approval each time)."
+    target = "apps with an in-app update waiting" if scope.mode == "trigger_app" else scope.app
+    return f"Offer to {defn.action.replace('_', ' ')} {target} (asks for your approval each time)."

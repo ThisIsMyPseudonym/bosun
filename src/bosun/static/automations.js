@@ -86,6 +86,109 @@ async function deleteRule(rule) {
   }
 }
 
+const DECIDING = new Set();
+const isDecidedConflict = (err) => !!(err && (err.status === 409
+  || /already (decided|declined)|no longer open/i.test(String(err.message || ""))));
+
+async function decideOffer(offer, approve, btns = []) {
+  if (DECIDING.has(offer.id)) return;
+  DECIDING.add(offer.id);
+  const prev = btns.map((b) => [b, !!(b && b.disabled)]);
+  for (const [b] of prev) if (b) b.disabled = true;
+  try {
+    await api(`/api/automations/firings/${offer.id}/decide`, {
+      method: "POST",
+      body: JSON.stringify({ approve: !!approve }),
+    });
+  } catch (err) {
+    if (!isDecidedConflict(err)) alert(`Could not ${approve ? "approve" : "decline"} offer: ${err.message}`);
+  } finally {
+    DECIDING.delete(offer.id);
+    for (const [b, was] of prev) if (b) b.disabled = was;
+    fetchAutomations(true);
+    if (MC.refreshNow) MC.refreshNow().catch(() => {});
+  }
+}
+
+function isOfferExpired(offer) {
+  return !!(offer.expired || offer.status === "expired" || (offer.deadline && Date.now() / 1000 >= offer.deadline));
+}
+
+function cleanOfferText(raw, limit = 80) {
+  const s = String(raw == null ? "" : raw)
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/[\x00-\x1f\x7f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ")
+    .replace(/\s+/g, " ").trim();
+  return s.length > limit ? `${s.slice(0, limit - 1).trimEnd()}…` : s;
+}
+
+function offerItemsText(items, max = 6) {
+  const list = Array.isArray(items) ? items : [];
+  const head = list.slice(0, max).map((it) => {
+    const name = cleanOfferText(it && (it.name || it.key), 40);
+    const inst = cleanOfferText(it && it.installed, 30), avail = cleanOfferText(it && it.available, 30);
+    const ver = inst && avail ? ` (${inst} → ${avail})` : avail ? ` (${avail})` : "";
+    return `${name}${ver}`;
+  }).filter(Boolean).join(", ");
+  return cleanOfferText(list.length > max ? `${head} and ${list.length - max} more` : head, 200);
+}
+
+function offerTargetText(offer) {
+  const inp = offer && typeof offer.input === "object" && offer.input ? offer.input : {};
+  const parts = [];
+  const act = cleanOfferText(offer && offer.action, 40);
+  if (act) parts.push(act);
+  if (typeof inp.app === "string" && inp.app.trim()) parts.push(cleanOfferText(inp.app, 40));
+  else if (typeof inp.key === "string" && inp.key.trim()) parts.push(cleanOfferText(inp.key, 60));
+  else if (Array.isArray(inp.keys) && inp.keys.length) {
+    const ks = inp.keys.slice(0, 4).map((k) => cleanOfferText(k, 40)).filter(Boolean).join(", ");
+    if (ks) parts.push(inp.keys.length > 4 ? `${ks} and ${inp.keys.length - 4} more` : ks);
+  } else if (typeof inp.project === "string" && inp.project.trim()) parts.push(cleanOfferText(inp.project, 60));
+  else if (Array.isArray(inp.only) && inp.only.length) {
+    const only = inp.only.slice(0, 5).map((x) => cleanOfferText(x, 24)).filter(Boolean).join(", ");
+    if (only) parts.push(only);
+  }
+  return cleanOfferText(parts.join(" · "), 160);
+}
+
+function offerCard(offer, isDemo) {
+  const expired = isOfferExpired(offer);
+  const busy = DECIDING.has(offer.id);
+  const itemsLine = offerItemsText(offer.items);
+  const targetText = offerTargetText(offer);
+  const statusLine = expired
+    ? "This offer expired after 24 hours and can no longer be approved."
+    : offer.deadline ? `Waiting for your approval · expires ${MC.clock(offer.deadline)}` : "Waiting for your approval";
+  const btns = [];
+  const mkBtn = (cls, text, approve) => {
+    const b = el("button", { class: cls, disabled: isDemo || expired || busy || null, text, onclick: () => decideOffer(offer, approve, btns) });
+    btns.push(b);
+    return b;
+  };
+  return el("article", { class: `panel auto-offer${expired ? " auto-offer-expired" : ""}` },
+    el("div", { class: "auto-card-top" },
+      el("strong", { text: cleanOfferText(offer.automation_name || `Automation #${offer.automation_id}`, 80) }),
+      el("div", { class: "auto-chips" },
+        el("span", { class: `auto-chip ${expired ? "auto-bad" : "auto-warn"}`, text: expired ? "Expired" : "Needs approval" }))),
+    el("p", { class: "auto-sentence", text: cleanOfferText(offer.action_label || offer.action || "Run automation", 140) }),
+    itemsLine ? el("div", { class: "auto-meta", text: `Items: ${itemsLine}` }) : null,
+    offer.why ? el("div", { class: "auto-meta", text: cleanOfferText(offer.why, 120) }) : null,
+    targetText ? el("div", { class: "auto-offer-input" },
+      el("span", { class: "hint", text: "Target: " }),
+      el("code", { text: targetText })) : null,
+    el("div", { class: "auto-offer-foot" },
+      el("span", { class: "auto-meta", text: statusLine }),
+      el("div", { class: "auto-offer-actions" }, mkBtn("quiet", "Decline", false), mkBtn("primary", "Approve", true))));
+}
+
+function offersPanel(offers, isDemo) {
+  const list = offers || [];
+  if (!list.length) return null;
+  return el("section", { class: "auto-section auto-offers" },
+    el("h2", { text: "Waiting offers" }),
+    el("div", { class: "auto-list" }, ...list.map((o) => offerCard(o, isDemo))));
+}
+
 function headerBar(data, onNew) {
   const paused = !!data.paused;
   const isDemo = !!data.demo;
@@ -185,12 +288,18 @@ function rulesSection(title, items, isDemo, onEdit) {
 MC.automationsHelpers = {
   headerBar,
   ruleCard,
+  offerCard,
+  offersPanel,
+  cleanOfferText,
+  offerItemsText,
+  offerTargetText,
   historyPanel,
   fetchAutomations,
   setPaused,
   toggleRule,
   renewRule,
   deleteRule,
+  decideOffer,
 };
 
 MC.views.automations = function automations() {
@@ -231,6 +340,7 @@ MC.views.automations = function automations() {
     headerBar(data, () => openEdit(null)),
     pausedBanner,
     demoBanner,
+    offersPanel(data.waiting_offers || [], isDemo),
     editorNode,
     rulesSection("Your automations", custom, isDemo, openEdit),
     rulesSection("Presets", presets, isDemo, openEdit),

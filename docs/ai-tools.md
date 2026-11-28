@@ -218,3 +218,44 @@ When an upgrade, fix, or refresh fails, Bosun produces one **verdict**: the like
 ```
 BOSUN_LIVE_EVALS=1 uv run pytest tests/test_triage_evals.py -k live -s
 ```
+
+## Automations
+
+An automation is one owner-written rule: **when** a trigger fires, **if** its conditions hold, **do** one Bosun action. There are no branches, loops, or free-text expressions. Every field is chosen from a fixed list in **Automations** (sidebar, developer view).
+
+**What automations can do.** Triggers are a completed full refresh, a local schedule (daily or chosen weekdays at `HH:MM`), a stored triage verdict, or a waiting in-app update. The in-app update trigger and its preset do nothing yet. They wait for project 4 (computer use for in-app updates) to add a reader. Allowed actions are:
+
+- **Runs on its own or asks first:** `refresh` (always `auto_upgrade: false`), `recheck_project`, `explain_item`, `upgrade`, `start_fix`, and `pin_mcp`.
+- **Runs on its own only:** `notify` (a code-built "What changed" summary line, no model call).
+- **Always asks first (never runs on its own):** `relaunch_app` and `open_app` (`Risk.SYSTEM`).
+
+**What automations cannot do.** An automation can never call a `user_only` action (such as `set_autopilot`, `set_pref`, `set_notify`, `set_agent_policy`, `set_quota_override`, or any automation write/decision action) and can never push a branch or open a pull request (`Risk.EXTERNAL`). Automation installs are unattended, so every Autopilot guard applies: the 3-day release wait (24 hours for a KEV fix), `hands_off`, `caskguard`, `storeguard`, and no major jumps, drivers, ignored, or snoozed items. Agents and Ask Bosun can read automations (`list_automations`, `list_automation_firings`, `v_automations`, `v_automation_firings`), but can never create, edit, enable, renew, delete, pause, or approve them.
+
+**Presets.** Four presets ship disabled and ungranted:
+
+- **What changed:** after a full refresh, add a code-built summary line to your notifications.
+- **Nightly Branch + test:** daily at `02:00`, run sandboxed Branch + test on Do-now items in a project you pick (never pushes).
+- **Retry when busy:** when a rules verdict marks a failed upgrade `busy_or_locked` and transient, retry that same item and version in 15 minutes.
+- **Offer in-app updates:** when an app has an in-app update waiting, offer to open it so its updater can run (always asks first). This preset does nothing until project 4 (computer use for in-app updates) adds a reader.
+
+**Grants and 90-day renewal.** Saving or enabling a runs-on-its-own `INSTALL` rule (`upgrade`, `start_fix`, `pin_mcp`) shows one sentence with its exact scope and requires checking the grant box. That grant is tied to a digest of the rule and expires after **90 days**; expired rules stop firing and show **Still want this?** with a one-click **Renew** button. `LOCAL` and `notify` grants do not expire. Editing or deleting a rule cancels its waiting firings and open offers while keeping history.
+
+**Offers (asks first).** Any `mode="ask"` rule—and every `Risk.SYSTEM` action—never runs on its own. When triggered, Bosun creates an **offer card** at the top of **Automations** and inside **Needs you** on **Today**, plus at most one notification when notifications are on. Each card shows code-built text naming the action, items, versions, target, and why it fired (never raw input JSON or model prose). Clicking **Approve** re-checks the grant, kill switch, scope, and item guards, atomically claims the offer and its stored input, and spends a single-use approval (`approvals.py`) through `Actions.permit` so the action runs once. Unanswered offers expire after **24 hours** (or sooner if conditions no longer hold) and cannot be approved after expiry. Open offers are capped at 5 per rule and 20 in total.
+
+**Kill switch and CLI.** Click **Pause all automations** on the **Automations** page, or run:
+
+```sh
+uv run bosun automations status   # read-only status (never creates a missing database)
+uv run bosun automations pause    # freeze all automations immediately
+uv run bosun automations resume   # allow automations to run again
+```
+
+Waiting firings and offers stay frozen while paused until you resume.
+
+**Limits and runaway guards.**
+
+- **Dedup and merging:** one firing per automation and event subject; due `upgrade` or `pin_mcp` firings in the same minute merge into one call (up to 20 items).
+- **Rate and global caps:** per-rule `max_per_day` (default 6, max 48), `cooldown_s` (default 15 minutes), `model_jobs_per_day` (default 3), a global cap of 30 firings per day, one automation `INSTALL` in flight at a time, and a 1-hour skip when another rule already did the same work.
+- **Chain limit and circuit breaker:** runs started by an automation can never re-trigger the same rule and stop at chain depth 1 (a failed retry is never retried again). Three consecutive failures pause that rule and notify you once; safety skips do not trip the breaker.
+- **AI quota:** automation `start_fix` and `explain_item` calls always route as background work under the 75% line and call caps, waiting as `waiting_quota` until reset or skipping past their deadline.
+- **Untrusted text and demo mode:** triage verdicts can only decide *whether* a rule matches; action and target come strictly from the saved rule and recorded run tables, never verdict prose. Demo mode never runs the engine, shows disabled controls and seeded offers, and refuses every automation mutation.

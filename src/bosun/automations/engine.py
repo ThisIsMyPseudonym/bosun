@@ -16,7 +16,7 @@ from ..config import Settings
 from ..providers.router import QuotaHeld
 from ..registry import ActionContext, ActionError, Actions, Forbidden
 from ..store import Store
-from . import chain, digest, match as amatch, merge as amerge, recheck, schedule, store as astore, verdict as averdict
+from . import chain, digest, in_app, match as amatch, merge as amerge, offers, recheck, schedule, store as astore, verdict as averdict
 from .schema import (MODEL_ACTIONS, AutomationDef, RefreshConditions, ScheduleConditions, ScheduleTrigger,
                      grant_digest, grant_digest_matches, grant_expired, has_unset_project, is_install_action)
 
@@ -43,6 +43,8 @@ class TickReport:
     failed: int = 0
     paused: bool = False
     errors: int = 0
+    offered: int = 0
+    expired: int = 0
 
 
 def _skip_summary(skipped: Any) -> str:
@@ -57,11 +59,12 @@ def _skip_summary(skipped: Any) -> str:
 class Automator:
     """Single-writer automation engine running in the dashboard process only."""
 
-    def __init__(self, store: Store, settings: Settings, actions: Actions, *, tz: tzinfo | None = None) -> None:
-        self.store = store
-        self.settings = settings
-        self.actions = actions
-        self.tz = tz
+    def __init__(
+        self, store: Store, settings: Settings, actions: Actions,
+        *, tz: tzinfo | None = None, in_app_reader: in_app.InAppUpdateReader = in_app.empty_reader,
+    ) -> None:
+        self.store, self.settings, self.actions, self.tz = store, settings, actions, tz
+        self.in_app_reader = in_app_reader
         self._tick_lock = threading.Lock()
         self._busy = False
 
@@ -93,14 +96,17 @@ class Automator:
     def _tick_locked(self, when: float) -> TickReport:
         if astore.is_paused(self.store):
             return TickReport(paused=True)
+        expired = offers.expire_offers(self.store, when)
         rules = self._active_rules()
         scanned = (
             self._scan_refreshes(rules, when)
             + self._scan_schedules(rules, when)
             + averdict.scan_verdicts(self.store, rules, when)
+            + in_app.scan_in_app_updates(self.store, rules, when, self.in_app_reader)
         )
-        ran, skipped, waiting, failed = self._execute_due(when)
-        return TickReport(scanned=scanned, ran=ran, skipped=skipped, waiting=waiting, failed=failed)
+        ran, skipped, waiting, failed, offered = self._execute_due(when)
+        return TickReport(scanned=scanned, ran=ran, skipped=skipped, waiting=waiting,
+                          failed=failed, offered=offered, expired=expired)
 
     def _active_rules(self) -> dict[int, tuple[dict[str, Any], AutomationDef]]:
         out: dict[int, tuple[dict[str, Any], AutomationDef]] = {}
@@ -238,9 +244,8 @@ class Automator:
             return ("skipped", f"daily model job limit reached ({defn.model_jobs_per_day}/day)")
         return None
 
-    def _execute_due(self, when: float) -> tuple[int, int, int, int]:
-        ran = waiting = failed = 0
-        skipped = self._expire_past_deadline(when)
+    def _execute_due(self, when: float) -> tuple[int, int, int, int, int]:
+        counts = {"done": 0, "skipped": self._expire_past_deadline(when), "waiting": 0, "failed": 0, "offered": 0}
         queue = list(astore.due_firings(self.store, now=when, limit=MAX_PER_TICK))
         handled: set[int] = set()
         steps = 0
@@ -259,15 +264,9 @@ class Automator:
                 nxt = astore.get_firing(self.store, overflow[0])
                 if nxt is not None:
                     queue.append(nxt)
-            if outcome == "done":
-                ran += 1
-            elif outcome == "skipped":
-                skipped += 1
-            elif outcome == "waiting":
-                waiting += 1
-            elif outcome == "failed":
-                failed += 1
-        return ran, skipped, waiting, failed
+            if outcome in counts:
+                counts[outcome] += 1
+        return counts["done"], counts["skipped"], counts["waiting"], counts["failed"], counts["offered"]
 
     def _run_isolated(self, firing: dict[str, Any], when: float) -> tuple[str, set[int], tuple[int, ...]]:
         try:
@@ -301,10 +300,13 @@ class Automator:
         if stop is not None:
             astore.set_firing(self.store, fid, status=stop[0], reason=stop[1], now=when)
             return "skipped", {fid}, ()
-        if is_install_action(defn.action) and astore.active_install_firing(self.store) is not None:
+        is_offer = offers.requires_offer(defn)
+        if not is_offer and is_install_action(defn.action) and astore.active_install_firing(self.store) is not None:
             astore.set_firing(self.store, fid, due=when + INSTALL_WAIT_BACKOFF_S, now=when)
             return "waiting", {fid}, ()
         if defn.action in amerge.MERGEABLE_ACTIONS:
+            if is_offer:
+                return amerge.offer_merged(self.store, aid, defn, firing, when)
             return amerge.run_merged(
                 self.store, self.actions, aid, defn, firing, when, on_failure=self._check_circuit_breaker,
             )
@@ -319,6 +321,8 @@ class Automator:
                 reason=f"already handled by {dup['automation_name']} within the last hour", now=when,
             )
             return "skipped", {fid}, ()
+        if is_offer:
+            return offers.create_offer(self.store, aid, defn, firing, resolved, when)[0], {fid}, ()
         if defn.action == "notify":
             return self._run_notify(fid, aid, defn, resolved, when), {fid}, ()
         return self._run_action(firing, aid, defn, resolved, when), {fid}, ()

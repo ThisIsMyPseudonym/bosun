@@ -61,7 +61,8 @@ def test_demo_refuses_actions_that_open_or_look_at_the_machine(client):
                        ("/api/automations/1/enabled", {"enabled": True}),
                        ("/api/automations/1/renew", {}),
                        ("/api/automations/1/delete", {}),
-                       ("/api/automations/pause", {"on": True})):
+                       ("/api/automations/pause", {"on": True}),
+                       ("/api/automations/firings/1/decide", {"approve": True})):
         r = client.post(path, json=body)
         assert r.status_code == 403 and "This is demo data" in r.text
     for path in ("/api/ai/logins", "/api/ai/routing"):
@@ -181,5 +182,9 @@ def test_demo_serves_seeded_automations_and_firings(client):
     by_preset = {a["preset"]: a for a in body["automations"]}
     assert {"what_changed", "nightly_fix"} <= set(by_preset)
     assert all(a["enabled"] is False for a in body["automations"])
+    assert len(body["waiting_offers"]) >= 1
+    assert body["waiting_offers"][0]["action_label"]
     rf = client.get("/api/automations/firings")
     assert rf.status_code == 200 and rf.json()["demo"] is True and len(rf.json()["firings"]) >= 2
+    st = client.get("/api/state").json()
+    assert st["demo"] is True and len(st["automation_offers"]) >= 1

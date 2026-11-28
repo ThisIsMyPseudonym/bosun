@@ -40,7 +40,8 @@ USER_ONLY = {"set_autopilot": {"on": True},
              "set_automation_enabled": {"automation_id": 1, "enabled": True},
              "renew_automation": {"automation_id": 1},
              "delete_automation": {"automation_id": 1},
-             "pause_automations": {"on": True}}
+             "pause_automations": {"on": True},
+             "decide_offer": {"firing_id": 1, "approve": False}}
 YOURS_ALONE = {"restore_app"}  # not a limit: it replaces an app with an older copy, which only a person decides
 PANEL = {n for n, sp in SPECS.items() if sp.panel}  # the Ask Bosun panel's own actions: tests/test_assistant.py
 
@@ -211,6 +212,13 @@ def test_nobody_but_the_user_loosens_a_limit(app, agent, user, name):
         with app.store._tx(write=True) as db:
             db.execute("UPDATE automations SET grant_digest=?, granted_by='user', granted_at=1.0 WHERE id=?",
                        (grant_digest(astore.parse_def(row)), row["id"]))
+    if name == "decide_offer":  # deciding requires an open offer firing row
+        from bosun.automations import store as astore
+        now = time.time()
+        astore.insert_firing(
+            app.store, 1, "Offer", "refresh", "snap:1", "auth-offer:1",
+            status="offered", deadline=now + 86400.0, input_data={"app": "chrome"}, now=now,
+        )
     assert user.post(path, json=USER_ONLY[name], headers=USER).status_code == 200
 
 

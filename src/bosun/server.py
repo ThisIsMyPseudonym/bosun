@@ -47,14 +47,15 @@ from .config import Settings
 from .refresh import COLLECTORS, recheck, recheck_project, refresh
 from .registry import (ActionContext, ActionError, Actions, ActionSpec, AgentPolicyIn, AskIn, AutomationFiringsIn,
                        AutomationIdIn, AutomationToggleIn, Conflict, ConversationIn, ConversationsIn, DecideIn, Empty,
-                       Failed, FixIdIn, FixIn, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
-                       NotFound, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk,
+                       Failed, FixIdIn, FixIn, Forbidden, Invalid, DiagnoseIn, JobIn, BundleIn, KeyIn, KeysIn, ListPrefsIn,
+                       NotFound, OfferDecideIn, OnIn, PinIn, PrefIn, ProjectIn, RecipesIn, RefreshIn, RelaunchIn, QueryIn, Risk,
                        RunbookIn, RunIn, RunManyIn, RunsIn, SaveAutomationIn, TraceIn, TriageFeedbackIn, TriageIn,
                        TriageSettingsIn, TypeIn, ViewIn, UsageIn, AiLoginIn, AiLoginSetIn, AiRoutingIn, AiOverrideIn)
 from .serialize import compact, item_from_dict
 from .store import Store
 from .providers import accounts as ai_accounts, router as ai_router, routing as ai_routing, usage as ai_usage
-from .automations import api as aapi, engine as aengine, presets as apresets, store as astore
+from .automations import (api as aapi, engine as aengine, offer_decide as adecide, offers as aoffers,
+                          presets as apresets, store as astore)
 from .triage import model as tmodel, settings as tsettings, store as tstore, worker as tworker
 
 log = logging.getLogger(__name__)
@@ -363,6 +364,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                             "coverage": _coverage(), "kept": _kept(), "rejected": _rejected()},
                 "history": store.history(), "autopilot": _autopilot(snap), "relaunch": _pending_relaunch(),
                 "notify": {"on": notify.is_on(store)},
+                "demo": s.demo,
+                "automation_offers": adecide.waiting_offers(store),
                 "agents": registry.agent_policy(store),
                 "assistant": {"model": assistant.model if assistant else s.model,
                               "login": assistant.login if assistant else "claude"},
@@ -630,10 +633,19 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     def start_relaunch(ctx: ActionContext, body: RelaunchIn):
         if body.app not in relaunch.APPS:
             raise NotFound("Unknown app")
+        if registry.is_automation(ctx.actor):
+            when = time.time() if ctx.now is None else ctx.now
+            known = _items_by_key()
+            for k in relaunch.APPS[body.app].item_keys:
+                if k in known:
+                    why = aoffers._check_app_item_guards(store, k, when)
+                    if why is not None:
+                        raise Forbidden(f"relaunch_app refused for automation: {why}")
         key = f"relaunch:{body.app}"
         if store.active_job_for(key):
             raise Conflict("Already relaunching")
-        job_id = store.create_job(key, ["relaunch", body.app], status="running")
+        actor = None if ctx.actor == "user" else ctx.actor
+        job_id = store.create_job(key, ["relaunch", body.app], status="running", actor=actor)
         trace.thread(_run_relaunch, (body.app, job_id), name="relaunch")
         return {"job": job_id}
 
@@ -835,6 +847,11 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         bundle = _app_bundle(item) if item else None
         if bundle is None or not bundle.is_dir():
             raise NotFound("Unknown app; refresh and try again")
+        if registry.is_automation(ctx.actor):
+            when = time.time() if ctx.now is None else ctx.now
+            why = aoffers._check_app_item_guards(store, body.key, when)
+            if why is not None:
+                raise Forbidden(f"open_app refused for automation: {why}")
         try:
             subprocess.Popen(["/usr/bin/open", str(bundle)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
@@ -1212,6 +1229,12 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
     @actions.bind("pause_automations")
     def pause_automations(ctx: ActionContext, body: OnIn):
         return aapi.pause_automations(store, body.on)
+
+    @actions.bind("decide_offer")
+    def decide_offer(ctx: ActionContext, body: OfferDecideIn):
+        return adecide.decide_offer(
+            store, actions, approvals, body.firing_id, body.approve, actor=ctx.actor, now=ctx.now,
+        )
 
     @actions.bind("get_runbook")
     def get_runbook(ctx: ActionContext, body: RunbookIn):

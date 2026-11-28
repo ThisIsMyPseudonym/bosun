@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from .. import attention, autopilot
 from ..enrich import explain
-from ..registry import FixIn, KeyIn, KeysIn, PinIn, ProjectIn, RefreshIn, RelaunchIn
+from ..registry import FixIn, KeysIn, PinIn, ProjectIn, RefreshIn
 from ..serialize import item_from_dict
 from ..store import Store
 from . import store as astore
@@ -256,7 +256,8 @@ def resolve_input(
         keys = _resolve_pin_keys(store, scope, event, now, is_verdict=is_verdict)
         return {"keys": keys} if keys else None
     if isinstance(scope, AppActionScope):
-        return {"app": scope.app} if defn.action == "relaunch_app" else {"key": scope.app}
+        from . import in_app
+        return in_app.resolve_app_scope(store, defn, scope, event, now)
     return None
 
 
@@ -388,8 +389,6 @@ def input_in_scope(
             return False
         return _verdict_keys_ok(store, body.keys, fids, automation_id) if is_verdict else True
     if isinstance(scope, AppActionScope):
-        if defn.action == "relaunch_app":
-            return isinstance(body, RelaunchIn) and body.app == scope.app
-        if defn.action == "open_app":
-            return isinstance(body, KeyIn) and body.key == scope.app
+        from . import in_app
+        return in_app.app_input_in_scope(store, defn, scope, body, fids, automation_id)
     return False

@@ -128,7 +128,43 @@ function systemUpdatesEntry(pkgs) {
            verb: `Open ${MC.MACHINE.updates}`, act: () => MC.actions.openUpdates(), open: () => { location.hash = "#/pc"; } };
 }
 
-MC.todayHelpers = { machineEntry, failedEntry };
+const OFFER_BUSY = new Set();
+async function decideTodayOffer(offer, approve, btns = []) {
+  if (OFFER_BUSY.has(offer.id)) return;
+  OFFER_BUSY.add(offer.id);
+  const prev = btns.map((b) => [b, !!(b && b.disabled)]);
+  for (const [b] of prev) if (b) b.disabled = true;
+  try { await api(`/api/automations/firings/${offer.id}/decide`, { method: "POST", body: JSON.stringify({ approve: !!approve }) }); }
+  catch (err) {
+    const conflict = err && (err.status === 409 || /already (decided|declined)|no longer open/i.test(String(err.message || "")));
+    if (!conflict && MC.banner) MC.banner(`Could not ${approve ? "approve" : "decline"} offer: ${err.message}`);
+  } finally {
+    OFFER_BUSY.delete(offer.id);
+    for (const [b, was] of prev) if (b) b.disabled = was;
+    if (MC.refreshNow) MC.refreshNow().catch(() => {});
+  }
+}
+
+const cleanOffer = (raw, limit = 80) => (MC.automationsHelpers && MC.automationsHelpers.cleanOfferText
+  ? MC.automationsHelpers.cleanOfferText(raw, limit) : String(raw == null ? "" : raw).replace(/\s+/g, " ").trim().slice(0, limit));
+function offerCard(offer, isDemo) {
+  const expired = !!(offer.expired || offer.status === "expired" || (offer.deadline && Date.now() / 1000 >= offer.deadline));
+  const ah = MC.automationsHelpers || {}, busy = OFFER_BUSY.has(offer.id);
+  const items = ah.offerItemsText ? ah.offerItemsText(offer.items, 4) : "";
+  const sub = [cleanOffer(offer.why || "Waiting for approval", 120), ah.offerTargetText ? ah.offerTargetText(offer) : cleanOffer(offer.action, 40)].filter(Boolean).join(" · ");
+  const stop = (fn) => (ev) => { ev.stopPropagation(); return fn(); };
+  const btns = [], mk = (cls, text, approve) => { const b = el("button", { class: cls, disabled: isDemo || expired || busy || null, text, onclick: stop(() => decideTodayOffer(offer, approve, btns)) }); btns.push(b); return b; };
+  return el("div", { class: `need need-offer${expired ? " need-offer-expired" : ""}` }, MC.glyph("bolt", "md"),
+    el("div", { class: "body" },
+      el("div", { class: "title" },
+        el("strong", { class: "name", text: cleanOffer(offer.automation_name || `Automation #${offer.automation_id}`, 80) }),
+        el("span", { class: "chip", text: expired ? "Expired" : "Automation offer" })),
+      el("div", { class: "line", text: cleanOffer(offer.action_label || offer.action || "Run automation", 140) }),
+      items ? el("div", { class: "line offer-sub", text: items }) : null,
+      el("div", { class: "line offer-sub", text: expired ? "This offer expired after 24 hours and can no longer be approved." : sub })),
+    el("div", { class: "offer-btns" }, mk("quiet", "Decline", false), mk("primary", "Approve", true)));
+}
+MC.todayHelpers = { machineEntry, failedEntry, offerCard, decideTodayOffer };
 
 MC.needsYou = function needsYou(S, scopes) {
   const staged = S.relaunch || [], covered = new Set(staged.flatMap((r) => r.keys));
@@ -158,14 +194,16 @@ function needRow(n, filled) {
 }
 
 function needsPanel(S, scopes, needs) {
+  const offers = S.automationOffers || [];
   const shown = S.needsAll ? needs : needs.slice(0, 6);
   const first = shown.findIndex((n) => n.verb);
   return el("section", { class: "panel needs" },
     el("div", { class: "sec" }, el("h3", { text: "Needs you" }),
       needs.length ? el("button", { class: "link accent", text: "What should I do first?", title: "Ask Bosun",
         onclick: () => MC.ask("What should I do first?", { page: "today" }) }) : null),
-    needs.length ? el("div", {}, ...shown.map((n, i) => needRow(n, i === first)))
-      : el("p", { class: "empty", text: "Nothing urgent. Bosun will say when something is." }),
+    offers.length ? el("div", { class: "need-offers" }, ...offers.map((o) => offerCard(o, !!S.demo))) : null,
+    needs.length ? el("div", {}, ...shown.map((n, i) => needRow(n, !offers.length && i === first)))
+      : offers.length ? null : el("p", { class: "empty", text: "Nothing urgent. Bosun will say when something is." }),
     needs.length > shown.length ? el("button", { class: "link", text: `Show all ${needs.length}`, onclick: () => { S.needsAll = true; MC.render(); } }) : null);
 }
 

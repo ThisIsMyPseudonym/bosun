@@ -131,11 +131,12 @@ def test_the_dashboard_decides_what_an_agent_may_do(app, dash):
                        ("set_automation_enabled", {"automation_id": 1, "enabled": True}),
                        ("renew_automation", {"automation_id": 1}),
                        ("delete_automation", {"automation_id": 1}),
-                       ("pause_automations", {"on": True})):
+                       ("pause_automations", {"on": True}),
+                       ("decide_offer", {"firing_id": 1, "approve": True})):
         result, body = call(dash, name, args)
         assert result.is_error and "only be done by you" in body["error"], name
     assert app.store.setting("agents_allow_system") is None and app.store.setting("agents_allow_external") is None
-    assert [r["outcome"] for r in app.store.audit(limit=16)] == ["error"] * 16
+    assert [r["outcome"] for r in app.store.audit(limit=17)] == ["error"] * 17
     assert "set_llm_budget" not in {t.name for t in mcp_server.tools()}
 
 

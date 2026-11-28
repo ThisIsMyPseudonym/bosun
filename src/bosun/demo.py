@@ -223,6 +223,16 @@ def _seed_automations(store: Store, now: float) -> None:
             reason="Pick a project and enable this preset to run it on your own machine.",
             now=now - 7200,
         )
+    rwb = astore.get_by_preset(store, "retry_when_busy")
+    if rwb is not None:
+        astore.insert_firing(
+            store, int(rwb["id"]), str(rwb["name"]), "verdict", "job:2", "demo:offer:1",
+            status="offered",
+            deadline=now + 24 * 3600.0,
+            input_data={"keys": ["brew:wget"]},
+            reason="Upgrade wget (1.24.5 -> 1.25.0)",
+            now=now - 600,
+        )
 
 
 def seed(store: Store, now: float | None = None) -> int:

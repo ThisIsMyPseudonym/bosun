@@ -46,6 +46,12 @@
 .auto-grant { padding: 10px 12px; border-radius: 8px; background: var(--raise); display: grid; gap: 8px; font-size: 13px; }
 .auto-grant-check { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
 .auto-editor-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.auto-offer { padding: 14px 16px; display: grid; gap: 6px; border-color: var(--ochre-text); }
+.auto-offer-expired { opacity: .82; border-color: var(--line); }
+.auto-offer-input { font-size: 12px; color: var(--ink-2); word-break: break-word; }
+.auto-offer-input code { font-size: 11.5px; padding: 1px 5px; border-radius: 4px; background: var(--raise); }
+.auto-offer-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+.auto-offer-actions { display: flex; gap: 8px; }
 @media (max-width: 720px) {
   .auto-grid { grid-template-columns: 1fr; }
   .auto-hrow { grid-template-columns: 90px minmax(0, 1fr); }

@@ -1899,3 +1899,354 @@ def test_automations_editor_supports_verdict_trigger_and_retry_when_busy_preset(
     """
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0 and "VERDICT_EDITOR_OK" in r.stdout, f"stdout={r.stdout}\nstderr={r.stderr}"
+
+
+def test_offer_cards_render_on_automations_and_today_with_approve_decline_expiry_and_demo():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    for name in ("automations.js", "today.js"):
+        assert "innerHTML" not in code_only((STATIC / name).read_text(encoding="utf-8")), name
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    today_js = str(STATIC / "today.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", disabled: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "disabled") this.disabled = true; }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = []; this.append(...kids); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.location = {{ hash: "#/automations" }};
+    globalThis.alert = () => {{}};
+    globalThis.confirm = () => true;
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const calls = [];
+    MC.api = async (path, opts) => {{
+      calls.push({{ path, opts }});
+      if (path === "/api/automations") return {{ paused: false, demo: false, automations: [], projects: [], waiting_offers: [] }};
+      if (path.startsWith("/api/automations/firings?")) return {{ firings: [] }};
+      return {{ status: "done" }};
+    }};
+    MC.route = {{ parse: () => ({{ page: "automations" }}), href: (p, id) => `#/${{p}}/${{id}}` }};
+    MC.render = () => {{}};
+    MC.banner = () => {{}};
+    MC.refreshNow = async () => {{}};
+    MC.ago = () => "2m ago";
+    MC.clock = () => "14:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    MC.ask = () => {{}};
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(today_js)}, "utf8"));
+
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const liveOffer = {{
+      id: 42, automation_id: 7, automation_name: "<b>Relaunch</b>",
+      action: "relaunch_app", action_label: "Quit and reopen Google Chrome to finish its update",
+      items: [{{ key: "brew-cask:google-chrome", name: "Google Chrome", installed: "130.0", available: "131.0" }}],
+      input: {{ app: "chrome" }}, why: "Triggered after a full refresh",
+      status: "offered", expired: false, created: 1700000000, deadline: 9999999999,
+    }};
+    const expiredOffer = {{
+      ...liveOffer, id: 43, status: "expired", expired: true, deadline: 1000,
+    }};
+
+    // 1. Automations offersPanel renders plain text, input, why, Approve & Decline, disables in demo, and flags expired
+    const H = MC.automationsHelpers;
+    if (typeof H.offersPanel !== "function") throw new Error("MC.automationsHelpers.offersPanel missing");
+    const panel = H.offersPanel([liveOffer, expiredOffer], false);
+    const ptxt = panel.textContent;
+    if (!ptxt.includes("Quit and reopen Google Chrome") || !ptxt.includes("130.0") || !ptxt.includes("131.0")
+        || !ptxt.includes("chrome") || !ptxt.includes("Triggered after a full refresh")
+        || !ptxt.includes("<b>Relaunch</b>")) {{
+      throw new Error("missing offer card text: " + ptxt);
+    }}
+    if (!ptxt.toLowerCase().includes("expired")) throw new Error("missing expired notice: " + ptxt);
+    const cards = allNodes(panel).filter((n) => n.tagName === "ARTICLE" && (n.className || "").includes("auto-offer"));
+    if (cards.length !== 2) throw new Error("expected 2 offer cards, got " + cards.length);
+    const liveApprove = allNodes(cards[0]).find((n) => n.tagName === "BUTTON" && n.textContent === "Approve");
+    const liveDecline = allNodes(cards[0]).find((n) => n.tagName === "BUTTON" && n.textContent === "Decline");
+    const expApprove = allNodes(cards[1]).find((n) => n.tagName === "BUTTON" && n.textContent === "Approve");
+    if (!liveApprove || liveApprove.disabled || !liveDecline || liveDecline.disabled) {{
+      throw new Error("live offer buttons must be enabled");
+    }}
+    if (!expApprove || !expApprove.disabled) throw new Error("expired offer Approve button must be disabled");
+    (async () => {{
+      await liveApprove.listeners.click[0]();
+      await liveDecline.listeners.click[0]();
+
+      const demoPanel = H.offersPanel([liveOffer], true);
+      const demoBtns = allNodes(demoPanel).filter((n) => n.tagName === "BUTTON");
+      if (!demoBtns.length || demoBtns.some((b) => !b.disabled)) throw new Error("demo offer buttons must be disabled");
+
+      // 2. Today offer card helper renders Approve/Decline and posts the right decide_offer bodies
+      const TH = MC.todayHelpers;
+      if (typeof TH.offerCard !== "function") throw new Error("MC.todayHelpers.offerCard missing");
+      const tLive = TH.offerCard(liveOffer, false);
+      const tTxt = tLive.textContent;
+      if (!tTxt.includes("Quit and reopen Google Chrome") || !tTxt.includes("Triggered after a full refresh")) {{
+        throw new Error("today offer card missing text: " + tTxt);
+      }}
+      const tDemo = TH.offerCard(liveOffer, true);
+      if (allNodes(tDemo).filter((n) => n.tagName === "BUTTON").some((b) => !b.disabled)) {{
+        throw new Error("today demo offer buttons must be disabled");
+      }}
+      const tApprove = allNodes(tLive).find((n) => n.tagName === "BUTTON" && n.textContent === "Approve");
+      const tDecline = allNodes(tLive).find((n) => n.tagName === "BUTTON" && n.textContent === "Decline");
+      await tApprove.listeners.click[0]({{ stopPropagation() {{}} }});
+      await tDecline.listeners.click[0]({{ stopPropagation() {{}} }});
+
+      const approveCall = calls.find((c) => c.path === "/api/automations/firings/42/decide" && JSON.parse(c.opts.body).approve === true);
+      const declineCall = calls.find((c) => c.path === "/api/automations/firings/42/decide" && JSON.parse(c.opts.body).approve === false);
+      if (!approveCall || !declineCall) throw new Error("decide calls mismatch: " + JSON.stringify(calls));
+      console.log("OFFER_CARDS_OK");
+    }})().catch((err) => {{ console.error(err && err.stack || err); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0 and "OFFER_CARDS_OK" in r.stdout, f"stdout={r.stdout}\nstderr={r.stderr}"
+
+
+def test_offer_cards_never_stringify_raw_input_and_cap_fields():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    for name in ("automations.js", "today.js"):
+        src = (STATIC / name).read_text(encoding="utf-8")
+        assert "JSON.stringify(offer.input" not in src, f"{name} must never JSON.stringify(offer.input)"
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    today_js = str(STATIC / "today.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", disabled: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "disabled") this.disabled = true; }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = []; this.append(...kids); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.location = {{ hash: "#/automations" }};
+    globalThis.alert = () => {{}};
+    globalThis.confirm = () => true;
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    MC.api = async () => ({{}});
+    MC.route = {{ parse: () => ({{ page: "automations" }}), href: (p, id) => `#/${{p}}/${{id}}` }};
+    MC.render = () => {{}};
+    MC.banner = () => {{}};
+    MC.refreshNow = async () => {{}};
+    MC.ago = () => "2m ago";
+    MC.clock = () => "14:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    MC.ask = () => {{}};
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(today_js)}, "utf8"));
+
+    const hostileOffer = {{
+      id: 99, automation_id: 7, automation_name: "Offer\\u202e" + "R".repeat(200),
+      action: "relaunch_app", action_label: "Quit and reopen Chrome " + "L".repeat(300),
+      items: [{{ key: "mac-app:" + "k".repeat(400), name: "Chrome\\u202e" + "N".repeat(200), installed: "1.0" + "0".repeat(80), available: "2.0" + "9".repeat(80) }}],
+      input: {{ app: "chrome", secret: "RAW_JSON_LEAK_" + "X".repeat(1000), nested: {{ boom: true }} }},
+      why: "Triggered\\u202e " + "W".repeat(300),
+      status: "offered", expired: false, created: 1700000000, deadline: 9999999999,
+    }};
+    const keyOnlyOffer = {{
+      id: 100, automation_id: 8, automation_name: "Open app",
+      action: "open_app", action_label: "Open app",
+      items: [],
+      input: {{ key: "mac-app:" + "a".repeat(400), extra: "SHOULD_NOT_SHOW" }},
+      why: "In-app update waiting",
+      status: "offered", expired: false, created: 1700000000, deadline: 9999999999,
+    }};
+
+    for (const [label, node] of [
+      ["auto-hostile", MC.automationsHelpers.offerCard(hostileOffer, false)],
+      ["today-hostile", MC.todayHelpers.offerCard(hostileOffer, false)],
+      ["auto-keyonly", MC.automationsHelpers.offerCard(keyOnlyOffer, false)],
+      ["today-keyonly", MC.todayHelpers.offerCard(keyOnlyOffer, false)],
+    ]) {{
+      const txt = node.textContent;
+      if (txt.includes("RAW_JSON_LEAK") || txt.includes("SHOULD_NOT_SHOW") || txt.includes("secret") || txt.includes("nested") || txt.includes("{{")) {{
+        throw new Error(label + " leaked raw input JSON: " + txt.slice(0, 300));
+      }}
+      if (txt.includes("\\u202e")) throw new Error(label + " leaked bidi char");
+      if (txt.length > 700) throw new Error(label + " uncapped text length: " + txt.length);
+    }}
+    console.log("OFFER_SANITIZED_OK");
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0 and "OFFER_SANITIZED_OK" in r.stdout, f"stdout={r.stdout}\nstderr={r.stderr}"
+
+
+def test_offer_buttons_disable_in_flight_and_treat_409_as_quiet_refresh():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    today_js = str(STATIC / "today.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", disabled: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); if (k === "disabled") this.disabled = true; }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = []; this.append(...kids); }},
+      }};
+    }}
+    const alerts = [], banners = [];
+    let refreshes = 0, listFetches = 0;
+    globalThis.window = globalThis;
+    globalThis.location = {{ hash: "#/automations" }};
+    globalThis.alert = (m) => alerts.push(String(m));
+    globalThis.confirm = () => true;
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    globalThis.fetch = async () => ({{
+      ok: false, status: 409,
+      json: async () => ({{ detail: "This offer was already decided or expired" }}),
+    }});
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+
+    (async () => {{
+      // Verify MC.api preserves HTTP status on thrown errors
+      let caught = null;
+      try {{ await MC.api("/api/automations/firings/1/decide", {{ method: "POST", body: "{{}}" }}); }}
+      catch (e) {{ caught = e; }}
+      if (!caught || caught.status !== 409) throw new Error("MC.api must attach status=409: " + (caught && caught.status));
+
+      let pendingResolve = null;
+      let decideMode = "defer";
+      let decideCalls = 0;
+      MC.api = async (path, opts) => {{
+        if (path === "/api/automations") {{ listFetches++; return {{ paused: false, demo: false, automations: [], projects: [], waiting_offers: [] }}; }}
+        if (path.startsWith("/api/automations/firings?")) return {{ firings: [] }};
+        if (path.endsWith("/decide")) {{
+          decideCalls++;
+          if (decideMode === "defer") return await new Promise((res) => {{ pendingResolve = res; }});
+          if (decideMode === "409") throw Object.assign(new Error("This offer was already decided or expired"), {{ status: 409 }});
+          if (decideMode === "403") throw Object.assign(new Error("All automations are paused"), {{ status: 403 }});
+        }}
+        return {{ status: "done" }};
+      }};
+      MC.route = {{ parse: () => ({{ page: "automations" }}), href: (p, id) => `#/${{p}}/${{id}}` }};
+      MC.render = () => {{}};
+      MC.banner = (m) => banners.push(String(m));
+      MC.refreshNow = async () => {{ refreshes++; }};
+      MC.ago = () => "2m ago";
+      MC.clock = () => "14:00";
+      MC.runHref = (id) => "#/runs/" + id;
+      MC.ask = () => {{}};
+      eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+      eval(fs.readFileSync({json.dumps(today_js)}, "utf8"));
+
+      const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+      const offer = {{
+        id: 77, automation_id: 3, automation_name: "Offer Chrome",
+        action: "relaunch_app", action_label: "Quit and reopen Chrome",
+        items: [], input: {{ app: "chrome" }}, why: "Refresh",
+        status: "offered", expired: false, created: 1700000000, deadline: 9999999999,
+      }};
+
+      // 1. Automations card: both buttons disabled while in flight, second click ignored
+      const aCard = MC.automationsHelpers.offerCard(offer, false);
+      const aApp = allNodes(aCard).find((n) => n.tagName === "BUTTON" && n.textContent === "Approve");
+      const aDec = allNodes(aCard).find((n) => n.tagName === "BUTTON" && n.textContent === "Decline");
+      const p1 = aApp.listeners.click[0]();
+      if (!aApp.disabled || !aDec.disabled) throw new Error("automations buttons must be disabled in flight");
+      aDec.listeners.click[0]();
+      if (decideCalls !== 1) throw new Error("expected 1 in-flight decide call, got " + decideCalls);
+      pendingResolve({{ status: "done" }});
+      await p1;
+      if (aApp.disabled || aDec.disabled) throw new Error("automations buttons should re-enable after finish");
+
+      // 2. Automations card: 409 is quiet refresh (no alert); 403 alerts
+      decideMode = "409";
+      const beforeList = listFetches;
+      await aDec.listeners.click[0]();
+      if (alerts.length !== 0) throw new Error("409 must not alert: " + JSON.stringify(alerts));
+      if (listFetches <= beforeList) throw new Error("409 must trigger quiet refresh");
+      decideMode = "403";
+      await aApp.listeners.click[0]();
+      if (alerts.length !== 1) throw new Error("403 must alert: " + JSON.stringify(alerts));
+
+      // 3. Today card: both buttons disabled in flight, 409 quiet refresh (no banner), 403 banner
+      decideMode = "defer";
+      decideCalls = 0;
+      const tCard = MC.todayHelpers.offerCard(offer, false);
+      const tApp = allNodes(tCard).find((n) => n.tagName === "BUTTON" && n.textContent === "Approve");
+      const tDec = allNodes(tCard).find((n) => n.tagName === "BUTTON" && n.textContent === "Decline");
+      const p2 = tApp.listeners.click[0]({{ stopPropagation() {{}} }});
+      if (!tApp.disabled || !tDec.disabled) throw new Error("today buttons must be disabled in flight");
+      tDec.listeners.click[0]({{ stopPropagation() {{}} }});
+      if (decideCalls !== 1) throw new Error("today expected 1 in-flight decide call, got " + decideCalls);
+      pendingResolve({{ status: "done" }});
+      await p2;
+      if (tApp.disabled || tDec.disabled) throw new Error("today buttons should re-enable after finish");
+
+      decideMode = "409";
+      const beforeRef = refreshes;
+      await tDec.listeners.click[0]({{ stopPropagation() {{}} }});
+      if (banners.length !== 0) throw new Error("today 409 must not banner: " + JSON.stringify(banners));
+      if (refreshes <= beforeRef) throw new Error("today 409 must refresh");
+      decideMode = "403";
+      await tApp.listeners.click[0]({{ stopPropagation() {{}} }});
+      if (banners.length !== 1) throw new Error("today 403 must banner: " + JSON.stringify(banners));
+
+      console.log("OFFER_INFLIGHT_409_OK");
+    }})().catch((err) => {{ console.error(err && err.stack || err); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0 and "OFFER_INFLIGHT_409_OK" in r.stdout, f"stdout={r.stdout}\nstderr={r.stderr}"
+
+

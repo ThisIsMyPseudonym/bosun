@@ -194,6 +194,7 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
         model.auto_renew = await model.call("renew_automation", {"automation_id": 1})
         model.auto_delete = await model.call("delete_automation", {"automation_id": 1})
         model.auto_pause = await model.call("pause_automations", {"on": True})
+        model.auto_decide = await model.call("decide_offer", {"firing_id": 1, "approve": True})
         await model.say("Turn Autopilot on from the Today page.")
 
     panel.script(script)
@@ -202,7 +203,8 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
     assert events[-1][1]["status"] == "ok" and not [k for k, _ in events if k == "approval"]
     model = panel.fakes[0].model
     for result in (model.auto, model.override, model.ignore, model.triage, model.triage_cfg,
-                   model.auto_save, model.auto_toggle, model.auto_renew, model.auto_delete, model.auto_pause):
+                   model.auto_save, model.auto_toggle, model.auto_renew, model.auto_delete,
+                   model.auto_pause, model.auto_decide):
         assert not result["ok"] and "only be done by you" in result["error"]
     assert panel.store.setting("autopilot") in (None, "0") and panel.store.prefs() == {}
     assert panel.store.setting("triage_auto") is None
@@ -215,7 +217,7 @@ def test_user_only_actions_get_no_card_and_are_refused(panel):
         ("set_autopilot", "refused"), ("set_quota_override", "refused"), ("set_pref", "refused"),
         ("triage", "refused"), ("set_triage_settings", "refused"),
         ("save_automation", "refused"), ("set_automation_enabled", "refused"), ("renew_automation", "refused"),
-        ("delete_automation", "refused"), ("pause_automations", "refused"),
+        ("delete_automation", "refused"), ("pause_automations", "refused"), ("decide_offer", "refused"),
     ]
 
 
