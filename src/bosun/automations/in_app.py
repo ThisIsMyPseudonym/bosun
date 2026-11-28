@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import logging
 from typing import Any, Protocol
 
 from pydantic import BaseModel
@@ -13,6 +14,8 @@ from ..registry import KeyIn, RelaunchIn
 from ..store import Store
 from . import offers, store as astore
 from .schema import AppActionScope, AutomationDef, InAppUpdateConditions
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -58,7 +61,11 @@ def scan_in_app_updates(
     app_rules = [(aid, r, d) for aid, (r, d) in rules.items() if d.trigger.kind == "in_app_update"]
     if not app_rules:
         return 0
-    events = tuple(reader(store, now=when))
+    try:
+        events = tuple(reader(store, now=when))
+    except Exception:
+        log.exception("in_app_update reader failed; skipping in-app scan for this tick")
+        return 0
     if not events:
         return 0
     created = 0

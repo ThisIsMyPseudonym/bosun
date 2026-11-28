@@ -155,3 +155,54 @@ def test_in_app_matches_and_scope_edge_cases(tmp_path):
     assert in_app.app_input_in_scope(st, r_def, r_def.scope, RelaunchIn(app="chrome"), (), aid) is False
     assert in_app.app_input_in_scope(st, r_def, r_def.scope, KeyIn(key="chrome"), (fid,), aid) is False
 
+
+def test_failing_in_app_reader_is_isolated_and_does_not_abort_tick(tmp_path, caplog):
+    import logging
+    from bosun.automations.schema import NotifyScope
+
+    st = Store(tmp_path / "bosun.db")
+    base = 1_700_000_000.0
+    jq = Item(Source.BREW, "jq", "jq", "1.7", "1.8", lane="now")
+    snap_id = st.save_snapshot([item_to_dict(jq)], [])
+    actions = Actions(store=st)
+
+    in_app_def = AutomationDef(
+        name="Offer in-app", trigger=InAppUpdateTrigger(), conditions=InAppUpdateConditions(),
+        action="open_app", scope=AppActionScope(mode="trigger_app"), mode="ask",
+    )
+    notify_def = AutomationDef(
+        name="What changed", trigger=RefreshTrigger(), conditions=RefreshConditions(),
+        action="notify", scope=NotifyScope(), mode="run",
+    )
+    aid_app = astore.save(st, in_app_def, enabled=True, grant_digest=grant_digest(in_app_def), granted_by="user", now=base)
+    aid_not = astore.save(st, notify_def, enabled=True, grant_digest=grant_digest(notify_def), granted_by="user", now=base)
+    f_exp = astore.insert_firing(
+        st, aid_app, in_app_def.name, "in_app_update", "slack@4.41", "inapp:exp",
+        status="offered", deadline=base + 5.0, input_data={"key": "mac-app:slack"}, now=base,
+    )
+    assert f_exp is not None
+    with st._tx(write=True) as db:
+        db.execute(
+            "INSERT INTO runs (trace_id, kind, subject, actor, status, started, finished, duration_ms, process) "
+            "VALUES (?, 'refresh', 'everything', 'user', 'ok', ?, ?, 50.0, 'serve')",
+            ("e" * 32, base + 10.0, base + 11.0),
+        )
+        db.execute("UPDATE snapshot_log SET ts=? WHERE snapshot_id=?", (base + 11.0, snap_id))
+
+    def broken_reader(_store: Store, *, now: float):
+        raise RuntimeError("project 4 reader crashed")
+
+    eng = Automator(st, load_settings(), actions, in_app_reader=broken_reader)
+    with caplog.at_level(logging.ERROR):
+        rep = eng.tick(now=base + 20.0)
+
+    assert rep.errors == 0
+    assert rep.expired == 1
+    assert rep.scanned == 1
+    assert rep.ran == 1
+    assert astore.get_firing(st, f_exp)["status"] == "expired"
+    not_firings = astore.list_firings(st, automation_id=aid_not)
+    assert len(not_firings) == 1 and not_firings[0]["status"] == "done"
+    assert any("project 4 reader crashed" in r.getMessage() or "in_app" in r.getMessage().lower() for r in caplog.records)
+
+
