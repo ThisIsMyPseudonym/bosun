@@ -16,7 +16,7 @@ from ..config import Settings
 from ..providers.router import QuotaHeld
 from ..registry import ActionContext, ActionError, Actions, Forbidden
 from ..store import Store
-from . import digest, match as amatch, merge as amerge, recheck, schedule, store as astore, verdict as averdict
+from . import chain, digest, match as amatch, merge as amerge, recheck, schedule, store as astore, verdict as averdict
 from .schema import (MODEL_ACTIONS, AutomationDef, RefreshConditions, ScheduleConditions, ScheduleTrigger,
                      grant_digest, grant_digest_matches, grant_expired, has_unset_project, is_install_action)
 
@@ -143,23 +143,23 @@ class Automator:
         if not ref_rules:
             return 0
         floor = when - REFRESH_STALENESS_S
-        since_by_rule: dict[int, float] = {}
-        for aid, row, _defn in ref_rules:
-            raw_cur = astore.cursor(self.store, f"{REFRESH_CURSOR}_{aid}")
-            cur_val = float(raw_cur) if raw_cur is not None else float(row.get("updated") or 0.0)
-            since_by_rule[aid] = max(cur_val, floor)
+        since_by_rule = {
+            aid: max(float(raw) if (raw := astore.cursor(self.store, f"{REFRESH_CURSOR}_{aid}")) is not None
+                     else float(row.get("updated") or 0.0), floor)
+            for aid, row, _defn in ref_rules
+        }
         with self.store._tx() as db:
             runs = db.execute(
-                "SELECT trace_id, started, COALESCE(finished, started) AS ended FROM runs "
+                "SELECT trace_id, actor, started, COALESCE(finished, started) AS ended FROM runs "
                 "WHERE kind='refresh' AND subject='everything' AND status IN ('ok', 'partial') "
                 "AND COALESCE(finished, started) > ? ORDER BY ended ASC LIMIT 20",
                 (min(since_by_rule.values()),),
             ).fetchall()
-        created = 0
-        max_ended = dict(since_by_rule)
+        created, max_ended = 0, dict(since_by_rule)
         for run in runs:
             ended = float(run["ended"])
             snaps = self._snapshot_for_run(float(run["started"]), ended)
+            origin = chain.resolve_origin(self.store, str(run["trace_id"] or ""), actor=str(run["actor"] or ""))
             for aid, _row, defn in ref_rules:
                 if ended <= since_by_rule[aid]:
                     continue
@@ -169,13 +169,15 @@ class Automator:
                 snap_id, prev_id = snaps
                 if not amatch.matches_refresh(self.store, defn.conditions, snapshot_id=snap_id, prev_snapshot_id=prev_id):
                     continue
+                depth = chain.next_depth(origin, aid)
+                if depth is None:
+                    continue
                 fid = astore.insert_firing(
                     self.store, aid, defn.name, "refresh", f"snap:{snap_id}", f"refresh:snap:{snap_id}",
-                    status="scheduled", due=when + defn.delay_s, deadline=ended + REFRESH_DEADLINE_S,
+                    status="scheduled", depth=depth, due=when + defn.delay_s, deadline=ended + REFRESH_DEADLINE_S,
                     input_data={"snapshot_id": snap_id, "prev_snapshot_id": prev_id}, now=when,
                 )
-                if fid is not None:
-                    created += 1
+                created += int(fid is not None)
         for aid, ended in max_ended.items():
             if ended > since_by_rule[aid]:
                 astore.set_cursor(self.store, f"{REFRESH_CURSOR}_{aid}", repr(ended))

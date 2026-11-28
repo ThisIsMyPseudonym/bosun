@@ -14,7 +14,7 @@ from .. import recipes
 from ..store import Store
 from ..triage import check as tcheck, store as tstore
 from ..triage.schema import FailureRecord, Verdict
-from . import store as astore
+from . import chain, store as astore
 from .schema import UNSET_PROJECT, AutomationDef, VerdictConditions
 
 log = logging.getLogger(__name__)
@@ -318,17 +318,21 @@ def scan_verdicts(
         if not eligible_rules:
             continue
         event = build_event(store, row)
+        origin = chain.resolve_origin(store, event.trace_id, actor=event.actor, failure=event.failure) if event else None
         for aid, _row, defn in eligible_rules:
             if after_cursor(ended, tid, max_cur[aid]):
                 max_cur[aid] = (ended, tid)
-            if event is None or not isinstance(defn.conditions, VerdictConditions):
+            if event is None or origin is None or not isinstance(defn.conditions, VerdictConditions):
                 continue
             if not matches_verdict(defn.conditions, event):
+                continue
+            depth = chain.next_depth(origin, aid)
+            if depth is None:
                 continue
             due = when + defn.delay_s
             fid = astore.insert_firing(
                 store, aid, defn.name, "verdict", event.failure, f"verdict:{event.failure}",
-                status="scheduled", depth=0, due=due, deadline=due + VERDICT_DEADLINE_S,
+                status="scheduled", depth=depth, due=due, deadline=due + VERDICT_DEADLINE_S,
                 input_data={
                     "failure": event.failure, "trace_id": event.trace_id,
                     "item_key": event.item_key, "available": event.available, "project": event.project,
