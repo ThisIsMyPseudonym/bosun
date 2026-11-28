@@ -873,35 +873,161 @@ def cmd_usage(args, s) -> int:
     return 0
 
 
-def cmd_automations(args, s) -> int:
-    """Inspect or toggle the owner-only automations kill switch (`status`, `pause`, `resume`)."""
+_TOKEN_META_RE = re.compile(r'<meta name="bosun-token" content="([^"]+)">')
+
+
+def _dashboard_http(s):
+    import httpx
+
+    return httpx.Client(
+        base_url=f"http://{s.host}:{s.port}",
+        timeout=httpx.Timeout(15.0, connect=5.0),
+        follow_redirects=False,
+        trust_env=False,
+    )
+
+
+def _verify_dashboard_owner(client: Any, s, key: str) -> str | None:
+    """Confirm the server holds this data_dir's session key, then fetch its CSRF token as owner."""
+    import httpx
+
+    from . import auth
+
+    try:
+        probe = client.get("/api/automations", auth=auth.AgentAuth(key, "cli"))
+    except httpx.ConnectError:
+        return None
+    if probe.status_code == 401 or not auth.valid_reply(
+        key, probe.request.headers.get("authorization"), probe.headers.get(auth.REPLY_HEADER),
+    ):
+        return None
+    try:
+        page = client.get("/", headers={"cookie": f"{auth.cookie_name(s.port)}={auth.cookie_value(key)}"})
+    except httpx.ConnectError:
+        return None
+    if page.status_code != 200:
+        return None
+    match = _TOKEN_META_RE.search(page.text)
+    return match.group(1) if match else None
+
+
+def _pause_via_dashboard(
+    s, pause: bool, *, http: Any = None, up: Callable[[], bool] | None = None, as_json: bool = False,
+) -> int | None:
+    """Route `automations pause|resume` through the running dashboard's owner-only action."""
+    import httpx
+
+    from . import auth, launcher
+
+    url = f"http://{s.host}:{s.port}"
+    if http is None:
+        if not (s.data_dir / auth.KEY_FILE).is_file():
+            return None
+        if not (up or (lambda: launcher.dashboard_up(url)))():
+            return None
+    key = auth.load_key(s.data_dir)
+    client = http or _dashboard_http(s)
+    try:
+        try:
+            token = _verify_dashboard_owner(client, s, key)
+            if token is None:
+                return None
+            r = client.post(
+                "/api/automations/pause",
+                json={"on": pause},
+                headers={
+                    "cookie": f"{auth.cookie_name(s.port)}={auth.cookie_value(key)}",
+                    "x-bosun-token": token,
+                },
+            )
+        except httpx.ConnectError:
+            return None
+        except httpx.TransportError as exc:
+            print(f"Could not reach the Bosun dashboard: {_printable(exc)}", file=sys.stderr)
+            return 1
+        if r.status_code >= 400:
+            print(_http_error(r), file=sys.stderr)
+            return 1
+        _print_pause_result(pause, as_json=as_json)
+        return 0
+    finally:
+        if http is None:
+            client.close()
+
+
+def _print_pause_result(pause: bool, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"paused": pause}, indent=2))
+    elif pause:
+        print("Automations paused. Waiting firings stay frozen until you run `bosun automations resume`.")
+    else:
+        print("Automations resumed.")
+
+
+def _automations_status(args, s) -> int:
     from .automations import store as astore
 
-    action = args.action
-    if action == "status":
-        try:
-            with Store(s.db_path, read_only=True) as store:
-                paused = astore.is_paused(store)
-                rows = astore.list_all(store)
-        except FileNotFoundError:
-            paused, rows = False, []
-        enabled = sum(1 for r in rows if r["enabled"])
-        if args.json:
-            print(json.dumps({"paused": paused, "enabled": enabled, "total": len(rows)}, indent=2))
-        else:
-            state = "paused" if paused else "active"
-            extra = " (no database yet)" if not s.db_path.exists() else f" ({enabled} of {len(rows)} enabled)"
-            print(f"Automations: {state}{extra}.")
-        return 0
-
-    pause = action == "pause"
-    with Store(s.db_path) as store:
-        astore.set_paused(store, pause)
+    try:
+        with Store(s.db_path, read_only=True) as store:
+            paused = astore.is_paused(store)
+            rows = astore.list_all(store)
+    except FileNotFoundError:
+        paused, rows = False, []
+    enabled = sum(1 for r in rows if r["enabled"])
     if args.json:
-        print(json.dumps({"paused": pause}, indent=2))
+        print(json.dumps({"paused": paused, "enabled": enabled, "total": len(rows)}, indent=2))
     else:
-        print("Automations paused. Waiting firings stay frozen until you run `bosun automations resume`."
-              if pause else "Automations resumed.")
+        state = "paused" if paused else "active"
+        extra = " (no database yet)" if not s.db_path.exists() else f" ({enabled} of {len(rows)} enabled)"
+        print(f"Automations: {state}{extra}.")
+    return 0
+
+
+def _automations_resume(args, s) -> int:
+    from . import auth, launcher
+
+    if not sys.stdin.isatty():
+        print("Resuming automations requires an interactive terminal (TTY).", file=sys.stderr)
+        return 1
+    url = f"http://{s.host}:{s.port}"
+    if not (s.data_dir / auth.KEY_FILE).is_file() or not launcher.dashboard_up(url):
+        print("Bosun is not running; start Bosun to resume automations.", file=sys.stderr)
+        return 1
+    try:
+        reply = input("Type 'resume' to resume all automations: ")
+    except EOFError:
+        reply = ""
+    if reply.strip().lower() != "resume":
+        print("Aborted: automations remain paused.", file=sys.stderr)
+        return 1
+    routed = _pause_via_dashboard(s, False, as_json=args.json)
+    if routed is None:
+        print("Bosun is not running; start Bosun to resume automations.", file=sys.stderr)
+        return 1
+    return routed
+
+
+def cmd_automations(args, s) -> int:
+    """Inspect or toggle the owner-only automations kill switch (`status`, `pause`, `resume`)."""
+    from . import trace
+    from .automations import store as astore
+    from .registry import Risk
+
+    if args.action == "status":
+        return _automations_status(args, s)
+    if args.action == "resume":
+        return _automations_resume(args, s)
+
+    routed = _pause_via_dashboard(s, True, as_json=args.json)
+    if routed is not None:
+        return routed
+    with Store(s.db_path) as store:
+        astore.set_paused(store, True)
+        store.record_action(
+            actor="user", action="pause_automations", args={"on": True},
+            risk=Risk.LOCAL.name.lower(), surface="cli", trace_id=trace.new_id(), outcome="ok",
+        )
+    _print_pause_result(True, as_json=args.json)
     return 0
 
 
@@ -1001,10 +1127,10 @@ def main(argv: list[str] | None = None) -> int:
     embedded_mcp = args.cmd == "mcp" and args.mcp_cmd is None and getattr(args, "as_role", "agent") in ("assistant", "triage")
     # Read-only commands must never create directories, write logs, or open/migrate the database.
     # `mcp --as assistant|triage` logs to stderr only so it never needs BOSUN_DATA_DIR forwarded.
-    # `refresh` defers logging/DB setup until it knows the dashboard is not running (offline fallback).
+    # `refresh` and `automations` defer logging/DB setup until they know the dashboard is not running.
     if embedded_mcp:
         logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
-    elif not read_only and args.cmd != "refresh":
+    elif not read_only and args.cmd not in ("refresh", "automations"):
         _setup_logging(s, "serve" if args.cmd == "serve" else "cli", open_db=args.cmd not in _NO_DB_LOG_CMDS)
     handler = {"status": cmd_status, "refresh": cmd_refresh, "update-scanner": cmd_update_scanner,
                "self-update": cmd_self_update, "serve": cmd_serve, "demo": cmd_demo, "doctor": cmd_doctor,
