@@ -150,3 +150,44 @@ def test_automation_write_actions_are_owner_only_check_grant_and_refuse_demo(tmp
     ):
         r = dc.post(path, json=body, headers=H)
         assert r.status_code == 403 and "This is demo data" in r.text, path
+
+
+def test_runs_label_automation_actor_with_name(tmp_path):
+    from bosun import trace
+    from bosun.automations.schema import AutomationDef, NotifyScope, RefreshConditions, RefreshTrigger, grant_digest
+
+    st = Store(tmp_path / "bosun.db")
+    defn = AutomationDef(
+        name="Nightly check",
+        trigger=RefreshTrigger(kind="refresh"),
+        conditions=RefreshConditions(),
+        action="notify",
+        scope=NotifyScope(digest="what_changed"),
+        mode="run",
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest=grant_digest(defn), granted_by="user")
+    astore.insert_firing(st, aid, defn.name, "refresh", "snap:1", "r:label:1", status="done")
+
+    trace.configure(st.path, "serve")
+    try:
+        with trace.run("action", subject="refresh", actor=f"automation:{aid}") as run:
+            tid = run.trace_id
+    finally:
+        trace.configure(None)
+
+    app = create_app(load_settings(), st, TOKEN)
+    user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+    runs = user.get("/api/runs").json()
+    matched = [r for r in runs if r["trace_id"] == tid]
+    assert len(matched) == 1
+    assert matched[0]["actor_label"] == "Automation: Nightly check"
+    tr = user.get(f"/api/runs/{tid}").json()
+    assert tr["run"]["actor_label"] == "Automation: Nightly check"
+
+    # After deleting the automation, actor_label falls back to the name preserved in automation_firings
+    astore.delete(st, aid)
+    runs_after = user.get("/api/runs").json()
+    matched_after = [r for r in runs_after if r["trace_id"] == tid]
+    assert matched_after[0]["actor_label"] == "Automation: Nightly check"
+    tr_after = user.get(f"/api/runs/{tid}").json()
+    assert tr_after["run"]["actor_label"] == "Automation: Nightly check"

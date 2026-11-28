@@ -1084,8 +1084,10 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
 
     @actions.bind("list_runs")
     def list_runs(ctx: ActionContext, body: RunsIn):
-        return store.runs(limit=body.limit, kind=body.kind, status=body.status, subject=body.subject,
-                          before=body.before)
+        return aapi.decorate_runs(
+            store,
+            store.runs(limit=body.limit, kind=body.kind, status=body.status, subject=body.subject, before=body.before),
+        )
 
     def _triage_availability() -> tuple[bool, str]:
         if s.demo:
@@ -1115,6 +1117,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         avail, reason = _triage_availability()
         return {
             **found,
+            "run": aapi.decorate_actor(store, found["run"]),
+            "parent": aapi.decorate_actor(store, found["parent"]) if found.get("parent") else found.get("parent"),
+            "children": aapi.decorate_runs(store, found.get("children") or []),
             "tree": diagnose.span_tree(found["spans"]),
             "failures": diagnose.failures(found["spans"]),
             "related_failures": diagnose.related(store, found["run"]),

@@ -949,3 +949,71 @@ def test_usage_triage_switch_refetches_and_restores_server_state_on_failed_save(
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
 
+
+
+def test_runs_view_renders_actor_label_as_text():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    runs_js = str(STATIC / "runs.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      body: mkNode("body"),
+      querySelector: () => ({{ content: "tok" }}),
+      getElementById: () => null,
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    let lastTree = null;
+    MC.api = async (path) => {{
+      if (path.startsWith("/api/runs?")) {{
+        return [{{
+          trace_id: "aabbccdd1122", kind: "action", subject: "start_fix", status: "ok",
+          actor: "automation:7", actor_label: "Automation: <img onerror=alert(1)>", started: 1700000000, duration_ms: 120,
+        }}];
+      }}
+      return {{}};
+    }};
+    MC.route = {{ parse: () => ({{ page: "runs" }}) }};
+    MC.nameOf = (_S, k) => k;
+    MC.ago = () => "1m ago";
+    MC.jobLabel = (j) => j.status;
+    MC.ask = () => {{}};
+    MC.banner = () => {{}};
+    MC.actions = {{ upgrade: () => {{}}, fix: () => {{}}, recheckProject: () => {{}}, copyPrompt: () => {{}} }};
+    MC.render = () => {{ lastTree = MC.views.runs({{}}); }};
+    eval(fs.readFileSync({json.dumps(runs_js)}, "utf8"));
+
+    (async () => {{
+      MC.views.runs({{}});
+      await new Promise((r) => setTimeout(r, 10));
+      if (!lastTree || !lastTree.textContent.includes("Automation: <img onerror=alert(1)>")) {{
+        throw new Error("runs list did not render actor_label as plain text: " + (lastTree && lastTree.textContent));
+      }}
+      console.log("OK");
+    }})().catch((e) => {{ console.error(e); process.exit(1); }});
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"

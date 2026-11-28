@@ -8,29 +8,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..registry import SPECS, Invalid, NotFound, Risk, SaveAutomationIn
+from ..registry import SPECS, Invalid, NotFound, Risk, SaveAutomationIn, automation_id
 from ..store import Store
 from . import schedule, store as astore
-from .schema import (
-    UNSET_PROJECT,
-    AppActionScope,
-    AutomationDef,
-    ExplainItemScope,
-    NotifyScope,
-    PinMcpScope,
-    RecheckProjectScope,
-    RefreshConditions,
-    RefreshScope,
-    ScheduleConditions,
-    ScheduleTrigger,
-    StartFixScope,
-    UpgradeScope,
-    describe_scope,
-    grant_digest,
-    grant_digest_matches,
-    grant_expired,
-    grant_expires_at,
-)
+from .schema import (UNSET_PROJECT, AppActionScope, AutomationDef, ExplainItemScope, NotifyScope, PinMcpScope,
+                     RecheckProjectScope, RefreshConditions, RefreshScope, ScheduleConditions, ScheduleTrigger,
+                     StartFixScope, UpgradeScope, describe_scope, grant_digest, grant_digest_matches, grant_expired,
+                     grant_expires_at)
 
 _LANE_WORDS = {"now": "Do-now", "plan": "Plan", "watch": "Watch", "batch": "Batch"}
 _DAY_WORDS = {"mon": "Mon", "tue": "Tue", "wed": "Wed", "thu": "Thu", "fri": "Fri", "sat": "Sat", "sun": "Sun"}
@@ -363,3 +347,47 @@ def delete_automation(store: Store, automation_id: int, *, now: float | None = N
 def pause_automations(store: Store, paused: bool) -> dict[str, Any]:
     astore.set_paused(store, paused)
     return {"paused": astore.is_paused(store)}
+
+
+def _automation_names(store: Store, ids: set[int]) -> dict[int, str]:
+    if not ids:
+        return {}
+    ph = ",".join("?" * len(ids))
+    args = tuple(sorted(ids))
+    names: dict[int, str] = {}
+    with store._tx() as db:
+        for row in db.execute(f"SELECT id, name FROM automations WHERE id IN ({ph})", args).fetchall():
+            names[int(row["id"])] = str(row["name"])
+        missing = sorted(ids - set(names))
+        if missing:
+            mph = ",".join("?" * len(missing))
+            for row in db.execute(
+                f"SELECT automation_id, automation_name FROM automation_firings "
+                f"WHERE automation_id IN ({mph}) ORDER BY id DESC",
+                tuple(missing),
+            ).fetchall():
+                aid = int(row["automation_id"])
+                if aid not in names and row["automation_name"]:
+                    names[aid] = str(row["automation_name"])
+    return names
+
+
+def decorate_runs(store: Store, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach `actor_label` ('Automation: <name>') for any run started by `automation:<id>`."""
+    ids = {aid for r in runs if (aid := automation_id(str(r.get("actor") or ""))) is not None}
+    if not ids:
+        return runs
+    names = _automation_names(store, ids)
+    out: list[dict[str, Any]] = []
+    for run in runs:
+        aid = automation_id(str(run.get("actor") or ""))
+        if aid is not None:
+            label = f"Automation: {names[aid]}" if aid in names else f"Automation #{aid}"
+            out.append({**run, "actor_label": label})
+        else:
+            out.append(run)
+    return out
+
+
+def decorate_actor(store: Store, run: dict[str, Any]) -> dict[str, Any]:
+    return decorate_runs(store, [run])[0]
