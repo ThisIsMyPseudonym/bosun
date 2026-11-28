@@ -1,0 +1,206 @@
+{
+  "cases": [
+    {
+      "id": "npm-registry-timeout",
+      "family": "model",
+      "eval_kind": "model",
+      "platform": "mac",
+      "live": true,
+      "failure": {
+        "what": "job", "what_id": "401", "kind": "upgrade",
+        "subject": "npm-global:eslint", "item_source": "npm-global", "status": "failed", "actor": "autopilot",
+        "command": ["npm", "install", "-g", "eslint@9.15.0"], "exit_code": 1,
+        "error": "npm error code ETIMEDOUT",
+        "output": "npm error code ETIMEDOUT\nnpm error syscall connect\nnpm error network request to registry failed, reason: connect ETIMEDOUT 104.16.0.35:443\n"
+      },
+      "item": {"source": "npm-global", "package_id": "eslint", "name": "eslint", "installed": "9.12.0", "available": "9.15.0"},
+      "expected": {
+        "source": "model", "category": "network", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      },
+      "good_reply": {
+        "category": "network",
+        "cause": "The npm registry connection timed out during package download.",
+        "confidence": "high",
+        "evidence": [{"source": "output", "ref": "", "line": "network request to registry failed, reason: connect ETIMEDOUT"}],
+        "next_step": {"kind": "retry", "recipe": null, "runbook": null, "why": "Retry the upgrade once the network connection stabilizes."},
+        "needs_person": false,
+        "transient": true
+      }
+    },
+    {
+      "id": "brew-bottle-checksum-mismatch",
+      "family": "model",
+      "eval_kind": "model",
+      "platform": "mac",
+      "live": true,
+      "failure": {
+        "what": "job", "what_id": "402", "kind": "upgrade",
+        "subject": "brew:fd", "item_source": "brew", "status": "failed", "actor": "autopilot",
+        "command": ["brew", "upgrade", "--formula", "fd"], "exit_code": 1,
+        "error": "Error: SHA256 mismatch",
+        "output": "==> Pouring fd--10.2.0.arm64_sequoia.bottle.tar.gz\nError: SHA256 mismatch\nExpected: 1111111111111111111111111111111111111111111111111111111111111111\n  Actual: 2222222222222222222222222222222222222222222222222222222222222222\n"
+      },
+      "item": {"source": "brew", "package_id": "fd", "name": "fd", "installed": "10.1.0", "available": "10.2.0"},
+      "expected": {
+        "source": "model", "category": "signature_check", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      },
+      "good_reply": {
+        "category": "signature_check",
+        "cause": "The downloaded Homebrew bottle failed its SHA256 checksum verification.",
+        "confidence": "high",
+        "evidence": [{"source": "output", "ref": "", "line": "Error: SHA256 mismatch"}],
+        "next_step": {"kind": "retry", "recipe": null, "runbook": null, "why": "Retry after the mirror updates or clears the corrupt archive."},
+        "needs_person": false,
+        "transient": true
+      }
+    },
+    {
+      "id": "disk-full-enospc",
+      "family": "model",
+      "eval_kind": "model",
+      "platform": "mac",
+      "live": true,
+      "failure": {
+        "what": "job", "what_id": "403", "kind": "upgrade",
+        "subject": "brew-cask:blender", "item_source": "brew-cask", "status": "failed", "actor": "user",
+        "command": ["brew", "upgrade", "--cask", "blender"], "exit_code": 1,
+        "error": "Error: ENOSPC: no space left on device while unpacking archive",
+        "output": "==> Downloading blender archive\n==> Extracting archive to /opt/homebrew/Caskroom/blender/4.3.0\nError: ENOSPC: no space left on device while unpacking archive\n"
+      },
+      "item": {"source": "brew-cask", "package_id": "blender", "name": "Blender", "installed": "4.2.0", "available": "4.3.0"},
+      "expected": {
+        "source": "model", "category": "disk_space", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      },
+      "good_reply": {
+        "category": "disk_space",
+        "cause": "The disk ran out of free space while extracting the Blender upgrade archive.",
+        "confidence": "high",
+        "evidence": [{"source": "output", "ref": "", "line": "Error: ENOSPC: no space left on device while unpacking archive"}],
+        "next_step": {"kind": "none", "recipe": null, "runbook": null, "why": "Free up disk space on the volume before retrying the upgrade."},
+        "needs_person": true,
+        "transient": false
+      }
+    },
+    {
+      "id": "fix-tests-failed-pytest",
+      "family": "model",
+      "eval_kind": "model",
+      "platform": "mac",
+      "live": true,
+      "failure": {
+        "what": "fix", "what_id": "404", "kind": "fix",
+        "subject": "repo:pypi:pydantic@billing-api", "item_source": "repo", "status": "failed", "actor": "user",
+        "command": ["pytest", "-q"], "exit_code": 1,
+        "error": "FAILED tests/test_invoice.py::test_serialize_decimal - AssertionError: expected str got Decimal",
+        "output": "============================= short test summary info ==============================\nFAILED tests/test_invoice.py::test_serialize_decimal - AssertionError: expected str got Decimal\n1 failed, 42 passed in 3.14s\n"
+      },
+      "item": {
+        "source": "repo", "package_id": "pydantic", "name": "pydantic",
+        "installed": "2.8.0", "available": "2.10.0", "ecosystem": "PyPI", "project": "billing-api"
+      },
+      "expected": {
+        "source": "model", "category": "tests_failed", "step_kind": "agent_prompt",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      },
+      "good_reply": {
+        "category": "tests_failed",
+        "cause": "Unit test serialization checks failed after upgrading pydantic in the fix branch.",
+        "confidence": "high",
+        "evidence": [{"source": "output", "ref": "", "line": "FAILED tests/test_invoice.py::test_serialize_decimal - AssertionError: expected str got Decimal"}],
+        "next_step": {"kind": "agent_prompt", "recipe": null, "runbook": null, "why": "Continue in your coding agent to update the failing test or serializer."},
+        "needs_person": true,
+        "transient": false
+      }
+    },
+    {
+      "id": "fix-dependency-conflict-eresolve",
+      "family": "model",
+      "eval_kind": "model",
+      "platform": "mac",
+      "live": true,
+      "failure": {
+        "what": "fix", "what_id": "405", "kind": "fix",
+        "subject": "repo:npm:react@web-portal", "item_source": "repo", "status": "needs_human", "actor": "user",
+        "command": ["npm", "install", "--package-lock-only"], "exit_code": 1,
+        "error": "npm error ERESOLVE unable to resolve dependency tree",
+        "output": "npm error code ERESOLVE\nnpm error ERESOLVE unable to resolve dependency tree\nnpm error Could not resolve dependency: peer react@\"^18.2.0\" from react-router-dom@6.26.0\n"
+      },
+      "item": {
+        "source": "repo", "package_id": "react", "name": "react",
+        "installed": "18.3.1", "available": "19.0.0", "ecosystem": "npm", "project": "web-portal"
+      },
+      "expected": {
+        "source": "model", "category": "dependency_conflict", "step_kind": "agent_prompt",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      },
+      "good_reply": {
+        "category": "dependency_conflict",
+        "cause": "Upgrading react conflicts with a peer dependency constraint in react-router-dom.",
+        "confidence": "high",
+        "evidence": [{"source": "output", "ref": "", "line": "Could not resolve dependency: peer react@\"^18.2.0\" from react-router-dom@6.26.0"}],
+        "next_step": {"kind": "agent_prompt", "recipe": null, "runbook": null, "why": "Use your coding agent to coordinate upgrading dependent packages together."},
+        "needs_person": true,
+        "transient": false
+      }
+    },
+    {
+      "id": "upstream-bottle-503",
+      "family": "model",
+      "eval_kind": "model",
+      "platform": "mac",
+      "live": false,
+      "failure": {
+        "what": "job", "what_id": "406", "kind": "upgrade",
+        "subject": "brew:ripgrep", "item_source": "brew", "status": "failed", "actor": "autopilot",
+        "command": ["brew", "upgrade", "--formula", "ripgrep"], "exit_code": 1,
+        "error": "Error: Failed to download resource ripgrep — HTTP 503 Service Unavailable",
+        "output": "==> Downloading ripgrep bottle\nError: Failed to download resource ripgrep — HTTP 503 Service Unavailable\n"
+      },
+      "item": {"source": "brew", "package_id": "ripgrep", "name": "ripgrep", "installed": "14.1.0", "available": "14.1.1"},
+      "expected": {
+        "source": "model", "category": "upstream_broken", "step_kind": "retry",
+        "runbook": null, "recipe": null, "needs_person": false, "transient": true
+      },
+      "good_reply": {
+        "category": "upstream_broken",
+        "cause": "The upstream package mirror returned HTTP 503 Service Unavailable.",
+        "confidence": "high",
+        "evidence": [{"source": "output", "ref": "", "line": "Failed to download resource ripgrep — HTTP 503 Service Unavailable"}],
+        "next_step": {"kind": "retry", "recipe": null, "runbook": null, "why": "Retry the upgrade after the upstream mirror recovers."},
+        "needs_person": false,
+        "transient": true
+      }
+    },
+    {
+      "id": "missing-c-compiler-toolchain",
+      "family": "model",
+      "eval_kind": "model",
+      "platform": "linux",
+      "live": false,
+      "failure": {
+        "what": "job", "what_id": "407", "kind": "upgrade",
+        "subject": "pip-global:cryptography", "item_source": "pip-global", "status": "failed", "actor": "user",
+        "command": ["python3", "-m", "pip", "install", "--upgrade", "cryptography==44.0.0"], "exit_code": 1,
+        "error": "error: linker 'cc' not found; install a C compiler toolchain",
+        "output": "Building wheel for cryptography (pyproject.toml)...\nerror: linker 'cc' not found; install a C compiler toolchain\nERROR: Failed building wheel for cryptography\n"
+      },
+      "item": {"source": "pip-global", "package_id": "cryptography", "name": "cryptography", "installed": "43.0.1", "available": "44.0.0"},
+      "expected": {
+        "source": "model", "category": "tool_missing", "step_kind": "none",
+        "runbook": null, "recipe": null, "needs_person": true, "transient": false
+      },
+      "good_reply": {
+        "category": "tool_missing",
+        "cause": "Building the native wheel failed because no C compiler linker is installed.",
+        "confidence": "high",
+        "evidence": [{"source": "output", "ref": "", "line": "error: linker 'cc' not found; install a C compiler toolchain"}],
+        "next_step": {"kind": "none", "recipe": null, "runbook": null, "why": "Install the system build toolchain before retrying the package upgrade."},
+        "needs_person": true,
+        "transient": false
+      }
+    }
+  ]
+}

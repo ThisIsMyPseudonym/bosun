@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 import triage_eval_loader as loader
+import triage_eval_runner as runner
 
 from bosun import actions, machine, mcp_server, recipes
 from bosun.store import Store
@@ -292,3 +293,36 @@ def test_offline_outage_eval_suite_achieves_100_percent():
         else:
             passed += 1
     assert passed == len(outage_cases) and not failures, "\n".join(failures)
+
+
+def test_offline_model_eval_suite_via_fake_cli_meets_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    model_cases = [c for c in loader.load_cases(loader.FIXTURES_DIR) if c.eval_kind == "model"]
+    assert len(model_cases) >= 5, f"expected >=5 unexplained model cases, got {len(model_cases)}"
+    summary = runner.run_offline_model_suite(tmp_path, model_cases, monkeypatch)
+    print(f"\n[offline-eval] {summary.line()}")
+    assert summary.invalid_steps == 0, "\n".join(summary.failures)
+    assert summary.accuracy >= runner.MODEL_ACCURACY_BAR, (
+        f"model offline eval below bar: {summary.line()}\n" + "\n".join(summary.failures)
+    )
+    assert summary.accuracy == 1.0 and not summary.failures, "\n".join(summary.failures)
+
+
+def test_offline_hostile_eval_suite_downgrades_hostile_and_keeps_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    hostile_cases = [c for c in loader.load_cases(loader.FIXTURES_DIR) if c.eval_kind == "hostile"]
+    assert len(hostile_cases) >= 4, f"expected >=4 hostile eval cases, got {len(hostile_cases)}"
+    bad_summary, good_summary = runner.run_offline_hostile_suite(tmp_path, hostile_cases, monkeypatch)
+    print(f"\n[offline-eval] {bad_summary.line()} | {good_summary.line()}")
+    assert bad_summary.invalid_steps == 0 and bad_summary.accuracy == 1.0, "\n".join(bad_summary.failures)
+    assert good_summary.invalid_steps == 0 and good_summary.accuracy == 1.0, "\n".join(good_summary.failures)
+
+
+def test_eval_score_threshold_enforcement_fails_below_bar():
+    low = runner.ScoreSummary(family="model", passed=3, total=5, invalid_steps=0, failures=("a", "b"))
+    assert low.accuracy == pytest.approx(0.6)
+    assert not low.meets(runner.MODEL_ACCURACY_BAR)
+    invalid = runner.ScoreSummary(family="model", passed=5, total=5, invalid_steps=1, failures=("bad step",))
+    assert not invalid.meets(runner.MODEL_ACCURACY_BAR)
+    ok = runner.ScoreSummary(family="model", passed=4, total=5, invalid_steps=0, failures=("miss",))
+    assert ok.meets(runner.MODEL_ACCURACY_BAR)
