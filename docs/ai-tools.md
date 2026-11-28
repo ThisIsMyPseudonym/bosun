@@ -223,7 +223,7 @@ BOSUN_LIVE_EVALS=1 uv run pytest tests/test_triage_evals.py -k live -s
 
 An automation is one owner-written rule: **when** a trigger fires, **if** its conditions hold, **do** one Bosun action. There are no branches, loops, or free-text expressions. Every field is chosen from a fixed list in **Automations** (sidebar, developer view).
 
-**What automations can do.** Triggers are a completed full refresh, a local schedule (daily or chosen weekdays at `HH:MM`), a stored triage verdict, or a waiting in-app update. Allowed actions are:
+**What automations can do.** Triggers are a completed full refresh, a local schedule (daily or chosen weekdays at `HH:MM`), a stored triage verdict, or a waiting in-app update. The in-app update trigger and its preset do nothing yet. They wait for project 4 (computer use for in-app updates) to add a reader. Allowed actions are:
 
 - **Runs on its own or asks first:** `refresh` (always `auto_upgrade: false`), `recheck_project`, `explain_item`, `upgrade`, `start_fix`, and `pin_mcp`.
 - **Runs on its own only:** `notify` (a code-built "What changed" summary line, no model call).
@@ -236,11 +236,11 @@ An automation is one owner-written rule: **when** a trigger fires, **if** its co
 - **What changed:** after a full refresh, add a code-built summary line to your notifications.
 - **Nightly Branch + test:** daily at `02:00`, run sandboxed Branch + test on Do-now items in a project you pick (never pushes).
 - **Retry when busy:** when a rules verdict marks a failed upgrade `busy_or_locked` and transient, retry that same item and version in 15 minutes.
-- **Offer in-app updates:** when an app has an in-app update waiting, offer to open it so its updater can run (always asks first).
+- **Offer in-app updates:** when an app has an in-app update waiting, offer to open it so its updater can run (always asks first). This preset does nothing until project 4 (computer use for in-app updates) adds a reader.
 
 **Grants and 90-day renewal.** Saving or enabling a runs-on-its-own `INSTALL` rule (`upgrade`, `start_fix`, `pin_mcp`) shows one sentence with its exact scope and requires checking the grant box. That grant is tied to a digest of the rule and expires after **90 days**; expired rules stop firing and show **Still want this?** with a one-click **Renew** button. `LOCAL` and `notify` grants do not expire. Editing or deleting a rule cancels its waiting firings and open offers while keeping history.
 
-**Offers (asks first).** Any `mode="ask"` rule—and every `Risk.SYSTEM` action—never runs on its own. When triggered, Bosun creates an **offer card** at the top of **Automations** and inside **Needs you** on **Today**, plus at most one notification when notifications are on. Each card shows code-built text naming the exact action, items, versions, input, and why it fired (never model prose). Clicking **Approve** re-checks the grant, kill switch, scope, and item guards, then spends a single-use approval (`approvals.py`) through `Actions.permit` so the action runs once. Unanswered offers expire after **24 hours** (or sooner if conditions no longer hold) and cannot be approved after expiry. Open offers are capped at 5 per rule and 20 in total.
+**Offers (asks first).** Any `mode="ask"` rule—and every `Risk.SYSTEM` action—never runs on its own. When triggered, Bosun creates an **offer card** at the top of **Automations** and inside **Needs you** on **Today**, plus at most one notification when notifications are on. Each card shows code-built text naming the action, items, versions, target, and why it fired (never raw input JSON or model prose). Clicking **Approve** re-checks the grant, kill switch, scope, and item guards, atomically claims the offer and its stored input, and spends a single-use approval (`approvals.py`) through `Actions.permit` so the action runs once. Unanswered offers expire after **24 hours** (or sooner if conditions no longer hold) and cannot be approved after expiry. Open offers are capped at 5 per rule and 20 in total.
 
 **Kill switch and CLI.** Click **Pause all automations** on the **Automations** page, or run:
 

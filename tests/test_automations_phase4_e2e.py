@@ -323,3 +323,17 @@ def test_in_app_update_preset_e2e_offer_approve_and_fixed_since_expiry(tmp_path,
     assert notify.is_on(st) is True
     assert len(notify._read_automation_queue(st, now=now + 20.0)) == 2
     assert autopilot.WAIT_DAYS == 0
+
+
+def test_docs_describe_real_offer_binding_and_in_app_update_placeholder():
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent
+    sec = " ".join((root / "docs" / "security.md").read_text(encoding="utf-8").split()).lower()
+    ai = " ".join((root / "docs" / "ai-tools.md").read_text(encoding="utf-8").split()).lower()
+
+    assert "atomic claim" in sec and "decide_offer" in sec
+    assert "not an owner-signed" in sec or "does not sign" in sec
+    assert "bound to that exact action and input digest" not in sec
+    assert "project 4" in ai and "do nothing" in ai and "reader" in ai
+

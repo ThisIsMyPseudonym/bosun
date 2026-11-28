@@ -212,11 +212,13 @@ Each item's details answer *"can someone hack my computer through this?"* from t
   re-checks the global kill switch (`bosun automations pause`), the rule's enabled state, its canonical grant
   digest, 90-day expiry on runs-on-its-own `INSTALL` grants, the action allow-list, the granted scope, and
   Autopilot's unattended guards (3-day release wait, 24-hour KEV hold, `hands_off`, `caskguard`, `storeguard`).
-  All automation write actions and `decide_offer` are `user_only`: agents, the assistant, triage, and other
+  All automation write actions and `decide_offer` are `user_only`. Agents, the assistant, triage, and other
   automations can never create, edit, pause, or approve them. Every `Risk.SYSTEM` action (`relaunch_app`,
-  `open_app`) and every asks-first rule creates a 24-hour expiring offer that runs once only after the owner
-  clicks **Approve**, spending a single-use `Approval` bound to that exact action and input digest. Triage
-  verdicts can only match structured fields; verdict prose never chooses an action or target.
+  `open_app`) and every asks-first rule creates an offer that expires after 24 hours. Nothing runs until you
+  click **Approve** in the dashboard. Inside your single `decide_offer` call, the server re-checks the rule and
+  guards, makes an atomic claim on the open offer and its stored input, and creates, approves, and spends one
+  `Approval` through `Actions.permit`. It is not an owner-signed digest. Triage verdicts only match structured
+  fields, and verdict prose never chooses an action or target.
 
 Known limit: Branch + test has no operating-system sandbox on Windows, or on Linux without `bwrap` and `socat`.
 There the allow-list of commands is the only limit, and a dependency's install script or a test still runs
