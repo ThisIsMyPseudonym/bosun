@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import logging
-import secrets
 import time
 import uuid
 from collections.abc import Callable
@@ -647,7 +646,7 @@ class Actions:
 
     def _permit_automation(self, spec: ActionSpec, ctx: ActionContext, body: BaseModel | None) -> Granted | None:
         from .automations import match as amatch, store as astore
-        from .automations.schema import ALLOWLIST, grant_digest, grant_expired
+        from .automations.schema import ALLOWLIST, grant_digest, grant_digest_matches, grant_expired
 
         if self.store is None:
             raise Forbidden(f"{spec.name} is refused for automation: no store")
@@ -663,7 +662,7 @@ class Actions:
             defn = astore.parse_def(row)
         except (ValueError, ValidationError):
             raise Forbidden(f"{spec.name} is refused: automation {aid} has an invalid definition") from None
-        if not secrets.compare_digest(str(row["grant_digest"] or ""), grant_digest(defn)):
+        if not grant_digest_matches(row["grant_digest"], grant_digest(defn)):
             raise Forbidden(f"{spec.name} is refused: automation {aid} grant does not match its current definition")
         if grant_expired(defn.action, defn.mode, row["granted_at"], now=ctx.now):
             raise Forbidden(f"{spec.name} is refused: automation {aid} grant has expired; renew it in the dashboard")

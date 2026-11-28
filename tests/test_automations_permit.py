@@ -152,3 +152,34 @@ def test_permit_enforces_grant_scope_expiry_pause_system_approval_and_blocks_use
         actions.permit(SPECS["refresh"], ActionContext(actor="automation:abc", surface="automation"), RefreshIn(auto_upgrade=False))
     with pytest.raises(Forbidden):
         actions.permit(SPECS["refresh"], ActionContext(actor="automation:9999", surface="automation"), RefreshIn(auto_upgrade=False))
+
+
+def test_non_ascii_grant_digest_is_refused_never_raises_type_error(tmp_path):
+    from bosun.automations.engine import Automator
+    from bosun.config import load_settings
+    from bosun.server import create_app
+
+    st = Store(tmp_path / "bosun.db")
+    now = time.time()
+    defn = AutomationDef(
+        name="Scan brew",
+        trigger=RefreshTrigger(kind="refresh"),
+        conditions=RefreshConditions(),
+        action="refresh",
+        scope=RefreshScope(only=("brew",)),
+        mode="run",
+    )
+    aid = astore.save(st, defn, enabled=True, grant_digest="café🔒", granted_by="user", now=now)
+    actions = Actions(store=st)
+    ctx = ActionContext(actor=f"automation:{aid}", surface="automation")
+    with pytest.raises(Forbidden):
+        actions.permit(SPECS["refresh"], ctx, RefreshIn(only=["brew"], auto_upgrade=False))
+
+    app = create_app(load_settings(), st, "t" * 32)
+    eng = Automator(st, load_settings(), app.state.actions)
+    fid = astore.insert_firing(st, aid, defn.name, "refresh", "snap:1", "na:1", status="scheduled", due=now, now=now)
+    assert fid is not None
+    rep = eng.tick(now=now + 1)
+    assert rep.failed == 0 and rep.errors == 0
+    row = astore.get_firing(st, fid)
+    assert row is not None and row["status"] == "refused"

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -26,6 +25,7 @@ from .schema import (
     ScheduleConditions,
     ScheduleTrigger,
     grant_digest,
+    grant_digest_matches,
     grant_expired,
     is_install_action,
 )
@@ -233,7 +233,7 @@ class Automator:
         self, aid: int, row: dict[str, Any], defn: AutomationDef, when: float,
     ) -> tuple[str, str] | None:
         """Return `(status, reason)` to stop this firing before execution, or None to proceed."""
-        if not secrets.compare_digest(str(row["grant_digest"] or ""), grant_digest(defn)):
+        if not grant_digest_matches(row["grant_digest"], grant_digest(defn)):
             return ("refused", "grant digest does not match current definition")
         if grant_expired(defn.action, defn.mode, row["granted_at"], now=when):
             return ("refused", "90-day INSTALL grant expired; renew in the dashboard")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 import time
 from typing import Any, Literal
 
@@ -276,6 +277,13 @@ def grant_digest(defn: AutomationDef) -> str:
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def grant_digest_matches(stored: Any, expected: str) -> bool:
+    """Constant-time UTF-8 byte comparison of a stored grant digest; non-ASCII or malformed values return False."""
+    if not isinstance(stored, str) or not stored:
+        return False
+    return secrets.compare_digest(stored.encode("utf-8"), expected.encode("utf-8"))
 
 
 def grant_expires_at(action: str, mode: str, granted_at: float | None) -> float | None:
