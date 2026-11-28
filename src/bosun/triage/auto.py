@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import logging
 import time
 from typing import Any
 
+from bosun import redact
 from bosun.registry import Conflict
 from bosun.store import Store
 from bosun.triage import model as tmodel
@@ -15,7 +17,9 @@ from bosun.triage import settings as tsettings
 from bosun.triage import store as tstore
 from bosun.triage.schema import FailureRecord, Verdict
 
+log = logging.getLogger(__name__)
 AUTO_MAX_AGE_S = 86400.0
+AUTO_OFF_REASON = "Automatic triage is off"
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,68 @@ def _mark_rest_skipped(store: Store, reason: str, when: float) -> int:
     return count
 
 
+def _abort_auto_off(
+    store: Store,
+    rec: FailureRecord,
+    sig: str,
+    previous: dict[str, Any] | None,
+    when: float,
+) -> tuple[str, int, float | None, str]:
+    has_rules = (
+        previous is not None
+        and previous.get("source") == "rules"
+        and previous.get("verdict") is not None
+        and previous.get("status") in ("done", "disputed")
+    )
+    if has_rules:
+        tstore.restore_or_fail(store, rec.failure, rec.trace_id, sig, previous, AUTO_OFF_REASON, now=when)
+        return "auto_off", 0, None, AUTO_OFF_REASON
+    tqueue.save_skipped(store, rec.failure, rec.trace_id, sig, AUTO_OFF_REASON, now=when)
+    return "auto_off", 1, None, AUTO_OFF_REASON
+
+
+def _finish_one_auto(
+    triager: Any,
+    rec: FailureRecord,
+    sig: str,
+    previous: dict[str, Any] | None,
+    outcome: tmodel.ModelOutcome,
+    when: float,
+    recheck_fn: Callable[[Verdict, FailureRecord], Verdict],
+) -> tuple[str, int, float | None, str]:
+    if not tsettings.read(triager.store).auto:
+        return _abort_auto_off(triager.store, rec, sig, previous, when)
+    if outcome.ok and outcome.verdict is not None:
+        origin_id = tstore.save_verdict(
+            triager.store, rec.failure, rec.trace_id, sig, "model", outcome.verdict,
+            triage_trace=outcome.triage_trace, now=when,
+        )
+        filled = tqueue.resolve_siblings(
+            triager.store, sig, origin_id, outcome.verdict,
+            exclude_failure=rec.failure, recheck_fn=recheck_fn, now=when,
+        )
+        return "done", filled, None, ""
+    if outcome.waiting_quota:
+        reset_at = outcome.earliest_reset if outcome.earliest_reset is not None else when + tqueue.UNDATED_RETRY_S
+        reason = outcome.reason or "Waiting for quota reset"
+        tqueue.save_waiting_quota(
+            triager.store, rec.failure, rec.trace_id, sig, reset_at, reason,
+            triage_trace=outcome.triage_trace, now=when,
+        )
+        sibs = tqueue.mark_siblings_waiting(triager.store, sig, rec.failure, reset_at, reason, now=when)
+        return "waiting_quota", 1 + sibs, reset_at, reason
+    if outcome.no_cli:
+        tqueue.save_skipped(triager.store, rec.failure, rec.trace_id, sig, outcome.reason, now=when)
+        return "no_cli", 1, None, outcome.reason
+    reason = outcome.reason or "Triage model call failed"
+    tstore.restore_or_fail(
+        triager.store, rec.failure, rec.trace_id, sig, None, reason,
+        triage_trace=outcome.triage_trace, now=when,
+    )
+    tqueue.fail_siblings(triager.store, sig, rec.failure, reason, triage_trace=outcome.triage_trace, now=when)
+    return "failed", 0, None, reason
+
+
 def _run_one_auto(
     triager: Any,
     rec: FailureRecord,
@@ -133,39 +199,24 @@ def _run_one_auto(
     recheck_fn: Callable[[Verdict, FailureRecord], Verdict],
 ) -> tuple[str, int, float | None, str]:
     triager._acquire(rec.trace_id)
+    previous: dict[str, Any] | None = None
     try:
+        previous = tstore.get(triager.store, rec.failure)
+        if not tsettings.read(triager.store).auto:
+            return _abort_auto_off(triager.store, rec, sig, previous, when)
         tstore.save_status(triager.store, rec.failure, rec.trace_id, sig, "running", now=when)
         outcome = tmodel.run_model(
             triager.store, triager.settings, rec, clicked=False, tokens=triager.tokens, now=lambda: when,
         )
-        if outcome.ok and outcome.verdict is not None:
-            origin_id = tstore.save_verdict(
-                triager.store, rec.failure, rec.trace_id, sig, "model", outcome.verdict,
-                triage_trace=outcome.triage_trace, now=when,
-            )
-            filled = tqueue.resolve_siblings(
-                triager.store, sig, origin_id, outcome.verdict,
-                exclude_failure=rec.failure, recheck_fn=recheck_fn, now=when,
-            )
-            return "done", filled, None, ""
-        if outcome.waiting_quota:
-            reset_at = outcome.earliest_reset if outcome.earliest_reset is not None else when + tqueue.UNDATED_RETRY_S
-            reason = outcome.reason or "Waiting for quota reset"
-            tqueue.save_waiting_quota(
-                triager.store, rec.failure, rec.trace_id, sig, reset_at, reason,
-                triage_trace=outcome.triage_trace, now=when,
-            )
-            sibs = tqueue.mark_siblings_waiting(triager.store, sig, rec.failure, reset_at, reason, now=when)
-            return "waiting_quota", 1 + sibs, reset_at, reason
-        if outcome.no_cli:
-            tqueue.save_skipped(triager.store, rec.failure, rec.trace_id, sig, outcome.reason, now=when)
-            return "no_cli", 1, None, outcome.reason
-        reason = outcome.reason or "Triage model call failed"
-        tstore.restore_or_fail(
-            triager.store, rec.failure, rec.trace_id, sig, None, reason,
-            triage_trace=outcome.triage_trace, now=when,
-        )
-        tqueue.fail_siblings(triager.store, sig, rec.failure, reason, triage_trace=outcome.triage_trace, now=when)
+        return _finish_one_auto(triager, rec, sig, previous, outcome, when, recheck_fn)
+    except Exception as exc:
+        log.exception("automatic triage failed unexpectedly for %s", rec.trace_id[:12])
+        reason = redact.text(f"Automatic triage failed unexpectedly ({exc.__class__.__name__}: {exc})").strip()[:300]
+        keep = previous if previous is not None and previous.get("source") == "rules" else None
+        try:
+            tstore.restore_or_fail(triager.store, rec.failure, rec.trace_id, sig, keep, reason, now=when)
+        except Exception:
+            log.exception("failed to record error for automatic triage %s", rec.trace_id[:12])
         return "failed", 0, None, reason
     finally:
         triager._release(rec.trace_id)
@@ -240,6 +291,9 @@ def drain_queued(
             break
         elif state == "no_cli":
             skip_n += extra + _mark_rest_skipped(store, reason, when)
+            break
+        elif state == "auto_off":
+            skip_n += extra
             break
         else:
             started += 1
