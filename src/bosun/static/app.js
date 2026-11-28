@@ -44,6 +44,7 @@ MC.render = function render() {
     : route.page === "packages" ? MC.views.packages(S)
     : route.page === "runs" ? MC.views.runs(S)
     : route.page === "usage" ? MC.views.usage(S)
+    : route.page === "automations" ? MC.views.automations(S)
     : route.page === "trace" ? MC.views.trace(S, route.id) : MC.views.today(S, scopes);
   // the page is rebuilt every few seconds while updates run: whoever had the keyboard keeps it
   const had = document.activeElement && $("#main").contains(document.activeElement) ? document.activeElement : null;

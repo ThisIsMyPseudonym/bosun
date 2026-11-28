@@ -57,6 +57,7 @@ MC.views.nav = function nav(S, scopes, route) {
     link("#/packages", "Packages", null, route.page === "packages", "packages"),
     link("#/runs", "Runs", null, route.page === "runs" || route.page === "trace", "runs"),
     link("#/usage", "AI usage", null, route.page === "usage", "usage"),
+    link("#/automations", "Automations", null, route.page === "automations", "bolt"),
     el("div", { class: "navgroup", text: "Machine" }),
     link(MC.route.href("scope", "pc"), MC.MACHINE.label, badge(scopes.pc), isCur("pc"), MC.MACHINE.kind === "mac" ? "laptop" : "machine"),
     el("div", { class: "navgroup", text: `Projects · ${scopes.active.length}` }),

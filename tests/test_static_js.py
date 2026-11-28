@@ -1017,3 +1017,70 @@ def test_runs_view_renders_actor_label_as_text():
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
+
+
+def test_automations_route_sidebar_developer_only_and_no_innerhtml():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    index_html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert '/static/automations.css' in index_html
+    assert '/static/automations.js' in index_html
+    auto_js_path = STATIC / "automations.js"
+    assert auto_js_path.is_file()
+    assert "innerHTML" not in code_only(auto_js_path.read_text(encoding="utf-8"))
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    nav_js = str(STATIC / "nav.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "",
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.location = {{ hash: "#/automations" }};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    const parsed = MC.route.parse();
+    if (parsed.page !== "automations") throw new Error("expected page automations, got " + JSON.stringify(parsed));
+
+    MC.needsYou = () => [];
+    MC.actions = {{ setView: () => {{}}, showIgnored: () => {{}} }};
+    eval(fs.readFileSync({json.dumps(nav_js)}, "utf8"));
+    const scopes = {{
+      pc: {{ id: "pc", kind: "pc", sum: {{ counts: {{ now: 0, plan: 0 }}, total: 0, kev: 0 }} }},
+      active: [], dormant: [], ignoredProjects: [],
+    }};
+    const S = {{ dormantOpen: false, showIgnored: false }};
+
+    MC.SIMPLE = false;
+    const devText = MC.views.nav(S, scopes, {{ page: "automations" }}).filter(Boolean).map((n) => n.textContent).join(" ");
+    if (!devText.includes("Automations")) throw new Error("developer nav missing Automations: " + devText);
+
+    MC.SIMPLE = true;
+    const simpleText = MC.views.nav(S, scopes, {{ page: "today" }}).filter(Boolean).map((n) => n.textContent).join(" ");
+    if (simpleText.includes("Automations")) throw new Error("simple nav must hide Automations: " + simpleText);
+
+    console.log("OK");
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"

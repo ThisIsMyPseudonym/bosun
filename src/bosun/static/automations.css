@@ -1,0 +1,4 @@
+/* Automations page: list, kill switch, 90-day renewal, editor and firing history */
+.automations { max-width: 1100px; }
+.automations .pagehead { margin-bottom: 14px; }
+.automations .pagehead h1 { margin: 4px 0 2px; font-size: 22px; }
