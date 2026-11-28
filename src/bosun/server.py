@@ -406,7 +406,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
 
     def _run_relaunch(app_id: str, job_id: int) -> None:
         job = store.job(job_id) or {}
-        with trace.run("relaunch", subject=app_id, trace_id=job.get("trace_id") or None) as run:
+        with trace.run("relaunch", subject=app_id, actor=job.get("actor") or None,
+                       trace_id=job.get("trace_id") or None, parent=job.get("parent_trace", "")) as run:
             try:
                 ok, message = relaunch.relaunch(app_id)
             except Exception as exc:
@@ -897,6 +898,9 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
         keys, held = list(body.keys), []
         if ctx.actor != "user":
             yours = goback.left_alone(store, [known[k] for k in body.keys])
+            auto_actor = registry.is_automation(ctx.actor)
+            prefs = store.prefs() if auto_actor else {}
+            skip = autopilot.hands_off(store, list(known.values())) if auto_actor else {}
             for k in body.keys:
                 until = autopilot.held_until(known[k])
                 if k in yours:  # an earlier copy was put back: installing the newer one again is the person's call
@@ -909,6 +913,14 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                     held.append({"key": k, "reason": f"This release is new: Bosun installs nothing unattended until it has "
                                  f"been on offer {autopilot.wait_label(known[k])} (about {time.strftime('%A %d %B', time.localtime(until))}). "
                                  "The user can update it now from the dashboard."})
+                elif auto_actor and k in skip:
+                    keys.remove(k)
+                    held.append({"key": k, "reason": f"Left to you: {skip[k]}"})
+                elif auto_actor and not autopilot.qualifies(known[k], prefs, skip):
+                    keys.remove(k)
+                    held.append({"key": k, "reason": "Does not qualify for unattended automation upgrades "
+                                 "(Autopilot rules apply: no major jumps, drivers/hardware, self-updating apps, "
+                                 "or ignored/snoozed items)."})
         # a password window needs you at the machine: only a person clicking in the dashboard gets one
         out = upgrader.start_many([item_from_dict(known[k]) for k in keys], allow_password=ctx.actor == "user",
                                   actor=None if ctx.actor == "user" else ctx.actor)
@@ -921,7 +933,8 @@ def create_app(s: Settings, store: Store | None = None, token: str | None = None
                 for item, job_id in zip(items, job_ids):
                     store.mark_job(job_id, "running")
                     job = store.job(job_id) or {}
-                    with trace.run("pin", subject=item["key"], trace_id=job.get("trace_id") or None) as run:
+                    with trace.run("pin", subject=item["key"], actor=job.get("actor") or None,
+                                   trace_id=job.get("trace_id") or None, parent=job.get("parent_trace", "")) as run:
                         try:
                             out = mcp_pin.pin(item, client, backed_up)
                             store.finish_job(job_id, "succeeded", out)
