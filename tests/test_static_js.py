@@ -1660,3 +1660,134 @@ def test_automations_editor_name_input_keeps_same_node_while_typing():
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert r.stdout.strip() == "OK"
+
+
+def test_automations_editor_opens_unrepresentable_rules_readonly_and_grant_includes_cadence():
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    ui_js = str(STATIC / "ui.js")
+    auto_js = str(STATIC / "automations.js")
+    editor_js = str(STATIC / "automations_editor.js")
+    script = f"""
+    const fs = require("fs");
+    function mkNode(tag) {{
+      return {{
+        tagName: tag.toUpperCase(), attrs: {{}}, style: {{}}, children: [], listeners: {{}},
+        _text: "", className: "", hidden: false, open: false, disabled: false, value: "", checked: false,
+        get textContent() {{ return this._text || this.children.map((c) => typeof c === "string" ? c : c.textContent).join(""); }},
+        set textContent(v) {{ this._text = String(v); this.children = []; }},
+        setAttribute(k, v) {{
+          this.attrs[k] = String(v);
+          if (k === "disabled") this.disabled = true;
+          if (k === "checked") this.checked = true;
+          if (k === "value") this.value = String(v);
+        }},
+        removeAttribute(k) {{
+          delete this.attrs[k];
+          if (k === "disabled") this.disabled = false;
+          if (k === "checked") this.checked = false;
+        }},
+        getAttribute(k) {{ return this.attrs[k] ?? null; }},
+        addEventListener(ev, fn) {{ (this.listeners[ev] = this.listeners[ev] || []).push(fn); }},
+        append(...kids) {{ for (const k of kids) this.children.push(k); }},
+        replaceChildren(...kids) {{ this.children = [...kids]; }},
+      }};
+    }}
+    globalThis.window = globalThis;
+    globalThis.alert = () => {{}};
+    globalThis.document = {{
+      querySelector: () => ({{ content: "tok" }}),
+      createElement: (tag) => mkNode(tag),
+      createElementNS: (_ns, tag) => mkNode(tag),
+    }};
+    eval(fs.readFileSync({json.dumps(ui_js)}, "utf8"));
+    MC.api = async () => ({{}});
+    MC.route = {{ parse: () => ({{ page: "automations" }}) }};
+    MC.render = () => {{}};
+    MC.ago = () => "1m ago";
+    MC.clock = () => "02:00";
+    MC.runHref = (id) => "#/runs/" + id;
+    eval(fs.readFileSync({json.dumps(auto_js)}, "utf8"));
+    eval(fs.readFileSync({json.dumps(editor_js)}, "utf8"));
+
+    const H = MC.automationsHelpers;
+    const allNodes = (n) => n ? [n, ...(n.children || []).filter((c) => c && typeof c === "object").flatMap(allNodes)] : [];
+    const projects = [{{ key: "p1", name: "orchard-api", active: true }}];
+
+    // Unrepresentable rules must open read-only with the note and no Save button
+    const uneditableRules = [
+      {{
+        id: 10, name: "Mon/Wed scan", enabled: false, sentence: "On Mon, Wed at 02:00, re-scan everything.",
+        trigger: {{ kind: "schedule", time: "02:00", days: ["mon", "wed"] }}, conditions: {{}},
+        action: "refresh", scope: {{ only: null }}, mode: "run",
+      }},
+      {{
+        id: 11, name: "Two refresh conditions", enabled: false, sentence: "After a full refresh, notify.",
+        trigger: {{ kind: "refresh" }}, conditions: {{ newly_exploited: true, any_failed: true, new_in_lanes: [] }},
+        action: "notify", scope: {{ digest: "what_changed" }}, mode: "run",
+      }},
+      {{
+        id: 12, name: "Plan lane condition", enabled: false, sentence: "After a full refresh, notify.",
+        trigger: {{ kind: "refresh" }}, conditions: {{ newly_exploited: false, any_failed: false, new_in_lanes: ["plan"] }},
+        action: "notify", scope: {{ digest: "what_changed" }}, mode: "run",
+      }},
+      {{
+        id: 13, name: "Two collectors", enabled: false, sentence: "After a full refresh, re-scan brew, repos.",
+        trigger: {{ kind: "refresh" }}, conditions: {{}},
+        action: "refresh", scope: {{ only: ["brew", "repos"] }}, mode: "run",
+      }},
+      {{
+        id: 14, name: "Verdict rule", enabled: false, sentence: "When a failure verdict arrives, upgrade.",
+        trigger: {{ kind: "verdict" }}, conditions: {{ transient: true }},
+        action: "upgrade", scope: {{ mode: "failed_item", keys: [] }}, mode: "run",
+      }},
+    ];
+    for (const r of uneditableRules) {{
+      let closed = 0;
+      const p = H.editorPanel(r, projects, false, () => {{ closed += 1; }}, () => {{}});
+      if (!p.textContent.includes("Edit isn't available for this automation here")) {{
+        throw new Error(`rule ${{r.id}} missing read-only note: ` + p.textContent);
+      }}
+      const nodes = allNodes(p);
+      if (nodes.some((n) => n.tagName === "BUTTON" && n.textContent === "Save")) {{
+        throw new Error(`rule ${{r.id}} must not render Save button`);
+      }}
+      if (nodes.some((n) => n.tagName === "SELECT" || n.tagName === "INPUT")) {{
+        throw new Error(`rule ${{r.id}} must not render editable controls`);
+      }}
+      const closeBtn = nodes.find((n) => n.tagName === "BUTTON");
+      if (!closeBtn) throw new Error(`rule ${{r.id}} missing Close button`);
+      for (const fn of closeBtn.listeners.click || []) fn();
+      if (closed !== 1) throw new Error(`rule ${{r.id}} Close did not invoke onCancel`);
+    }}
+
+    // Editable schedule rule: grant sentence includes trigger and cadence
+    const schedRule = {{
+      id: 20, name: "Weekday fix", enabled: true,
+      trigger: {{ kind: "schedule", time: "02:00", days: ["mon", "tue", "wed", "thu", "fri"] }},
+      conditions: {{ project: "p1", lane: "now" }},
+      action: "start_fix", scope: {{ project: "p1", lane: "now" }},
+      mode: "run", wait_s: 0, max_per_day: 6, cooldown_s: 900, model_jobs_per_day: 3,
+    }};
+    const p = H.editorPanel(schedRule, projects, false, () => {{}}, () => {{}});
+    const grantBox = allNodes(p).find((n) => n.className === "auto-grant");
+    if (!grantBox || !grantBox.textContent.includes("Weekdays") || !grantBox.textContent.includes("02:00")) {{
+      throw new Error("grant sentence missing schedule cadence/time: " + (grantBox && grantBox.textContent));
+    }}
+    const trigSel = allNodes(p).find((n) => n.attrs["aria-label"] === "Trigger");
+    trigSel.value = "refresh";
+    (trigSel.listeners.change || []).forEach((fn) => fn({{ target: trigSel }}));
+    if (!grantBox.textContent.includes("full refresh")) {{
+      throw new Error("grant sentence missing refresh trigger after switch: " + grantBox.textContent);
+    }}
+    console.log("OK");
+    """
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.stdout.strip() == "OK"

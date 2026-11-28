@@ -50,7 +50,43 @@ function cadenceKey(days) {
   if (joined === "mon,tue,wed,thu,fri") return "weekdays";
   if (joined === "mon") return "weekly_mon";
   if (joined === "sun") return "weekly_sun";
-  return "daily";
+  return null;
+}
+
+function editableConditions(trig, cond, scope, action) {
+  if (trig.kind === "refresh") {
+    const lanes = Array.isArray(cond.new_in_lanes) ? cond.new_in_lanes : [];
+    const active = (lanes.length ? 1 : 0) + (cond.newly_exploited ? 1 : 0) + (cond.any_failed ? 1 : 0);
+    return active <= 1 && (!lanes.length || (lanes.length === 1 && lanes[0] === "now"));
+  }
+  if (trig.kind !== "schedule" || cadenceKey(trig.days) === null) return false;
+  if (!PROJECT_ACTIONS.has(action)) return !cond.project && !cond.lane;
+  if (cond.project && scope.project && cond.project !== scope.project) return false;
+  if (cond.lane && !LANES.some(([k]) => k === cond.lane)) return false;
+  return !(cond.lane && scope.lane && cond.lane !== scope.lane);
+}
+
+function editableScope(action, scope) {
+  if (action === "refresh") {
+    const only = scope.only;
+    return only == null || (Array.isArray(only) && (!only.length || (only.length === 1 && COLLECTORS.some(([k]) => k === only[0]))));
+  }
+  if (action === "recheck_project") return scope.mode !== "failed_project";
+  if (SYSTEM_ACTIONS.has(action)) return APPS.some(([k]) => k === scope.app);
+  return true;
+}
+
+function isEditable(rule) {
+  if (!rule || !rule.id) return true;
+  const trig = rule.trigger || {};
+  const cond = rule.conditions || {};
+  const scope = rule.scope || {};
+  const action = rule.action || "";
+  if (!ACTIONS.some(([k]) => k === action)) return false;
+  if (!editableConditions(trig, cond, scope, action) || !editableScope(action, scope)) return false;
+  if (rule.max_per_day != null && !MAX_PER_DAY.includes(Number(rule.max_per_day))) return false;
+  if (rule.cooldown_s != null && !COOLDOWNS.some(([v]) => v === Number(rule.cooldown_s))) return false;
+  return rule.wait_s == null || WAIT_OPTS.some(([v]) => v === Number(rule.wait_s));
 }
 
 function initState(rule) {
@@ -67,7 +103,7 @@ function initState(rule) {
     name: r.name || "New automation",
     triggerKind: trig.kind === "schedule" ? "schedule" : "refresh",
     time: trig.time || "02:00",
-    cadence: cadenceKey(trig.days),
+    cadence: cadenceKey(trig.days) || "daily",
     refreshCond: cond.newly_exploited ? "kev" : cond.any_failed ? "failed" : (cond.new_in_lanes && cond.new_in_lanes.length) ? "now" : "any",
     action,
     mode,
@@ -85,17 +121,29 @@ function initState(rule) {
   };
 }
 
+function triggerPhrase(st) {
+  if (st.triggerKind === "schedule") {
+    const cad = CADENCES.find((c) => c[0] === st.cadence) || CADENCES[0];
+    return `${cad[1]} at ${st.time}`;
+  }
+  if (st.refreshCond === "now") return "After a full refresh when new items arrive in Do now";
+  if (st.refreshCond === "kev") return "After a full refresh when something is newly exploited";
+  if (st.refreshCond === "failed") return "After a full refresh when an update failed";
+  return "After every full refresh";
+}
+
 function scopeSentence(st, projects) {
+  const when = triggerPhrase(st);
   const projName = (projects.find((p) => p.key === st.project) || {}).name || st.project || "a chosen project";
   const cap = `at most ${st.maxPerDay} time${st.maxPerDay === 1 ? "" : "s"} a day`;
   if (st.action === "start_fix") {
-    return `Run Branch + test on ${st.lane} items in ${projName}, ${cap} (sandboxed, never pushes; Bosun's checks and 75% quota line still apply).`;
+    return `${when}: run Branch + test on ${st.lane} items in ${projName}, ${cap} (sandboxed, never pushes; Bosun's checks and 75% quota line still apply).`;
   }
-  if (st.action === "explain_item") return `Run 'Will this break?' on ${st.lane} items in ${projName}, ${cap}.`;
-  if (st.action === "recheck_project") return `Re-check project ${projName}, ${cap}.`;
-  if (st.action === "refresh") return `Re-scan ${st.collector || "all collectors"} without Autopilot, ${cap}.`;
-  if (st.action === "notify") return `Send a 'What changed' summary line after a refresh, ${cap}.`;
-  return `Offer to ${st.action.replace("_", " ")} ${st.app} (asks for your approval each time).`;
+  if (st.action === "explain_item") return `${when}: run 'Will this break?' on ${st.lane} items in ${projName}, ${cap}.`;
+  if (st.action === "recheck_project") return `${when}: re-check project ${projName}, ${cap}.`;
+  if (st.action === "refresh") return `${when}: re-scan ${st.collector || "all collectors"} without Autopilot, ${cap}.`;
+  if (st.action === "notify") return `${when}: send a 'What changed' summary line, ${cap}.`;
+  return `${when}: offer to ${st.action.replace("_", " ")} ${st.app} (asks for your approval each time).`;
 }
 
 function buildPayload(st) {
@@ -197,7 +245,18 @@ function buildGrantNodes(st, projects, isDemo, onUpdate) {
   ].filter(Boolean);
 }
 
+function readOnlyPanel(rule, onCancel) {
+  return el("section", { class: "panel auto-editor" },
+    el("h2", { text: rule.name || "Automation" }),
+    el("div", { class: "callout", text: "Edit isn't available for this automation here." }),
+    rule.sentence ? el("p", { class: "auto-sentence", text: rule.sentence }) : null,
+    rule.scope_sentence ? el("p", { class: "auto-meta", text: rule.scope_sentence }) : null,
+    el("div", { class: "auto-editor-actions" },
+      el("button", { class: "quiet", text: "Close", onclick: () => onCancel && onCancel() })));
+}
+
 function editorPanel(rule, projects, isDemo, onCancel, onSaved, existingState) {
+  if (!isEditable(rule)) return readOnlyPanel(rule, onCancel);
   const st = existingState || initState(rule);
   const host = el("section", { class: "panel auto-editor" });
   const gridHost = el("div", { class: "auto-grid" });
