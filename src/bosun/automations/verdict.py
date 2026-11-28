@@ -121,6 +121,33 @@ def load_failure_by_key(store: Store, failure: str, trace_id: str = "") -> Failu
         return None if row is None else tstore.record_from_row(db, row)
 
 
+def recorded_failure_target(store: Store, failure: str) -> tuple[bool, str, str]:
+    """Return `(found, item_key, project)` strictly from recorded `jobs`/`fixes`/`runs` rows."""
+    what, _, what_id = failure.partition(":")
+    with store._tx() as db:
+        if what == "job" and what_id.isdigit():
+            job = db.execute("SELECT item_key FROM jobs WHERE id = ?", (int(what_id),)).fetchone()
+            if job is None:
+                return False, "", ""
+            key = str(job["item_key"] or "")
+            snap = db.execute(
+                "SELECT project FROM snapshot_items WHERE item_key = ? ORDER BY snapshot_id DESC LIMIT 1", (key,),
+            ).fetchone() if key else None
+            return True, key, str(snap["project"] or "") if snap else ""
+        if what == "fix" and what_id.isdigit():
+            fix = db.execute("SELECT item_key, project FROM fixes WHERE id = ?", (int(what_id),)).fetchone()
+            if fix is None:
+                return False, "", ""
+            return True, str(fix["item_key"] or ""), str(fix["project"] or "")
+        if what == "run" and what_id:
+            run = db.execute("SELECT kind, subject FROM runs WHERE trace_id = ?", (what_id,)).fetchone()
+            if run is None:
+                return False, "", ""
+            proj = str(run["subject"] or "") if run["kind"] == "recheck-project" else ""
+            return True, "", proj
+    return False, "", ""
+
+
 def _recorded_target(db: sqlite3.Connection, rec: FailureRecord) -> tuple[str, str, str]:
     """Extract (item_key, project, available) strictly from recorded DB tables, never verdict prose."""
     item_key = ""
