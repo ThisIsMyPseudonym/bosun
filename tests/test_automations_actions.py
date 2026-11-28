@@ -235,3 +235,21 @@ def test_save_automation_preserves_enabled_and_paused_reason(tmp_path):
     r4 = user.post(f"/api/automations/{wc['id']}/enabled", json={"enabled": True}, headers=H)
     assert r4.status_code == 200
     assert r4.json()["paused_reason"] == ""
+
+
+def test_blank_or_whitespace_only_name_is_refused_with_400(tmp_path):
+    st = Store(tmp_path / "bosun.db")
+    app = create_app(load_settings(), st, TOKEN)
+    user = TestClient(app, base_url="http://127.0.0.1:8787", cookies=signed_in())
+
+    for bad_name in ("   ", "\t\n "):
+        r = user.post("/api/automations", json={
+            "name": bad_name,
+            "trigger": {"kind": "refresh"},
+            "conditions": {},
+            "action": "notify",
+            "scope": {"digest": "what_changed"},
+            "mode": "run",
+            "enabled": False,
+        }, headers=H)
+        assert r.status_code == 400, f"expected 400 for {bad_name!r}, got {r.status_code}: {r.text}"

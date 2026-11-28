@@ -224,6 +224,14 @@ class AutomationDef(_Strict):
     cooldown_s: int = Field(default=900, ge=0, le=86400)
     model_jobs_per_day: int = Field(default=3, ge=0, le=48)
 
+    @field_validator("name")
+    @classmethod
+    def _non_blank_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("name must not be blank")
+        return cleaned
+
     @model_validator(mode="before")
     @classmethod
     def _coerce_nested(cls, data: Any) -> Any:

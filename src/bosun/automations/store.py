@@ -69,6 +69,8 @@ def save(
     """Create or update an automation; updating cancels waiting firings/offers while preserving history."""
     when = time.time() if now is None else now
     name = redact.text(defn.name).strip()[:120]
+    if not name:
+        raise ValueError("automation name must not be blank")
     trig = _canon_json(defn.trigger.model_dump(mode="json"))
     cond = _canon_json(defn.conditions.model_dump(mode="json"))
     scope = _canon_json(defn.scope.model_dump(mode="json"))
@@ -120,15 +122,11 @@ def list_all(store: Store) -> list[dict[str, Any]]:
 def delete(store: Store, automation_id: int, *, now: float | None = None) -> bool:
     """Delete an automation, cancelling waiting firings/offers while preserving firing history."""
     from . import presets
-
     when = time.time() if now is None else now
     with store._tx(write=True) as db:
         row = db.execute("SELECT preset FROM automations WHERE id=?", (automation_id,)).fetchone()
-        db.execute(
-            "UPDATE automation_firings SET status='skipped', reason='automation deleted', finished=? "
-            "WHERE automation_id=? AND status IN ('scheduled', 'waiting_quota', 'offered')",
-            (when, automation_id),
-        )
+        db.execute("UPDATE automation_firings SET status='skipped', reason='automation deleted', finished=? "
+                   "WHERE automation_id=? AND status IN ('scheduled', 'waiting_quota', 'offered')", (when, automation_id))
         deleted = db.execute("DELETE FROM automations WHERE id=?", (automation_id,)).rowcount > 0
         if deleted and row and row["preset"]:
             presets.record_deleted_preset(db, str(row["preset"]))
